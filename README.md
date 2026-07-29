@@ -95,7 +95,10 @@ evals/
 - `verify_note_html.py` 检查章节、Claim ID、定位、LaTeX 与溯源；
 - `prepare_note_migration.py` 和 `update_existing_note.py` 分别负责无写入暂存与版本保护的既有笔记更新。
 
-Zotero 版本能力在运行时探测。当前版本若不支持受授权的本地 `PATCH`，更新脚本只接受通过本机环境变量提供的专用 Web API key；不会把 key 写入文件或日志，也不会直接编辑 SQLite。
+Zotero 版本能力在运行时探测：只有运行实例返回
+`Zotero-Server-ID` 时，更新脚本才会在实际写入阶段请求桌面端授权并执行
+版本保护的本地 `PATCH`；否则回退到通过本机环境变量提供的专用 Web
+API key。两类 key 都不会写入文件或日志，也不会直接编辑 SQLite。
 
 真实前向测试见
 [稀疏动力学识别与参数校准](evals/real-world/sparse-dynamics-2026-07-29.md)。

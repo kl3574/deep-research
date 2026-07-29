@@ -148,8 +148,10 @@ notes passed schema-9 staging and live version/content/parent preflight; one
 paper in the collection had no existing note. Only the SINDy note was
 scientifically reconstructed in full, while the other 27 migrations preserve
 the earlier content inside a new audited structure. No existing note was
-overwritten because the installed local API is read-only and no dedicated Web
-API credential was available. The migration remains staged under
+overwritten because Zotero 9.0.6 did not advertise a `Zotero-Server-ID`, and
+both `POST` and `OPTIONS` on `/api/local/authorize` returned 404; no dedicated
+Web API credential was available. This runtime evidence overrides generic
+documentation for the installed build. The migration remains staged under
 `~/.local/share/deep-research/zotero-private-staging`.
 
 ## Skill defects observed and changes made
@@ -169,6 +171,27 @@ API credential was available. The migration remains staged under
 | A paper's uncertainty formula can target a different estimator than its algorithm | Added an estimator/UQ consistency gate and direct derivation of the implemented estimator map |
 | Separately full-rank factors were treated as sufficient for an identifiable composed regression | Added direct rank/conditioning checks for the composed operator and explicit equivalence-class tests |
 | Nominal confidence, conditional quantile, and prediction levels were conflated | Added interval-type separation, quantile recomputation, and empirical-coverage checks |
+| Existing-note capability probing used `OPTIONS` for a stateful authorization route | Deferred local authorization to approved apply mode, keyed support on the runtime server ID, and added local version-guarded PATCH/readback tests |
+| The three skill entry files carried too much always-loaded instruction text | Kept hard gates in each entry, moved detail to selective references, and reduced every static invocation estimate below 900 tokens |
+
+## Post-iteration efficiency audit
+
+`plugin-eval` was run against the committed baseline and the revised working
+tree with the same local evaluator:
+
+| Skill | Baseline trigger / invoke | Revised trigger / invoke | Baseline -> revised score |
+| --- | ---: | ---: | ---: |
+| `deep-research` | 127 / 2540 | 90 / 896 | 67 D -> 81 C |
+| `learn-from-papers` | 119 / 2665 | 78 / 890 | 67 D -> 81 C |
+| `curate-research-to-zotero` | 125 / 1975 | 90 / 841 | 58 D -> 77 C |
+
+These are static estimates, not observed model-token measurements. The
+remaining grade penalty statically sums every reference, script, and test as
+“deferred” even though the skills load them selectively. Its Python-complexity
+heuristic also seeds each file's maximum from the decision count of the whole
+file, so the reported `136` is not a function-level cyclomatic-complexity
+measurement. Safety references, provenance logic, and tests were retained
+rather than removed to improve that score.
 
 ## Stopping and limits
 

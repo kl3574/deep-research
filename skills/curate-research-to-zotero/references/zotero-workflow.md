@@ -10,15 +10,25 @@ Use the installed Zotero integration and its documented routes. Probe capabiliti
 4. Require equality on library identity and collection key, and require item/file editability as needed.
 5. Abort the batch if the collection is missing, selection differs, or permissions are insufficient.
 
-Some Zotero local APIs are read-only and some connectors save to the currently selected target. Do not infer collection-creation or explicit-target capabilities. If a supported collection-create route is absent, ask the user to create/select the collection in the desktop UI, then repeat the readback gate.
+Local-API write support varies by the running Zotero build, while some
+connectors save only to the currently selected target. Do not infer
+collection-creation or explicit-target capabilities. If a supported
+collection-create route is absent, ask the user to create/select the collection
+in the desktop UI, then repeat the readback gate.
 
 Feature-probe existing-note updates instead of assuming that every Zotero
 release has the same local-API capabilities:
 
 1. inspect `GET /api/` for a per-instance `Zotero-Server-ID`;
-2. check for the documented local authorization route;
-3. use an authorized, version-guarded local `PATCH` only when both are present;
-4. otherwise use the official Zotero Web API with a dedicated key supplied
+2. treat an absent server ID as no supported local-write protocol in that
+   running instance;
+3. do not probe `/api/local/authorize` with `OPTIONS`: authorization is a
+   stateful `POST` that may show a user confirmation dialog;
+4. only in approved apply mode, request a local key with the server ID and use
+   a version-guarded local `PATCH`; never print or persist the returned key;
+5. for a multi-note batch, require a reusable authorization (`Always Allow`)
+   before the first mutation instead of consuming a single-use key partway;
+6. otherwise use the official Zotero Web API with a dedicated key supplied
    through a local environment variable, or stop for a manual Desktop update.
 
 For an existing child-note update, require the expected note key, parent key,
@@ -57,7 +67,9 @@ When the local Zotero version supports `/connector/saveItems` plus `/connector/s
 
 For a version-guarded existing-note migration, use
 [update_existing_note.py](../scripts/update_existing_note.py) in dry-run mode
-first. It never edits SQLite and requires `--yes` for a write.
+first. It supports an authorized local route when the runtime advertises a
+server ID and a Web API fallback when a dedicated key is available. It never
+edits SQLite, never stores either key, and requires `--yes` for a write.
 
 Never expose credentials. Do not use direct SQLite edits as an ordinary fallback.
 

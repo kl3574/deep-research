@@ -157,7 +157,12 @@ def validate_manifest(
             errors.append(f"{prefix}: source must be object with doi or canonical_url")
         else:
             doi = (source.get("doi") or "").strip() if isinstance(source.get("doi"), str) else ""
-            canonical = (source.get("canonical_url") or "").strip() if isinstance(source.get("canonical_url"), str) else ""
+            canonical_value = source.get("canonical_url")
+            canonical = (
+                (canonical_value or "").strip()
+                if isinstance(canonical_value, str)
+                else ""
+            )
             if not (doi or canonical or (isinstance(title, str) and title.strip() and isinstance(year, int))):
                 errors.append(f"{prefix}: source must include doi, canonical_url, or (title + year)")
 
@@ -286,9 +291,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("manifest", type=Path, help="Path to manifest JSON file.")
     parser.add_argument("--root", type=Path, default=Path("."), help="Base path for relative pdf paths.")
     parser.add_argument("--require-pdf", action="store_true", help="Require pdf object and file for every entry.")
-    parser.add_argument("--source-registry", type=Path, default=None, help="Optional source_registry file to align ids.")
+    parser.add_argument(
+        "--source-registry",
+        type=Path,
+        default=None,
+        help="Optional source_registry file to align ids.",
+    )
     parser.add_argument("--pdf-manifest", type=Path, default=None, help="Optional pdf_manifest file to align ids.")
-    parser.add_argument("--references-bib", type=Path, default=None, help="Optional references.bib file to align entry ids.")
+    parser.add_argument(
+        "--references-bib",
+        type=Path,
+        default=None,
+        help="Optional references.bib file to align entry ids.",
+    )
     parser.add_argument("--json", action="store_true", help="Output report in JSON.")
     return parser.parse_args()
 

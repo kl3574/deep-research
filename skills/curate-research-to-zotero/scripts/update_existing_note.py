@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Dry-run or version-safely PATCH existing Zotero child notes.
 
-Current stable Zotero releases may expose only a read-only local API. This
-script always validates against that local state first. It can then use the
-official Zotero Web API when a dedicated key is supplied through an environment
-variable. It never prints the key and never edits Zotero SQLite.
+The script validates every staged note against live local state before writing.
+When the running Zotero exposes the documented per-instance server ID, apply
+mode can request a local write key through Zotero's confirmation dialog. It can
+otherwise use the official Web API with a dedicated key supplied through an
+environment variable. It never prints or stores a key and never edits SQLite.
 """
 
 from __future__ import annotations
@@ -69,19 +70,95 @@ def get_json(url: str, headers: dict[str, str] | None = None) -> tuple[dict[str,
     return response_headers, json.loads(body.decode("utf-8"))
 
 
+def header_value(headers: dict[str, str], name: str) -> str | None:
+    wanted = name.casefold()
+    return next(
+        (value for key, value in headers.items() if key.casefold() == wanted),
+        None,
+    )
+
+
 def probe_local_write() -> dict[str, object]:
     status, headers, _ = request(f"{LOCAL_BASE}/api/")
-    server_id = headers.get("Zotero-Server-ID") or headers.get("zotero-server-id")
-    authorize_status, _, _ = request(
-        f"{LOCAL_BASE}/api/local/authorize",
-        method="OPTIONS",
-    )
+    server_id = header_value(headers, "Zotero-Server-ID")
     return {
         "api_status": status,
         "server_id_present": bool(server_id),
-        "authorize_route_status": authorize_status,
-        "supported": bool(server_id) and authorize_status not in {404, 405},
+        "server_id": server_id,
+        "authorization_probe": "deferred_until_apply",
+        "supported": status == 200 and bool(server_id),
     }
+
+
+def authorize_local(server_id: str, app_name: str) -> dict[str, object]:
+    status, response_headers, body = request(
+        f"{LOCAL_BASE}/api/local/authorize",
+        method="POST",
+        headers={
+            "Zotero-API-Version": "3",
+            "Zotero-Server-ID": server_id,
+        },
+        payload={"appName": app_name},
+        timeout=55,
+    )
+    if status == 403:
+        raise RuntimeError("local write authorization was denied")
+    if status == 404:
+        raise RuntimeError("running Zotero does not expose /api/local/authorize")
+    if status == 429:
+        retry_after = header_value(response_headers, "Retry-After")
+        suffix = f"; retry after {retry_after} seconds" if retry_after else ""
+        raise RuntimeError(f"local write authorization was rate-limited{suffix}")
+    if status != 200:
+        raise RuntimeError(f"local write authorization returned HTTP {status}")
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("local write authorization returned malformed JSON") from exc
+    key = payload.get("key") if isinstance(payload, dict) else None
+    if not isinstance(key, str) or not key:
+        raise RuntimeError("local write authorization returned no key")
+    return {
+        "api_key": key,
+        "remember": bool(payload.get("remember")),
+    }
+
+
+def local_headers(api_key: str, server_id: str) -> dict[str, str]:
+    return {
+        "Zotero-API-Key": api_key,
+        "Zotero-API-Version": "3",
+        "Zotero-Server-ID": server_id,
+    }
+
+
+def choose_route(
+    requested: str,
+    *,
+    local_supported: bool,
+    web_key_present: bool,
+) -> str | None:
+    if requested == "local":
+        return "local" if local_supported else None
+    if requested == "web":
+        return "web" if web_key_present else None
+    if local_supported:
+        return "local"
+    return "web" if web_key_present else None
+
+
+def unavailable_route_message(requested: str, api_key_env: str) -> str:
+    if requested == "local":
+        return (
+            "local write route unavailable: running Zotero exposes no "
+            "per-instance local write authorization"
+        )
+    if requested == "web":
+        return f"Web API write route unavailable: {api_key_env} is unset"
+    return (
+        "no supported write route: running Zotero exposes no per-instance "
+        f"local write authorization and {api_key_env} is unset"
+    )
 
 
 def selected_target() -> dict[str, object]:
@@ -280,7 +357,54 @@ def patch_remote_note(
     }
 
 
-def backup_remote(
+def patch_local_note(
+    group_id: int,
+    local: dict[str, object],
+    api_key: str,
+    server_id: str,
+) -> dict[str, object]:
+    note_key = str(local["note_key"])
+    headers = local_headers(api_key, server_id)
+    headers["If-Unmodified-Since-Version"] = str(local["local_version"])
+    status, _, body = request(
+        f"{LOCAL_BASE}/api/groups/{group_id}/items/{note_key}",
+        method="PATCH",
+        headers=headers,
+        payload={"note": local["new_html"]},
+    )
+    if status == 412:
+        raise RuntimeError(f"{note_key}: HTTP 412 concurrent modification; stopped")
+    if status == 401:
+        raise RuntimeError(
+            f"{note_key}: local key was rejected or already consumed; stopped"
+        )
+    if status != 204:
+        detail = body.decode("utf-8", errors="replace")[:300]
+        raise RuntimeError(f"{note_key}: local PATCH returned HTTP {status}: {detail}")
+
+    _, readback = get_json(
+        f"{LOCAL_BASE}/api/groups/{group_id}/items/{note_key}"
+    )
+    if not isinstance(readback, dict) or not isinstance(readback.get("data"), dict):
+        raise RuntimeError(f"{note_key}: malformed local readback")
+    readback_data = readback["data"]
+    if readback_data.get("parentItem") != local["parent_key"]:
+        raise RuntimeError(f"{note_key}: local readback parent changed")
+    readback_note = str(readback_data.get("note") or "")
+    readback_sha = sha256_text(readback_note)
+    if readback_sha != local["new_sha256"]:
+        raise RuntimeError(
+            f"{note_key}: local readback hash mismatch "
+            f"{readback_sha} != {local['new_sha256']}"
+        )
+    return {
+        "local_version": readback.get("version"),
+        "local_readback_sha256": readback_sha,
+        "local_verified": True,
+    }
+
+
+def backup_note(
     backup_dir: Path,
     note_key: str,
     version: int,
@@ -301,7 +425,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("manifest", type=Path)
     parser.add_argument("--note-key", action="append", default=[])
-    parser.add_argument("--route", choices=("auto", "web"), default="auto")
+    parser.add_argument(
+        "--route",
+        choices=("auto", "local", "web"),
+        default="auto",
+    )
     parser.add_argument("--api-key-env", default="ZOTERO_API_KEY")
     parser.add_argument("--backup-dir", type=Path)
     parser.add_argument("--yes", action="store_true")
@@ -332,10 +460,17 @@ def main() -> int:
         print(f"preflight failed: {exc}", file=sys.stderr)
         return EXIT_CONFLICT
 
-    api_key = os.environ.get(args.api_key_env, "")
-    route = "web" if api_key else None
-    if args.route == "web" and not api_key:
-        route = None
+    web_api_key = os.environ.get(args.api_key_env, "")
+    route = choose_route(
+        args.route,
+        local_supported=bool(capability["supported"]),
+        web_key_present=bool(web_api_key),
+    )
+    public_capability = {
+        key: value
+        for key, value in capability.items()
+        if key != "server_id"
+    }
     preview = {
         "mode": "apply" if args.yes else "dry_run",
         "target": {
@@ -344,7 +479,7 @@ def main() -> int:
             "collection_name": collection_name,
         },
         "selected_target": selected,
-        "local_write_capability": capability,
+        "local_write_capability": public_capability,
         "selected_route": route,
         "note_count": len(locals_verified),
         "notes": [
@@ -365,36 +500,79 @@ def main() -> int:
         return EXIT_OK if route else EXIT_CAPABILITY
 
     if not route:
-        print(
-            f"no supported write route: local PATCH unavailable and {args.api_key_env} is unset",
-            file=sys.stderr,
-        )
+        print(unavailable_route_message(args.route, args.api_key_env), file=sys.stderr)
         return EXIT_CAPABILITY
 
     backup_dir = (
         args.backup_dir.expanduser().resolve()
         if args.backup_dir
-        else manifest_path.parent / "web_api_backups"
+        else manifest_path.parent / f"{route}_api_backups"
     )
     results: list[dict[str, object]] = []
     try:
-        for local in locals_verified:
-            remote = verify_remote_entry(group_id, collection_key, local, api_key)
-            backup = backup_remote(
-                backup_dir,
-                str(local["note_key"]),
-                int(remote["version"]),
-                str(remote["old_html"]),
+        if route == "local":
+            server_id = capability.get("server_id")
+            if not isinstance(server_id, str) or not server_id:
+                raise RuntimeError("local route selected without a server ID")
+            authorization = authorize_local(
+                server_id,
+                "deep-research Zotero note migrator",
             )
-            result = patch_remote_note(group_id, local, remote, api_key)
-            results.append(
-                {
-                    "note_key": local["note_key"],
-                    "parent_key": local["parent_key"],
-                    "backup": backup,
-                    **result,
-                }
-            )
+            local_api_key = str(authorization["api_key"])
+            if len(locals_verified) > 1 and not authorization["remember"]:
+                raise RuntimeError(
+                    "batch update requires choosing 'Always Allow' in Zotero; "
+                    "no notes were changed"
+                )
+            for local in locals_verified:
+                backup = backup_note(
+                    backup_dir,
+                    str(local["note_key"]),
+                    int(local["local_version"]),
+                    str(local["old_html"]),
+                )
+                result = patch_local_note(
+                    group_id,
+                    local,
+                    local_api_key,
+                    server_id,
+                )
+                results.append(
+                    {
+                        "note_key": local["note_key"],
+                        "parent_key": local["parent_key"],
+                        "backup": backup,
+                        **result,
+                    }
+                )
+        else:
+            for local in locals_verified:
+                remote = verify_remote_entry(
+                    group_id,
+                    collection_key,
+                    local,
+                    web_api_key,
+                )
+                backup = backup_note(
+                    backup_dir,
+                    str(local["note_key"]),
+                    int(remote["version"]),
+                    str(remote["old_html"]),
+                )
+                result = patch_remote_note(
+                    group_id,
+                    local,
+                    remote,
+                    web_api_key,
+                )
+                results.append(
+                    {
+                        "note_key": local["note_key"],
+                        "parent_key": local["parent_key"],
+                        "backup": backup,
+                        **result,
+                    }
+                )
     except Exception as exc:
         print(
             json.dumps(

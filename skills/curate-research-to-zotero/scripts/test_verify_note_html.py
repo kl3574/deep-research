@@ -32,7 +32,9 @@ def valid_note(*, depth: str = "evidence") -> str:
 <h2>心智模型</h2><p>问题到方法再到证据与结论。</p>
 <h2>关键主张与证据</h2>
 <table><tr><th>Claim ID</th><th>性质</th><th>主张</th><th>证据与精确定位</th><th>条件</th><th>置信度与理由</th></tr>
-<tr><td>C1</td><td>source-stated</td><td>该式定义了模型。</td><td>正文 p.2 | Eq. (1)</td><td>给定假设成立。</td><td>high：原文公式直接支持。</td></tr></table>
+<tr><td>C1</td><td>source-stated</td><td>该式定义了模型。</td>
+<td>正文 p.2 | Eq. (1)</td><td>给定假设成立。</td>
+<td>high：原文公式直接支持。</td></tr></table>
 <h2>方法或推导</h2><p>输入经过算法得到输出。</p>
 <pre class="math">$$x=y$$</pre><p>符号：变量。作用：定义关系。假设：线性。定位：正文 p.2 | Eq. (1)。</p>
 <h2>结果</h2><p>实验得到阳性结果。</p>
