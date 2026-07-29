@@ -147,12 +147,36 @@ The existing-note migration is a separate outcome. Twenty-eight existing child
 notes passed schema-9 staging and live version/content/parent preflight; one
 paper in the collection had no existing note. Only the SINDy note was
 scientifically reconstructed in full, while the other 27 migrations preserve
-the earlier content inside a new audited structure. No existing note was
-overwritten because Zotero 9.0.6 did not advertise a `Zotero-Server-ID`, and
-both `POST` and `OPTIONS` on `/api/local/authorize` returned 404; no dedicated
-Web API credential was available. This runtime evidence overrides generic
-documentation for the installed build. The migration remains staged under
+the earlier content inside a new audited structure. Zotero 9.0.6 did not
+advertise the HTTP local-write server ID, but its official Desktop **Run
+JavaScript** surface provided a no-key route. A manifest-bound dry-run verified
+28/28 exact notes, parents, versions, backups, hashes, collection membership,
+and the selected target before a single Zotero database transaction updated
+all 28.
+
+Automatic sync stayed enabled. The runner waited for any active sync, acquired
+Zotero's in-memory indefinite sync barrier only for the transaction and
+readback, and released it in `finally`; the preference was `true` before and
+after. Independent local-API readback found 28/28 advanced item versions,
+correct parents and collection membership, and valid schema-9 notes. Twenty-
+seven notes were byte-exact. Zotero normalized the SINDy table DOM and
+whitespace, changing its stored hash, but all 217 text chunks, 13 headings, 15
+table rows/cells, four LaTeX blocks, links, images, and schema validation were
+equal. The original byte-only app report therefore remains as a transparent
+false-positive failure record, paired with
+`post_write_audit.json` under
 `~/.local/share/deep-research/zotero-private-staging`.
+
+After those writes, the hardened manifest-v2 stager was exercised again
+against the then-current collection without writing Zotero: 33/33 parents were
+enumerated, 32 each had exactly one child note and one explicitly bound PDF, one had
+no existing note, and zero had multiple notes or ambiguous PDFs. The
+independent local HTTP contract check matched all 33 parent, note, attachment,
+content-type, link-mode, and collection snapshots. The final apply runner was
+generated and syntax-checked but was not applied a second time; its new
+inventory guards were executed with mutation fixtures, while the DOM
+projection, sync watchdog, and transaction-outcome classifier were executed in
+browser/Node harnesses. The full Python suite passed 117 tests.
 
 ## Skill defects observed and changes made
 
@@ -172,6 +196,33 @@ documentation for the installed build. The migration remains staged under
 | Separately full-rank factors were treated as sufficient for an identifiable composed regression | Added direct rank/conditioning checks for the composed operator and explicit equivalence-class tests |
 | Nominal confidence, conditional quantile, and prediction levels were conflated | Added interval-type separation, quantile recomputation, and empirical-coverage checks |
 | Existing-note capability probing used `OPTIONS` for a stateful authorization route | Deferred local authorization to approved apply mode, keyed support on the runtime server ID, and added local version-guarded PATCH/readback tests |
+| Web-route dry-run treated key presence as sufficient | Added `/keys/current` group-write verification and full remote note/parent/hash/version preflight before any mutation |
+| HTTP write capability was mistaken for the only direct-App route | Added a manifest-bound Zotero Desktop Run JavaScript dry-run and single-transaction updater |
+| The user required automatic sync to remain enabled | Added an in-memory sync barrier that preserves the preference, waits for active sync, and always releases in `finally` |
+| Byte-only readback rejected Zotero's equivalent table/whitespace normalization | Added byte-exact-or-semantic readback with text, headings, tables, LaTeX, link, and image projections |
+| Compact Zotero `<br><strong>…` metadata caused a false SHA validation error | Made metadata validation treat HTML tags as semantic separators and added a regression fixture |
+| The stager emitted too little target identity for the Desktop renderer | Bound staging to the selected local library/collection ID plus the keyed group collection hierarchy and complete path |
+| Reusing a staging directory could overwrite approved backups or a prior manifest | Added reserved-directory checks and exclusive artifact/manifest creation; reruns require a new staging directory |
+| A custom Desktop report path could alias the manifest, staged HTML, PDF, or template | Added resolved-path collision rejection before runner generation |
+| A post-commit Zotero callback error could be mislabeled as rollback | Added an `onCommit` marker plus all-note old/new state inspection and an explicit unknown outcome |
+| Transaction-start scope checks covered notes but not target/path or parent collection membership | Re-resolved the target and reloaded every parent/collection inside the transaction before the first save |
+| Clearing Zotero's sync timeout could cancel a pending automatic sync or strand the barrier on error | Left existing timers intact and retained only the always-released in-memory barrier |
+| The renderer trusted stale manifest validation metadata and silently filtered ambiguous entries | Re-ran the schema-9 validator and file hashes at render time; invalid/multiple-note states now block apply |
+| Connector metadata could not prove local collection ID ↔ API group/key identity | Made Desktop the preferred exact-binding route; HTTP/Web apply now requires a separately verified and explicitly confirmed group/key |
+| HTTP/Web `204` followed by failed readback was reported as if nothing had changed | Added accepted-but-unverified exceptions and partial-write reports that name the current note and backup |
+| Parent-only inventory missed a newly added second child note between staging and apply | Upgraded to manifest v2 with complete parent/note/attachment snapshots, re-enumerated before apply and at Desktop transaction start |
+| Desktop and HTTP fallback interpreted the same v1 manifest with different gates | Unified both on v2, live schema validation, PDF magic/hash binding, and explicit rejection of v1 |
+| The first of multiple PDF children was silently treated as the full text | Multiple PDFs now block unless a reviewed parent-to-attachment map selects one; attachment parent, type, link mode, file magic, and hash are bound |
+| An arbitrary 64-hex token could satisfy the full-text hash check | Bound exactly one Chinese `全文SHA-256` field to the approved PDF hash and added adversarial fixtures |
+| Fixed-size item queries could silently prove only a collection prefix | Added advancing pagination and fail-closed duplicate/malformed-page checks |
+| A Zotero attachment could be redirected while an old PDF path still retained the approved bytes | Bound the current Desktop attachment path and local `/file/view/url` to the manifest path, then rechecked it immediately before mutation |
+| Web fallback could miss an unsynchronized local edit or local-only child change | Rechecked both local and remote inventories for every Web mutation and made the fresh local note version/hash the last pre-request gate |
+| Python's HTML stack treated `<br>` as a container and could miss a trailing second root | Added void-element and matched-stack handling, exact one-root enforcement, and rejection of active elements, event handlers, and control-obfuscated active URLs |
+| A timeout or HTTP 5xx left mutation outcome ambiguous | Classified transport/5xx outcomes by verified readback and reported an explicit unknown state when readback could not decide |
+| Same-version new content could be misclassified as a committed Desktop write | Required every committed readback and transaction-outcome classification to advance beyond the old item version |
+| A mistyped curated-override note key silently fell back to a generic wrapper | Validated every override key/path and rejected any override not consumed by exactly one eligible live note |
+| Deleted objects or an unavailable PDF could survive into a half-bound staging manifest | Rejected deleted parents/children and made a readable local PDF with magic bytes, path, attachment identity, and hash mandatory |
+| A reusable or group-writable staging tree exposed path-alias and replacement risk | Required a current-user, non-group/other-writable fresh root; reserved directories and files are exclusively created with no-follow leaf writes |
 | The three skill entry files carried too much always-loaded instruction text | Kept hard gates in each entry, moved detail to selective references, and reduced every static invocation estimate below 900 tokens |
 
 ## Post-iteration efficiency audit
@@ -183,13 +234,13 @@ tree with the same local evaluator:
 | --- | ---: | ---: | ---: |
 | `deep-research` | 127 / 2540 | 90 / 896 | 67 D -> 81 C |
 | `learn-from-papers` | 119 / 2665 | 78 / 890 | 67 D -> 81 C |
-| `curate-research-to-zotero` | 125 / 1975 | 90 / 841 | 58 D -> 77 C |
+| `curate-research-to-zotero` | 125 / 1975 | 90 / 891 | 58 D -> 77 C |
 
 These are static estimates, not observed model-token measurements. The
 remaining grade penalty statically sums every reference, script, and test as
 “deferred” even though the skills load them selectively. Its Python-complexity
 heuristic also seeds each file's maximum from the decision count of the whole
-file, so the reported `136` is not a function-level cyclomatic-complexity
+file, so the reported `395` is not a function-level cyclomatic-complexity
 measurement. Safety references, provenance logic, and tests were retained
 rather than removed to improve that score.
 

@@ -16,8 +16,94 @@ collection-creation or explicit-target capabilities. If a supported
 collection-create route is absent, ask the user to create/select the collection
 in the desktop UI, then repeat the readback gate.
 
-Feature-probe existing-note updates instead of assuming that every Zotero
-release has the same local-API capabilities:
+For existing-note updates, Zotero Desktop's official
+[**Tools → Developer → Run JavaScript** surface](https://www.zotero.org/support/dev/client_coding/javascript_api)
+is a no-key route when the user can paste and run the generated script in the
+app. Prefer it for an approved local batch because all notes can be rechecked
+and saved inside one Zotero database transaction:
+
+1. stage and validate migration manifest v2, including `group_id`,
+   `library_id`, `library_name`, `local_collection_id`, `collection_key`, and
+   the complete `collection_path`; the staging script derives these from both
+   the keyed group collection hierarchy and the currently selected Desktop
+   target, and refuses a mismatch. It paginates instead of accepting a
+   100-item prefix and snapshots every live collection parent plus each
+   parent's child-note and attachment keys;
+2. bind each staged note to one verified local PDF attachment, its parent,
+   link mode, PDF magic bytes, and SHA-256. Multiple PDF children are
+   ambiguous and block staging unless an approved JSON
+   `parent_key -> attachment_key` map is supplied with
+   `--pdf-attachment-map`; never select the first API result silently;
+3. keep exact original-HTML backups and their SHA-256 values outside the public
+   repository. Use a fresh directory owned by the current user and not writable
+   by group/other users; reserved subdirectories and every artifact are created
+   exclusively, and a missing, deleted, unreadable, or non-PDF source blocks
+   staging instead of producing a partially bound apply candidate;
+4. generate a manifest-hash-bound dry-run script:
+
+   ```bash
+   python scripts/render_zotero_desktop_runner.py /absolute/migration_manifest.json
+   ```
+
+5. keep the approved collection selected, paste the generated code into Run
+   JavaScript, and run it; inspect the JSON report written beside the manifest;
+6. generate the apply runner:
+
+   ```bash
+   python scripts/render_zotero_desktop_runner.py \
+     /absolute/migration_manifest.json \
+     --apply
+   ```
+
+   Add `--require-auto-sync-enabled` when the user's approved invariant is that
+   automatic sync must remain on.
+
+7. apply only after the dry-run verifies every note, parent, complete child
+   inventory, approved attachment/PDF, old backup, staged schema-9 HTML,
+   version, collection membership, and exact selected target. The renderer
+   reruns the schema validator and requires the uniquely labelled Chinese
+   `全文SHA-256` field to equal the file hash. It also requires the attachment's
+   current `getFilePathAsync()` result to equal the manifest PDF path; a
+   redirected attachment cannot pass merely because the old file still
+   exists. The runner re-enumerates the
+   collection and every parent's notes and attachments before the batch and
+   again at transaction start, so a newly added second note blocks rather than
+   bypasses ambiguity handling. It rechecks all live notes inside one
+   transaction, rolls
+   back on an in-transaction failure, rechecks parent membership and target
+   identity again at transaction start, and performs committed readback. If a
+   post-commit callback throws, it inspects all notes and reports
+   committed/rolled-back/unknown instead of assuming rollback. It waits for an
+   active sync to finish, uses Zotero's in-memory
+   `Sync.Runner.delayIndefinite()` barrier only across the transaction and
+   readback, leaves any existing automatic-sync timer intact, then releases the
+   barrier in `finally`; an idempotent watchdog also releases a stuck lease,
+   and lease expiry is a non-success outcome. The persistent automatic-sync
+   preference is never changed, is checked again at transaction start and
+   completion, and is reported before/after;
+8. independently read back through the local API, update the manifest from
+   observed state, verify that the original automatic-sync preference was
+   preserved, and confirm the synchronized state. If sync was intentionally
+   paused outside this runner, restore it before the final synchronization
+   check.
+
+Do not paste `zotero_desktop_note_migration.js` directly: it is a template and
+has no bound manifest. A dry-run writes only its diagnostic report, not Zotero
+data. The renderer rejects a report path that aliases the manifest, staged
+HTML, a source PDF, or the runner template, and it will not overwrite an
+existing evidence report. The App runner repeats the fresh-path check before
+the batch and before persistence; if persistence itself fails, it returns the
+full report in the Run JavaScript result pane. Zotero's `setNote()` trims outer
+whitespace, so the report records both
+the staged-source SHA-256 and the expected stored SHA-256 when they differ.
+Zotero may also normalize valid table markup and source whitespace. Accept a
+non-byte-exact readback only when a deterministic DOM projection preserves the
+schema root, ordered text chunks, headings, table rows/cells, LaTeX blocks,
+links, and images; record both hashes and the normalization. Never relax a
+content, parent, collection, item-type, deletion, or version check.
+
+Feature-probe HTTP/API updates instead of assuming that every Zotero release
+has the same local-API capabilities:
 
 1. inspect `GET /api/` for a per-instance `Zotero-Server-ID`;
 2. treat an absent server ID as no supported local-write protocol in that
@@ -29,7 +115,43 @@ release has the same local-API capabilities:
 5. for a multi-note batch, require a reusable authorization (`Always Allow`)
    before the first mutation instead of consuming a single-use key partway;
 6. otherwise use the official Zotero Web API with a dedicated key supplied
-   through a local environment variable, or stop for a manual Desktop update.
+   through a local environment variable, use the Desktop runner above, or
+   stop.
+
+For the Web route, dry-run must authenticate with `GET /keys/current`, verify
+read/write access to the exact group, and preflight every selected remote note,
+parent, collection membership, old-content hash, and object version before the
+first mutation. Do not treat the mere presence of an environment variable as a
+permission check.
+
+The Connector's selected-target response exposes a local numeric collection ID
+and tree path but not a trustworthy `group_id`/collection-key binding.
+Therefore the HTTP/Web updater separately resolves the explicit group/key
+hierarchy and shows both halves in dry-run, but refuses apply by default. Only
+after the user explicitly approves the displayed `group_id` and
+`collection_key` as the authoritative API target may apply add:
+
+```bash
+python scripts/update_existing_note.py /absolute/migration_manifest.json \
+  --yes \
+  --confirm-explicit-api-target
+```
+
+This flag acknowledges the missing local-ID-to-key binding; it does not skip
+any note, parent, path, permission, hash, version, backup, or readback check.
+Prefer the Desktop runner whenever the user can operate the app because it
+binds the local collection ID and key to the same live collection object.
+HTTP/Web batches have no cross-object transaction: the updater therefore
+accepts the same manifest v2 contract as the Desktop renderer, recomputes the
+PDF and staged-note validation instead of trusting summary metadata, and
+revalidates both local and remote explicit collections plus their full
+parent/child inventories around each Web mutation. Immediately before the
+request, it resolves the live local attachment file URL, re-hashes that file,
+and re-reads the local note's type, parent, version, and old-content hash. This
+blocks an unsynchronized local edit rather than letting a stale remote PATCH
+create a sync conflict. It stops on the first conflict and must report an accepted or
+unknown current write separately from previously verified results. Manifest
+v1 is rejected rather than interpreted with weaker fallback semantics.
 
 For an existing child-note update, require the expected note key, parent key,
 old content hash, new content hash, exact collection membership, an old-HTML

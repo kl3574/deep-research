@@ -23,7 +23,7 @@ Preview the exact library name/ID, collection path/key, batch decisions/counts, 
 Load [zotero-workflow.md](references/zotero-workflow.md), capability-probe, and dry-run:
 
 - New parents/PDFs/notes: use a documented Connector/local route; use [import_zotero_bundle.py](scripts/import_zotero_bundle.py) only when supported.
-- Existing notes: stage the migration with [prepare_note_migration.py](scripts/prepare_note_migration.py), then dry-run [update_existing_note.py](scripts/update_existing_note.py), which makes the pre-write backup. Use local update only with the advertised server ID and user authorization; otherwise use the official Web API with a dedicated environment key, or stop. Require expected parent/note keys, old/new hashes, collection, backup, and version guard; stop on concurrent change.
+- Existing notes: stage manifest v2 with [prepare_note_migration.py](scripts/prepare_note_migration.py). When the user can operate Zotero Desktop, prefer the manifest-bound [Run JavaScript workflow](references/zotero-workflow.md) for a no-key dry-run and one-transaction batch; otherwise dry-run [update_existing_note.py](scripts/update_existing_note.py) and use only its capability-probed local or Web route after the user explicitly confirms the displayed API group/key target. Require exact target/path, complete parent/child inventories, one approved PDF attachment and file hash, parent/note keys, old/new hashes, verified backups, and version guards; stop on concurrent change.
 
 Never expose credentials, edit Zotero SQLite, create duplicate parents as an update workaround, or assume parent success means child success. Bound retries.
 
