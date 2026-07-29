@@ -21,7 +21,14 @@ TEMPLATE_PATH = Path(__file__).with_name("zotero_desktop_note_migration.js")
 def extract_js_function(start_marker: str, end_marker: str) -> str:
     source = TEMPLATE_PATH.read_text(encoding="utf-8")
     start = source.index(start_marker)
-    end = source.index(end_marker, start)
+    end = source.find(end_marker, start)
+    if end == -1:
+        next_function_start = source.find("\nasync function ", start + len(start_marker))
+        if next_function_start == -1:
+            raise ValueError(
+                f"Unable to locate end of JS function block {start_marker!r}"
+            )
+        end = next_function_start
     return source[start:end]
 
 
@@ -108,7 +115,9 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
 
         self.assertNotIn(module.SENTINEL, rendered)
         self.assertIn('"apply": false', rendered)
-        self.assertIn('"expectedNoteCount": 1', rendered)
+        self.assertIn('"expectedInventoryNoteCount": 1', rendered)
+        self.assertIn('"expectedMutationCount": 1', rendered)
+        self.assertIn('"expectedMutationKeys": ["ABCDEFGH"]', rendered)
         self.assertIn(manifest_sha256, rendered)
         self.assertIn("const migrationReport = await runMigration();", rendered)
 
@@ -268,8 +277,1507 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
             entry["new_sha256"] = module.sha256_bytes(new_path.read_bytes())
             manifest.write_text(json.dumps(payload), encoding="utf-8")
 
-            with self.assertRaisesRegex(ValueError, "normalizes to the existing note"):
+            with self.assertRaisesRegex(
+                ValueError,
+                "staged note normalizes to the existing note",
+            ):
                 module.load_and_validate_manifest(manifest)
+
+    def test_accepts_unchanged_verified_without_noop_rejection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            manifest = self.manifest(directory)
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+            entry = payload["entries"][0]
+            pdf_sha = module.sha256_bytes(Path(payload["entries"][0]["pdf_path"]).read_bytes())
+            old_note = valid_note().replace(
+                "a" * 64,
+                pdf_sha,
+            )
+            entry["status"] = "unchanged_verified"
+            entry["old_path"] = str(directory / "old.html")
+            entry["new_path"] = str(directory / "new.html")
+            Path(entry["old_path"]).write_text(old_note, encoding="utf-8")
+            Path(entry["new_path"]).write_text(old_note, encoding="utf-8")
+            entry["old_sha256"] = module.sha256_bytes(
+                Path(entry["old_path"]).read_bytes()
+            )
+            entry["new_sha256"] = module.sha256_bytes(
+                Path(entry["new_path"]).read_bytes()
+            )
+            manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+            raw, data, inventory_count, mutation_count, mutation_keys = (
+                module.load_and_validate_manifest(manifest)
+            )
+
+            self.assertEqual(raw, manifest.read_bytes())
+            self.assertEqual(data["entries"][0]["status"], "unchanged_verified")
+            self.assertEqual(inventory_count, 1)
+            self.assertEqual(mutation_count, 0)
+            self.assertEqual(mutation_keys, [])
+
+    def test_rejects_unchanged_verified_with_hash_divergence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            manifest = self.manifest(directory)
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+            entry = payload["entries"][0]
+            entry["status"] = "unchanged_verified"
+            entry["old_path"] = str(directory / "old.html")
+            entry["new_path"] = str(directory / "new.html")
+            old_note = valid_note().replace(
+                "a" * 64,
+                module.sha256_bytes(Path(entry["pdf_path"]).read_bytes()),
+            )
+            new_note = old_note.replace("</div>", "<span>changed</span></div>")
+            Path(entry["old_path"]).write_text(old_note, encoding="utf-8")
+            Path(entry["new_path"]).write_text(new_note, encoding="utf-8")
+            entry["old_sha256"] = module.sha256_bytes(Path(entry["old_path"]).read_bytes())
+            entry["new_sha256"] = module.sha256_bytes(Path(entry["new_path"]).read_bytes())
+            manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "unchanged note hashes are inconsistent",
+            ):
+                module.load_and_validate_manifest(manifest)
+
+    @unittest.skipUnless(NODE, "Node.js is required for runner execution tests")
+    def test_run_migration_with_staged_and_unchanged_calls_transaction_for_staged_only(
+        self,
+    ) -> None:
+        function_source = extract_js_function(
+            "async function runMigration",
+            "\nawait assertFreshReportPath",
+        )
+        manifest = json.dumps(
+            {
+                "manifest_version": "2",
+                "write_performed": False,
+                "target": {
+                    "group_id": 1234567,
+                    "library_id": 1234567,
+                    "library_name": "PRIVATE_ZOTERO_TARGET",
+                    "local_collection_id": 27,
+                    "collection_key": "TEST0001",
+                    "collection_name": "PRIVATE_ZOTERO_TARGET",
+                    "collection_path": [
+                        "PRIVATE_ZOTERO_TARGET",
+                        "PRIVATE_ZOTERO_TARGET",
+                        "PRIVATE_ZOTERO_TARGET",
+                    ],
+                },
+                "collection_item_inventory": ["HGFEDCBA", "PARENT12"],
+                "entries": [
+                    {
+                        "status": "staged_verified",
+                        "note_key": "STAGE001",
+                        "parent_key": "HGFEDCBA",
+                        "expected_parent_key": "HGFEDCBA",
+                        "child_note_inventory": ["STAGE001"],
+                        "child_attachment_inventory": ["PDFATTA1"],
+                        "note_version": 1,
+                        "old_path": "/tmp/stage.old.html",
+                        "new_path": "/tmp/stage.new.html",
+                        "old_sha256": "a" * 64,
+                        "new_sha256": "b" * 64,
+                        "pdf_path": "/tmp/stage.pdf",
+                        "pdf_sha256": "c" * 64,
+                        "pdf_attachment_key": "PDFATTA1",
+                        "pdf_attachment_link_mode": "linked_file",
+                        "validation_summary": {"schema_version": "9"},
+                        "validation_errors": [],
+                    },
+                    {
+                        "status": "unchanged_verified",
+                        "note_key": "NOOP0001",
+                        "parent_key": "PARENT12",
+                        "expected_parent_key": "PARENT12",
+                        "child_note_inventory": ["NOOP0001"],
+                        "child_attachment_inventory": ["PDFATTB1"],
+                        "note_version": 1,
+                        "old_path": "/tmp/unchanged.old.html",
+                        "new_path": "/tmp/unchanged.new.html",
+                        "old_sha256": "d" * 64,
+                        "new_sha256": "d" * 64,
+                        "pdf_path": "/tmp/unchanged.pdf",
+                        "pdf_sha256": "f" * 64,
+                        "pdf_attachment_key": "PDFATTB1",
+                        "pdf_attachment_link_mode": "linked_file",
+                        "validation_summary": {"schema_version": "9"},
+                        "validation_errors": [],
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        )
+        result = run_node_json(
+            textwrap.dedent(
+                f"""
+                const manifestText = {manifest!r};
+                function assertion(condition, message, details) {{
+                  if (!condition) {{
+                    const error = new Error(message);
+                    error.details = details;
+                    throw error;
+                  }}
+                }}
+                function exactArrayEqual(left, right) {{
+                  return Array.isArray(left)
+                    && Array.isArray(right)
+                    && left.length === right.length
+                    && left.every((value, index) => value === right[index]);
+                }}
+                function validatedKeyInventory(value, label, options) {{
+                  options = options || {{}};
+                  assertion(Array.isArray(value), `${{label}} is not an array`);
+                  assertion(
+                    !options.nonempty || value.length > 0,
+                    `${{label}} is empty`,
+                  );
+                  const keys = value.map(key => String(key || ""));
+                  assertion(
+                    keys.every(key => /^[A-Z0-9]{{8}}$/.test(key)),
+                    `${{label}} contains an invalid item key`,
+                  );
+                  assertion(
+                    exactArrayEqual(
+                      keys,
+                      [...keys].sort(),
+                    ) && new Set(keys).size === keys.length,
+                    `${{label}} must be sorted and duplicate-free`,
+                  );
+                  return keys;
+                }}
+                function validateManifestContract(manifest) {{
+                  const collectionItemInventory = validatedKeyInventory(
+                    manifest.collection_item_inventory,
+                    "collection_item_inventory",
+                    {{ nonempty: true }},
+                  );
+                  assertion(Array.isArray(manifest.entries), "manifest entries are missing");
+                  assertion(
+                    manifest.entries.every(
+                      entry => entry && typeof entry === "object",
+                    ),
+                    "manifest contains a non-object entry",
+                  );
+                  const parentKeys = manifest.entries.map(entry =>
+                    String(entry.parent_key || ""),
+                  );
+                  assertion(
+                    parentKeys.length === collectionItemInventory.length
+                      && new Set(parentKeys).size === collectionItemInventory.length,
+                    "manifest entries do not exactly cover collection_item_inventory",
+                  );
+                  const allowedStatuses = new Set([
+                    "staged_verified",
+                    "unchanged_verified",
+                    "staged_invalid",
+                    "no_existing_note",
+                    "blocked_multiple_notes",
+                    "blocked_multiple_pdfs",
+                  ]);
+                  for (const entry of manifest.entries) {{
+                    const parentKey = String(entry.parent_key || "");
+                    assertion(
+                      allowedStatuses.has(entry.status),
+                      `${{parentKey}}: unsupported migration status`,
+                    );
+                    const childNoteInventory = validatedKeyInventory(
+                      entry.child_note_inventory,
+                      `${{parentKey}}: child_note_inventory`,
+                    );
+                    const childAttachmentInventory = validatedKeyInventory(
+                      entry.child_attachment_inventory,
+                      `${{parentKey}}: child_attachment_inventory`,
+                    );
+                    if (
+                      entry.status === "staged_verified"
+                      || entry.status === "unchanged_verified"
+                    ) {{
+                      const noteKey = String(entry.note_key || "");
+                      assertion(
+                        entry.expected_parent_key === parentKey,
+                        `${{noteKey}}: parent_key and expected_parent_key differ`,
+                      );
+                      assertion(
+                        exactArrayEqual(childNoteInventory, [noteKey]),
+                        `${{noteKey}}: staged parent must have exactly the approved child note`,
+                      );
+                      assertion(
+                        childAttachmentInventory.includes(entry.pdf_attachment_key),
+                        `${{noteKey}}: approved PDF attachment is absent from child inventory`,
+                      );
+                    }}
+                  }}
+                  const blocking = manifest.entries.filter(entry =>
+                    ["staged_invalid", "blocked_multiple_notes", "blocked_multiple_pdfs"]
+                      .includes(entry.status)
+                  );
+                  assertion(
+                    blocking.length === 0,
+                    "manifest contains invalid or ambiguous entries",
+                    blocking.map(entry => ({{
+                      parentKey: entry.parent_key,
+                      status: entry.status,
+                    }})),
+                  );
+                  return {{
+                    collectionItemInventory,
+                    entries: manifest.entries,
+                  }};
+                }}
+                function sha256Text() {{
+                  return "MANIFEST_SHA256";
+                }}
+                const CONFIG = {{
+                  apply: true,
+                  reportPath: "/tmp/report.json",
+                  manifestPath: "/tmp/manifest.json",
+                  manifestSHA256: "MANIFEST_SHA256",
+                  requireAutoSyncEnabled: false,
+                  expectedInventoryNoteCount: 2,
+                  expectedMutationCount: 1,
+                  expectedMutationKeys: ["STAGE001"],
+                }};
+                const migrationText = manifestText;
+                const Zotero = {{
+                  File: {{
+                    getContentsAsync: async () => migrationText,
+                  }},
+                  Prefs: {{
+                    get: () => true,
+                  }},
+                }};
+                let applyMutationKeys = null;
+                let verifyLiveStateAgainInput = null;
+                let acquireSyncBarrierCalled = false;
+                let readBackCalled = false;
+                function normalizedNoteHTML(value) {{
+                  return value;
+                }}
+                async function resolveAndVerifyTarget() {{
+                  return {{
+                    collection: {{ id: 27 }},
+                    library: {{ libraryID: 1234567 }},
+                    publicTarget: {{
+                      group_id: 1234567,
+                      collection_key: "TEST0001",
+                    }},
+                  }};
+                }}
+                async function verifyLiveManifestInventory() {{
+                  return {{ collectionItemCount: 2 }};
+                }}
+                async function verifyLiveStateAgain(verified) {{
+                  verifyLiveStateAgainInput = verified.map(item => item.noteKey).sort();
+                }}
+                async function verifyEntry(entry) {{
+                  return {{
+                    status: entry.status,
+                    noteKey: entry.note_key,
+                    parentKey: entry.parent_key,
+                    oldVersion: 1,
+                    oldSHA256: "old",
+                    sourceSHA256: "new",
+                    expectedStoredSHA256: "new",
+                    storageNormalization: "none",
+                  }};
+                }}
+                async function acquireSyncBarrier() {{
+                  acquireSyncBarrierCalled = true;
+                  return {{
+                    state: {{
+                      leaseExpired: false,
+                      released: false,
+                      leaseMS: 120000,
+                    }},
+                    waitedMS: 1,
+                    release() {{}},
+                  }};
+                }}
+                async function applyTransaction(verified, mutationVerified) {{
+                  verifyLiveStateAgainInput = verified.map(item => item.noteKey).sort();
+                  applyMutationKeys = mutationVerified.map(item => item.noteKey);
+                }}
+                async function inspectTransactionOutcome() {{
+                  return {{ outcome: "committed" }};
+                }}
+                async function readBack() {{
+                  readBackCalled = true;
+                  return [];
+                }}
+                {function_source}
+                (async () => {{
+                  const result = await runMigration();
+                  process.stdout.write(
+                    JSON.stringify({{
+                      status: result.status,
+                      mutationCount: result.mutationCount,
+                      mutationKeys: result.mutationKeys,
+                      applyMutationKeys,
+                      verifyLiveStateAgainInput,
+                      acquireSyncBarrierCalled,
+                      readBackCalled,
+                    }}),
+                  );
+                }})().catch(error => {{
+                  console.error(error);
+                  process.exit(1);
+                }});
+                """
+            )
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "status": "completed",
+                "mutationCount": 1,
+                "mutationKeys": ["STAGE001"],
+                "applyMutationKeys": ["STAGE001"],
+                "verifyLiveStateAgainInput": ["NOOP0001", "STAGE001"],
+                "acquireSyncBarrierCalled": True,
+                "readBackCalled": True,
+            },
+        )
+
+    @unittest.skipUnless(NODE, "Node.js is required for runner execution tests")
+    def test_run_migration_fails_when_verified_unchanged_entry_drifted(self) -> None:
+        function_source = extract_js_function(
+            "async function runMigration",
+            "\nawait assertFreshReportPath",
+        )
+        manifest = json.dumps(
+            {
+                "manifest_version": "2",
+                "write_performed": False,
+                "target": {
+                    "group_id": 1234567,
+                    "library_id": 1234567,
+                    "library_name": "PRIVATE_ZOTERO_TARGET",
+                    "local_collection_id": 27,
+                    "collection_key": "TEST0001",
+                    "collection_name": "PRIVATE_ZOTERO_TARGET",
+                    "collection_path": [
+                        "PRIVATE_ZOTERO_TARGET",
+                        "PRIVATE_ZOTERO_TARGET",
+                        "PRIVATE_ZOTERO_TARGET",
+                    ],
+                },
+                "collection_item_inventory": ["HGFEDCBA", "PARENT12"],
+                "entries": [
+                    {
+                        "status": "staged_verified",
+                        "note_key": "STAGE001",
+                        "parent_key": "HGFEDCBA",
+                        "expected_parent_key": "HGFEDCBA",
+                        "child_note_inventory": ["STAGE001"],
+                        "child_attachment_inventory": ["PDFATTA1"],
+                        "note_version": 1,
+                        "old_path": "/tmp/stage.old.html",
+                        "new_path": "/tmp/stage.new.html",
+                        "old_sha256": "a" * 64,
+                        "new_sha256": "b" * 64,
+                        "pdf_path": "/tmp/stage.pdf",
+                        "pdf_sha256": "c" * 64,
+                        "pdf_attachment_key": "PDFATTA1",
+                        "pdf_attachment_link_mode": "linked_file",
+                        "validation_summary": {"schema_version": "9"},
+                        "validation_errors": [],
+                    },
+                    {
+                        "status": "unchanged_verified",
+                        "note_key": "NOOP0001",
+                        "parent_key": "PARENT12",
+                        "expected_parent_key": "PARENT12",
+                        "child_note_inventory": ["NOOP0001"],
+                        "child_attachment_inventory": ["PDFATTB1"],
+                        "note_version": 1,
+                        "old_path": "/tmp/unchanged.old.html",
+                        "new_path": "/tmp/unchanged.new.html",
+                        "old_sha256": "d" * 64,
+                        "new_sha256": "d" * 64,
+                        "pdf_path": "/tmp/unchanged.pdf",
+                        "pdf_sha256": "f" * 64,
+                        "pdf_attachment_key": "PDFATTB1",
+                        "pdf_attachment_link_mode": "linked_file",
+                        "validation_summary": {"schema_version": "9"},
+                        "validation_errors": [],
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        )
+        result = run_node_json(
+            textwrap.dedent(
+                f"""
+                const manifestText = {manifest!r};
+                function assertion(condition, message, details) {{
+                  if (!condition) {{
+                    const error = new Error(message);
+                    error.details = details;
+                    throw error;
+                  }}
+                }}
+                function exactArrayEqual(left, right) {{
+                  return Array.isArray(left)
+                    && Array.isArray(right)
+                    && left.length === right.length
+                    && left.every((value, index) => value === right[index]);
+                }}
+                function validatedKeyInventory(value, label, options) {{
+                  options = options || {{}};
+                  assertion(Array.isArray(value), `${{label}} is not an array`);
+                  assertion(
+                    !options.nonempty || value.length > 0,
+                    `${{label}} is empty`,
+                  );
+                  const keys = value.map(key => String(key || ""));
+                  assertion(
+                    keys.every(key => /^[A-Z0-9]{{8}}$/.test(key)),
+                    `${{label}} contains an invalid item key`,
+                  );
+                  assertion(
+                    exactArrayEqual(
+                      keys,
+                      [...keys].sort(),
+                    ) && new Set(keys).size === keys.length,
+                    `${{label}} must be sorted and duplicate-free`,
+                  );
+                  return keys;
+                }}
+                function validateManifestContract(manifest) {{
+                  const collectionItemInventory = validatedKeyInventory(
+                    manifest.collection_item_inventory,
+                    "collection_item_inventory",
+                    {{ nonempty: true }},
+                  );
+                  assertion(Array.isArray(manifest.entries), "manifest entries are missing");
+                  assertion(
+                    manifest.entries.every(
+                      entry => entry && typeof entry === "object",
+                    ),
+                    "manifest contains a non-object entry",
+                  );
+                  const parentKeys = manifest.entries.map(entry =>
+                    String(entry.parent_key || ""),
+                  );
+                  assertion(
+                    parentKeys.length === collectionItemInventory.length
+                      && new Set(parentKeys).size === collectionItemInventory.length,
+                    "manifest entries do not exactly cover collection_item_inventory",
+                  );
+                  const allowedStatuses = new Set([
+                    "staged_verified",
+                    "unchanged_verified",
+                    "staged_invalid",
+                    "no_existing_note",
+                    "blocked_multiple_notes",
+                    "blocked_multiple_pdfs",
+                  ]);
+                  for (const entry of manifest.entries) {{
+                    const parentKey = String(entry.parent_key || "");
+                    assertion(
+                      allowedStatuses.has(entry.status),
+                      `${{parentKey}}: unsupported migration status`,
+                    );
+                    const childNoteInventory = validatedKeyInventory(
+                      entry.child_note_inventory,
+                      `${{parentKey}}: child_note_inventory`,
+                    );
+                    const childAttachmentInventory = validatedKeyInventory(
+                      entry.child_attachment_inventory,
+                      `${{parentKey}}: child_attachment_inventory`,
+                    );
+                    if (
+                      entry.status === "staged_verified"
+                      || entry.status === "unchanged_verified"
+                    ) {{
+                      const noteKey = String(entry.note_key || "");
+                      assertion(
+                        entry.expected_parent_key === parentKey,
+                        `${{noteKey}}: parent_key and expected_parent_key differ`,
+                      );
+                      assertion(
+                        exactArrayEqual(childNoteInventory, [noteKey]),
+                        `${{noteKey}}: staged parent must have exactly the approved child note`,
+                      );
+                      assertion(
+                        childAttachmentInventory.includes(entry.pdf_attachment_key),
+                        `${{noteKey}}: approved PDF attachment is absent from child inventory`,
+                      );
+                    }}
+                  }}
+                  const blocking = manifest.entries.filter(entry =>
+                    ["staged_invalid", "blocked_multiple_notes", "blocked_multiple_pdfs"]
+                      .includes(entry.status)
+                  );
+                  assertion(
+                    blocking.length === 0,
+                    "manifest contains invalid or ambiguous entries",
+                    blocking.map(entry => ({{
+                      parentKey: entry.parent_key,
+                      status: entry.status,
+                    }})),
+                  );
+                  return {{
+                    collectionItemInventory,
+                    entries: manifest.entries,
+                  }};
+                }}
+                function sha256Text() {{
+                  return "MANIFEST_SHA256";
+                }}
+                const CONFIG = {{
+                  apply: true,
+                  reportPath: "/tmp/report.json",
+                  manifestPath: "/tmp/manifest.json",
+                  manifestSHA256: "MANIFEST_SHA256",
+                  requireAutoSyncEnabled: false,
+                  expectedInventoryNoteCount: 2,
+                  expectedMutationCount: 1,
+                  expectedMutationKeys: ["STAGE001"],
+                }};
+                const migrationText = manifestText;
+                const Zotero = {{
+                  File: {{
+                    getContentsAsync: async () => migrationText,
+                  }},
+                  Prefs: {{
+                    get: () => true,
+                  }},
+                }};
+                let applyTransactionCalled = false;
+                let verifyLiveStateAgainInput = null;
+                let acquireSyncBarrierCalled = false;
+                let readBackCalled = false;
+                function plainError(error) {{
+                  return {{ message: error.message }};
+                }}
+                async function resolveAndVerifyTarget() {{
+                  return {{
+                    collection: {{ id: 27 }},
+                    library: {{ libraryID: 1234567 }},
+                    publicTarget: {{
+                      group_id: 1234567,
+                      collection_key: "TEST0001",
+                    }},
+                  }};
+                }}
+                async function verifyLiveManifestInventory() {{
+                  return {{ collectionItemCount: 2 }};
+                }}
+                async function verifyLiveStateAgain(verified) {{
+                  verifyLiveStateAgainInput = verified.map(item => item.noteKey).sort();
+                  for (const item of verified) {{
+                    if (item.status === "unchanged_verified") {{
+                      throw new Error(`${{item.noteKey}}: unchanged drifted after preflight`);
+                    }}
+                  }}
+                }}
+                async function verifyEntry(entry) {{
+                  return {{
+                    status: entry.status,
+                    noteKey: entry.note_key,
+                    parentKey: entry.parent_key,
+                    oldVersion: 1,
+                    oldSHA256: "old",
+                    sourceSHA256: "new",
+                    expectedStoredSHA256: "new",
+                    storageNormalization: "none",
+                  }};
+                }}
+                async function acquireSyncBarrier() {{
+                  acquireSyncBarrierCalled = true;
+                  return {{
+                    state: {{
+                      leaseExpired: false,
+                      released: false,
+                      leaseMS: 120000,
+                    }},
+                    waitedMS: 1,
+                    release() {{}},
+                  }};
+                }}
+                async function applyTransaction(verified, _mutationVerified) {{
+                  verifyLiveStateAgainInput = verified.map(item => item.noteKey).sort();
+                  for (const item of verified) {{
+                    if (item.status === "unchanged_verified") {{
+                      throw new Error(`${{item.noteKey}}: unchanged drifted after preflight`);
+                    }}
+                  }}
+                  applyTransactionCalled = true;
+                }}
+                async function inspectTransactionOutcome() {{
+                  return {{ outcome: "rolled_back" }};
+                }}
+                async function readBack() {{
+                  readBackCalled = true;
+                  return [];
+                }}
+                {function_source}
+                (async () => {{
+                  const result = await runMigration();
+                  process.stdout.write(
+                    JSON.stringify({{
+                      status: result.status,
+                      phase: result.phase || null,
+                      noteCount: result.noteCount,
+                      mutationCount: result.mutationCount,
+                      mutationKeys: result.mutationKeys,
+                      verifyLiveStateAgainInput,
+                      applyTransactionCalled,
+                      acquireSyncBarrierCalled,
+                      readBackCalled,
+                      errorMessage: result.error && result.error.message,
+                    }}),
+                  );
+                }})().catch(error => {{
+                  console.error(error);
+                  process.exit(1);
+                }});
+                """
+            )
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["phase"], "transaction")
+        self.assertEqual(result["noteCount"], 2)
+        self.assertEqual(result["verifyLiveStateAgainInput"], ["NOOP0001", "STAGE001"])
+        self.assertIn("unchanged drifted after preflight", result["errorMessage"])
+        self.assertFalse(result["applyTransactionCalled"])
+        self.assertFalse(result["readBackCalled"])
+
+
+    @unittest.skipUnless(NODE, "Node.js is required for runner execution tests")
+    def test_run_migration_no_changes_when_no_staged_mutations(self) -> None:
+        function_source = extract_js_function(
+            "async function runMigration",
+            "\nawait assertFreshReportPath",
+        )
+        manifest = json.dumps(
+            {
+                "manifest_version": "2",
+                "write_performed": False,
+                "target": {
+                    "group_id": 1234567,
+                    "library_id": 1234567,
+                    "library_name": "PRIVATE_ZOTERO_TARGET",
+                    "local_collection_id": 27,
+                    "collection_key": "TEST0001",
+                    "collection_name": "PRIVATE_ZOTERO_TARGET",
+                    "collection_path": [
+                        "PRIVATE_ZOTERO_TARGET",
+                        "PRIVATE_ZOTERO_TARGET",
+                        "PRIVATE_ZOTERO_TARGET",
+                    ],
+                },
+                "collection_item_inventory": ["HGFEDCBA"],
+                "entries": [
+                    {
+                        "status": "unchanged_verified",
+                        "note_key": "NOOP0001",
+                        "parent_key": "HGFEDCBA",
+                        "expected_parent_key": "HGFEDCBA",
+                        "child_note_inventory": ["NOOP0001"],
+                        "child_attachment_inventory": ["PDFATTB1"],
+                        "note_version": 1,
+                        "old_path": "/tmp/unchanged.old.html",
+                        "new_path": "/tmp/unchanged.new.html",
+                        "old_sha256": "d" * 64,
+                        "new_sha256": "d" * 64,
+                        "pdf_path": "/tmp/unchanged.pdf",
+                        "pdf_sha256": "f" * 64,
+                        "pdf_attachment_key": "PDFATTB1",
+                        "pdf_attachment_link_mode": "linked_file",
+                        "validation_summary": {"schema_version": "9"},
+                        "validation_errors": [],
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        )
+        result = run_node_json(
+            textwrap.dedent(
+                f"""
+                const manifestText = {manifest!r};
+                function assertion(condition, message, details) {{
+                  if (!condition) {{
+                    const error = new Error(message);
+                    error.details = details;
+                    throw error;
+                  }}
+                }}
+                function exactArrayEqual(left, right) {{
+                  return Array.isArray(left)
+                    && Array.isArray(right)
+                    && left.length === right.length
+                    && left.every((value, index) => value === right[index]);
+                }}
+                function validatedKeyInventory(value, label, options) {{
+                  options = options || {{}};
+                  assertion(Array.isArray(value), `${{label}} is not an array`);
+                  assertion(
+                    !options.nonempty || value.length > 0,
+                    `${{label}} is empty`,
+                  );
+                  const keys = value.map(key => String(key || ""));
+                  assertion(
+                    keys.every(key => /^[A-Z0-9]{{8}}$/.test(key)),
+                    `${{label}} contains an invalid item key`,
+                  );
+                  assertion(
+                    exactArrayEqual(keys, [...keys].sort())
+                      && new Set(keys).size === keys.length,
+                    `${{label}} must be sorted and duplicate-free`,
+                  );
+                  return keys;
+                }}
+                function validateManifestContract(manifest) {{
+                  const collectionItemInventory = validatedKeyInventory(
+                    manifest.collection_item_inventory,
+                    "collection_item_inventory",
+                    {{ nonempty: true }},
+                  );
+                  assertion(Array.isArray(manifest.entries), "manifest entries are missing");
+                  assertion(
+                    manifest.entries.every(
+                      entry => entry && typeof entry === "object",
+                    ),
+                    "manifest contains a non-object entry",
+                  );
+                  const parentKeys = manifest.entries.map(entry =>
+                    String(entry.parent_key || ""),
+                  );
+                  assertion(
+                    parentKeys.length === collectionItemInventory.length
+                      && new Set(parentKeys).size === collectionItemInventory.length,
+                    "manifest entries do not exactly cover collection_item_inventory",
+                  );
+                  const allowedStatuses = new Set([
+                    "staged_verified",
+                    "unchanged_verified",
+                    "staged_invalid",
+                    "no_existing_note",
+                    "blocked_multiple_notes",
+                    "blocked_multiple_pdfs",
+                  ]);
+                  for (const entry of manifest.entries) {{
+                    const parentKey = String(entry.parent_key || "");
+                    assertion(
+                      allowedStatuses.has(entry.status),
+                      `${{parentKey}}: unsupported migration status`,
+                    );
+                    const childNoteInventory = validatedKeyInventory(
+                      entry.child_note_inventory,
+                      `${{parentKey}}: child_note_inventory`,
+                    );
+                    const childAttachmentInventory = validatedKeyInventory(
+                      entry.child_attachment_inventory,
+                      `${{parentKey}}: child_attachment_inventory`,
+                    );
+                    if (
+                      entry.status === "staged_verified"
+                      || entry.status === "unchanged_verified"
+                    ) {{
+                      const noteKey = String(entry.note_key || "");
+                      assertion(
+                        entry.expected_parent_key === parentKey,
+                        `${{noteKey}}: parent_key and expected_parent_key differ`,
+                      );
+                      assertion(
+                        exactArrayEqual(childNoteInventory, [noteKey]),
+                        `${{noteKey}}: staged parent must have exactly the approved child note`,
+                      );
+                      assertion(
+                        childAttachmentInventory.includes(entry.pdf_attachment_key),
+                        `${{noteKey}}: approved PDF attachment is absent from child inventory`,
+                      );
+                    }}
+                  }}
+                  const blocking = manifest.entries.filter(entry =>
+                    ["staged_invalid", "blocked_multiple_notes", "blocked_multiple_pdfs"]
+                      .includes(entry.status)
+                  );
+                  assertion(
+                    blocking.length === 0,
+                    "manifest contains invalid or ambiguous entries",
+                    blocking.map(entry => ({{
+                      parentKey: entry.parent_key,
+                      status: entry.status,
+                    }})),
+                  );
+                  return {{
+                    collectionItemInventory,
+                    entries: manifest.entries,
+                  }};
+                }}
+                function sha256Text() {{
+                  return "MANIFEST_SHA256";
+                }}
+                const CONFIG = {{
+                  apply: true,
+                  reportPath: "/tmp/report.json",
+                  manifestPath: "/tmp/manifest.json",
+                  manifestSHA256: "MANIFEST_SHA256",
+                  requireAutoSyncEnabled: false,
+                  expectedInventoryNoteCount: 1,
+                  expectedMutationCount: 0,
+                  expectedMutationKeys: [],
+                }};
+                const migrationText = manifestText;
+                const Zotero = {{
+                  File: {{
+                    getContentsAsync: async () => migrationText,
+                  }},
+                  Prefs: {{
+                    get: () => true,
+                  }},
+                }};
+                let applyMutationKeys = null;
+                let acquireSyncBarrierCalled = false;
+                let readBackCalled = false;
+                let applyTransactionCalled = false;
+                async function resolveAndVerifyTarget() {{
+                  return {{
+                    collection: {{ id: 27 }},
+                    library: {{ libraryID: 1234567 }},
+                    publicTarget: {{
+                      group_id: 1234567,
+                      collection_key: "TEST0001",
+                    }},
+                  }};
+                }}
+                async function verifyLiveManifestInventory() {{
+                  return {{ collectionItemCount: 1 }};
+                }}
+                async function verifyEntry(entry) {{
+                  return {{
+                    status: entry.status,
+                    noteKey: entry.note_key,
+                    parentKey: entry.parent_key,
+                    oldVersion: 1,
+                    oldSHA256: "old",
+                    sourceSHA256: "new",
+                    expectedStoredSHA256: "new",
+                    storageNormalization: "none",
+                  }};
+                }}
+                async function acquireSyncBarrier() {{
+                  acquireSyncBarrierCalled = true;
+                  return {{
+                    state: {{
+                      leaseExpired: false,
+                      released: false,
+                      leaseMS: 120000,
+                    }},
+                    waitedMS: 1,
+                    release() {{}},
+                  }};
+                }}
+                async function applyTransaction(mutationVerified) {{
+                  applyTransactionCalled = true;
+                }}
+                async function inspectTransactionOutcome() {{
+                  return {{ outcome: "committed" }};
+                }}
+                async function readBack() {{
+                  readBackCalled = true;
+                  return [];
+                }}
+                {function_source}
+                (async () => {{
+                  const result = await runMigration();
+                  process.stdout.write(
+                    JSON.stringify({{
+                      status: result.status,
+                      mutationCount: result.mutationCount,
+                      mutationKeys: result.mutationKeys,
+                      applyTransactionCalled,
+                      acquireSyncBarrierCalled,
+                      readBackCalled,
+                    }}),
+                  );
+                }})().catch(error => {{
+                  console.error(error);
+                  process.exit(1);
+                }});
+                """
+            )
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "status": "no_changes",
+                "mutationCount": 0,
+                "mutationKeys": [],
+                "applyTransactionCalled": False,
+                "acquireSyncBarrierCalled": False,
+                "readBackCalled": False,
+            },
+        )
+
+    @unittest.skipUnless(NODE, "Node.js is required for runner execution tests")
+    def test_run_migration_rejects_unsupported_entry_status(self) -> None:
+        function_source = extract_js_function(
+            "async function runMigration",
+            "\nawait assertFreshReportPath",
+        )
+        manifest = json.dumps(
+            {
+                "manifest_version": "2",
+                "write_performed": False,
+                "target": {
+                    "group_id": 1234567,
+                    "library_id": 1234567,
+                    "library_name": "PRIVATE_ZOTERO_TARGET",
+                    "local_collection_id": 27,
+                    "collection_key": "TEST0001",
+                    "collection_name": "PRIVATE_ZOTERO_TARGET",
+                    "collection_path": [
+                        "PRIVATE_ZOTERO_TARGET",
+                        "PRIVATE_ZOTERO_TARGET",
+                        "PRIVATE_ZOTERO_TARGET",
+                    ],
+                },
+                "collection_item_inventory": ["HGFEDCBA"],
+                "entries": [
+                    {
+                        "status": "weird_status",
+                        "note_key": "STAGE001",
+                        "parent_key": "HGFEDCBA",
+                        "expected_parent_key": "HGFEDCBA",
+                        "child_note_inventory": ["STAGE001"],
+                        "child_attachment_inventory": ["PDFATTA1"],
+                        "note_version": 1,
+                        "old_path": "/tmp/stage.old.html",
+                        "new_path": "/tmp/stage.new.html",
+                        "old_sha256": "a" * 64,
+                        "new_sha256": "b" * 64,
+                        "pdf_path": "/tmp/stage.pdf",
+                        "pdf_sha256": "c" * 64,
+                        "pdf_attachment_key": "PDFATTA1",
+                        "pdf_attachment_link_mode": "linked_file",
+                        "validation_summary": {"schema_version": "9"},
+                        "validation_errors": [],
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        )
+        result = run_node_json(
+            textwrap.dedent(
+                f"""
+                const manifestText = {manifest!r};
+                function assertion(condition, message, details) {{
+                  if (!condition) {{
+                    throw new Error(JSON.stringify({{ message, details }}));
+                  }}
+                }}
+                function plainError(error) {{
+                  return {{
+                    message: String(error && error.message || error),
+                    details: error && error.details,
+                  }};
+                }}
+                const CONFIG = {{
+                  apply: true,
+                  reportPath: "/tmp/report.json",
+                  manifestPath: "/tmp/manifest.json",
+                  manifestSHA256: "MANIFEST_SHA256",
+                  requireAutoSyncEnabled: false,
+                  expectedInventoryNoteCount: 1,
+                  expectedMutationCount: 0,
+                  expectedMutationKeys: [],
+                }};
+                function sha256Text() {{
+                  return "MANIFEST_SHA256";
+                }}
+                const migrationText = manifestText;
+                const Zotero = {{
+                  File: {{
+                    getContentsAsync: async () => migrationText,
+                  }},
+                  Prefs: {{
+                    get: () => true,
+                  }},
+                }};
+                function exactArrayEqual(left, right) {{
+                  return Array.isArray(left)
+                    && Array.isArray(right)
+                    && left.length === right.length
+                    && left.every((value, index) => value === right[index]);
+                }}
+                function validatedKeyInventory(value, label, options) {{
+                  options = options || {{}};
+                  assertion(Array.isArray(value), `${{label}} is not an array`);
+                  assertion(
+                    !options.nonempty || value.length > 0,
+                    `${{label}} is empty`,
+                  );
+                  const keys = value.map(key => String(key || ""));
+                  assertion(
+                    keys.every(key => /^[A-Z0-9]{{8}}$/.test(key)),
+                    `${{label}} contains an invalid item key`,
+                  );
+                  assertion(
+                    exactArrayEqual(keys, [...keys].sort())
+                      && new Set(keys).size === keys.length,
+                    `${{label}} must be sorted and duplicate-free`,
+                  );
+                  return keys;
+                }}
+                function validateManifestContract(manifest) {{
+                  const collectionItemInventory = validatedKeyInventory(
+                    manifest.collection_item_inventory,
+                    "collection_item_inventory",
+                    {{ nonempty: true }},
+                  );
+                  assertion(Array.isArray(manifest.entries), "manifest entries are missing");
+                  assertion(
+                    manifest.entries.every(
+                      entry => entry && typeof entry === "object",
+                    ),
+                    "manifest contains a non-object entry",
+                  );
+                  const parentKeys = manifest.entries.map(entry =>
+                    String(entry.parent_key || ""),
+                  );
+                  assertion(
+                    parentKeys.length === collectionItemInventory.length
+                      && new Set(parentKeys).size === collectionItemInventory.length,
+                    "manifest entries do not exactly cover collection_item_inventory",
+                  );
+                  const allowedStatuses = new Set([
+                    "staged_verified",
+                    "unchanged_verified",
+                    "staged_invalid",
+                    "no_existing_note",
+                    "blocked_multiple_notes",
+                    "blocked_multiple_pdfs",
+                  ]);
+                  for (const entry of manifest.entries) {{
+                    const parentKey = String(entry.parent_key || "");
+                    assertion(
+                      allowedStatuses.has(entry.status),
+                      `${{parentKey}}: unsupported migration status`,
+                    );
+                  }}
+                  return {{
+                    collectionItemInventory,
+                    entries: manifest.entries,
+                  }};
+                }}
+                {function_source}
+                (async () => {{
+                  const result = await runMigration();
+                  process.stdout.write(
+                    JSON.stringify({{
+                      status: result.status,
+                      phase: result.phase,
+                      errorMessage: result.error && result.error.message,
+                    }}),
+                  );
+                }})().catch(error => {{
+                  console.error(error);
+                  process.exit(1);
+                }});
+                """
+            )
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("unsupported migration status", str(result["errorMessage"]))
+
+    @unittest.skipUnless(NODE, "Node.js is required for runner execution tests")
+    def test_validate_manifest_contract_rejects_unchanged_hash_divergence(self) -> None:
+        function_source = extract_js_function(
+            "function validateManifestContract",
+            "\nasync function liveCollectionItemInventory",
+        )
+        result = run_node_json(
+            textwrap.dedent(
+                f"""
+                const manifest = {{
+                  collection_item_inventory: ["HGFEDCBA"],
+                  entries: [{{
+                    status: "unchanged_verified",
+                    note_key: "ABCDEFGH",
+                    parent_key: "HGFEDCBA",
+                    expected_parent_key: "HGFEDCBA",
+                    child_note_inventory: ["ABCDEFGH"],
+                    child_attachment_inventory: ["PDFATT01"],
+                    note_version: 1,
+                    old_sha256: "a".repeat(64),
+                    new_sha256: "b".repeat(64),
+                    pdf_attachment_key: "PDFATT01",
+                    pdf_attachment_link_mode: "imported_file",
+                  }}],
+                }};
+                function assertion(condition, message, details) {{
+                  if (!condition) {{
+                    const error = new Error(message);
+                    error.details = details;
+                    throw error;
+                  }}
+                }}
+                function exactArrayEqual(left, right) {{
+                  return Array.isArray(left)
+                    && Array.isArray(right)
+                    && left.length === right.length
+                    && left.every((value, index) => value === right[index]);
+                }}
+                function validatedKeyInventory(value, label, options) {{
+                  options = options || {{}};
+                  assertion(Array.isArray(value), `${{label}} is not an array`);
+                  assertion(
+                    !options.nonempty || value.length > 0,
+                    `${{label}} is empty`,
+                  );
+                  const keys = value.map(key => String(key || ""));
+                  assertion(
+                    keys.every(key => /^[A-Z0-9]{{8}}$/.test(key)),
+                    `${{label}} contains an invalid item key`,
+                  );
+                  assertion(
+                    exactArrayEqual(
+                      keys,
+                      [...keys].sort(),
+                    ) && new Set(keys).size === keys.length,
+                    `${{label}} must be sorted and duplicate-free`,
+                  );
+                  return keys;
+                }}
+                let accepted = false;
+                let errorMessage = null;
+                {function_source}
+                try {{
+                  validateManifestContract(manifest);
+                  accepted = true;
+                }}
+                catch (_error) {{
+                  errorMessage = String(_error && _error.message || _error);
+                }}
+                process.stdout.write(
+                  JSON.stringify({{ accepted, errorMessage }}),
+                );
+                """
+            )
+        )
+        self.assertFalse(result["accepted"])
+        self.assertIn(
+            "unchanged note hashes are inconsistent",
+            result["errorMessage"],
+        )
+
+    @unittest.skipUnless(NODE, "Node.js is required for runner execution tests")
+    def test_verify_entry_rejects_unchanged_hash_divergence(self) -> None:
+        function_source = extract_js_function(
+            "async function verifyEntry",
+            "\nasync function verifyLiveManifestInventory",
+        )
+        verification_js = textwrap.dedent(
+            """
+                const crypto = require("crypto");
+                const pdfContent = "%PDF-1.4\\nfixture\\n%%EOF\\n";
+                const pdfSHA = crypto
+                  .createHash("sha256")
+                  .update(pdfContent, "utf-8")
+                  .digest("hex");
+                const oldHTML = '<div data-schema-version="9">'
+                  + '<h1>文献笔记｜NOTE0001</h1>'
+                  + '<h2>资料与阅读状态</h2>'
+                  + '<h2>为什么重要</h2>'
+                  + '<h2>一句话结论</h2>'
+                  + '<h2>心智模型</h2>'
+                  + '<h2>关键主张与证据</h2>'
+                  + '<h2>方法或推导</h2>'
+                  + '<h2>结果</h2>'
+                  + '<h2>假设、失败边界与竞争解释</h2>'
+                  + '<h2>知识图谱关系</h2>'
+                  + '<h2>复用</h2>'
+                  + '<h2>溯源</h2>'
+                  + '<p>old</p>'
+                  + '</div>';
+                const newHTML = '<div data-schema-version="9">'
+                  + '<h1>文献笔记｜NOTE0001</h1>'
+                  + '<h2>资料与阅读状态</h2>'
+                  + '<h2>为什么重要</h2>'
+                  + '<h2>一句话结论</h2>'
+                  + '<h2>心智模型</h2>'
+                  + '<h2>关键主张与证据</h2>'
+                  + '<h2>方法或推导</h2>'
+                  + '<h2>结果</h2>'
+                  + '<h2>假设、失败边界与竞争解释</h2>'
+                  + '<h2>知识图谱关系</h2>'
+                  + '<h2>复用</h2>'
+                  + '<h2>溯源</h2>'
+                  + '<p>changed</p>' + pdfSHA
+                  + '</div>';
+                const files = {
+                  "/tmp/old.html": oldHTML,
+                  "/tmp/new.html": newHTML,
+                  "/tmp/paper.pdf": pdfContent,
+                };
+                const noteKey = "NOTE0001";
+                const parentKey = "PARENT01";
+                const attachmentKey = "PDFATT01";
+                const fileVerificationCache = new Map();
+                const bytes = value => Array.from(Buffer.from(value, "utf-8"));
+                function bytesToHex(bytesArray) {
+                  return bytesArray
+                    .map(item => item.toString(16).padStart(2, "0"))
+                    .join("");
+                }
+                function sha256Text(value) {
+                  return crypto
+                    .createHash("sha256")
+                    .update(value, "utf-8")
+                    .digest("hex");
+                }
+                function sha256Bytes(data) {
+                  return bytesToHex(
+                    Array.from(
+                      crypto
+                        .createHash("sha256")
+                        .update(Buffer.from(data))
+                        .digest(),
+                    ),
+                  );
+                }
+                function assertion(condition, message, details) {
+                  if (!condition) {
+                    const error = new Error(message);
+                    error.details = details;
+                    throw error;
+                  }
+                }
+                function verifiedBytes(path) {
+                  const key = String(path || "");
+                  assertion(typeof key === "string" && files[key], `${{key}}`);
+                  const cached = fileVerificationCache.get(key);
+                  if (cached) {
+                    return cached;
+                  }
+                  const payload = {
+                    magic: files[key].slice(0, 5),
+                    sha256: sha256Text(files[key]),
+                  };
+                  fileVerificationCache.set(key, payload);
+                  return payload;
+                }
+                async function verifyPDFFile(path, expectedSHA256, currentNoteKey) {
+                  const verified = verifiedBytes(path);
+                  assertion(
+                    verified.magic === "%PDF-",
+                    `${{currentNoteKey}}: local file is not a PDF`,
+                  );
+                  assertion(
+                    verified.sha256 === expectedSHA256,
+                    `${{currentNoteKey}}: local PDF hash changed`,
+                    {
+                      observed: verified.sha256,
+                      expected: expectedSHA256,
+                    },
+                  );
+                }
+                function expectedAttachmentLinkMode(linkMode) {
+                  const expectedLinkModes = {
+                    imported_file: 0,
+                    imported_url: 1,
+                    linked_file: 2,
+                  };
+                  assertion(
+                    Object.hasOwn(expectedLinkModes, linkMode),
+                    `unsupported PDF attachment link mode: ${{linkMode}}`,
+                  );
+                  return expectedLinkModes[linkMode];
+                }
+                const PathUtils = {{ normalize: value => value }};
+                async function verifyAttachmentFileBinding(attachment, expectedPath, noteKey) {{
+                  const observedPath = await attachment.getFilePathAsync();
+                  assertion(
+                    typeof observedPath === "string" && observedPath,
+                    `${{noteKey}}: approved PDF attachment has no local file path`,
+                  );
+                  const normalizedObserved = PathUtils.normalize(observedPath);
+                  const normalizedExpected = PathUtils.normalize(expectedPath);
+                  assertion(
+                    normalizedObserved === normalizedExpected,
+                    `${{noteKey}}: approved PDF attachment file path changed`,
+                    {{
+                      observed: normalizedObserved,
+                      expected: normalizedExpected,
+                    }},
+                  );
+                }
+                function normalizedNoteHTML(value) {
+                  const withoutControlCharacters = String(value).replace(
+                    /[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]/g,
+                    "",
+                  );
+                  assertion(
+                    withoutControlCharacters === String(value),
+                    "staged note contains control characters that Zotero would remove",
+                  );
+                  return String(value).trim();
+                }
+                const noteHeading = [
+                  "资料与阅读状态",
+                  "为什么重要",
+                  "一句话结论",
+                  "心智模型",
+                  "关键主张与证据",
+                  "方法或推导",
+                  "结果",
+                  "假设、失败边界与竞争解释",
+                  "知识图谱关系",
+                  "复用",
+                  "溯源",
+                ];
+                function semanticHTMLProjection(_html) {
+                  const headings = [
+                    {{ tag: "h1", text: "文献笔记｜NOTE0001" }},
+                    ...noteHeading.map(name => ({ tag: "h2", text: name })),
+                  ];
+                  return {{
+                    root: {{ tag: "div", schemaVersion: "9" }},
+                    headings,
+                  }};
+                }
+                __FUNCTION_SOURCE__
+                let rejectedMessage = null;
+                const oldSHA = sha256Text(oldHTML);
+                const newSHA = sha256Text(newHTML);
+                const entry = {{
+                  status: "unchanged_verified",
+                  note_key: noteKey,
+                  parent_key: parentKey,
+                  expected_parent_key: parentKey,
+                  note_version: 1,
+                  old_path: "/tmp/old.html",
+                  new_path: "/tmp/new.html",
+                  old_sha256: oldSHA,
+                  new_sha256: newSHA,
+                  pdf_path: "/tmp/paper.pdf",
+                  pdf_sha256: pdfSHA,
+                  pdf_attachment_key: attachmentKey,
+                  pdf_attachment_link_mode: "imported_file",
+                  validation_summary: {{ schema_version: "9" }},
+                  validation_errors: [],
+                  child_note_inventory: [noteKey],
+                  child_attachment_inventory: [attachmentKey],
+                }};
+                const targetContext = {{
+                  library: {{ libraryID: 1234567 }},
+                  collection: {
+                    id: 27,
+                    hasItem: () => true,
+                  },
+                }};
+                const oldHashHex = sha256Bytes(bytes(oldHTML));
+                const note = {{
+                  isNote: () => true,
+                  deleted: false,
+                  parentItemKey: parentKey,
+                  libraryID: 1234567,
+                  isEditable: () => true,
+                  version: 1,
+                  async loadAllData() {{}},
+                  getNote: () => oldHTML,
+                }};
+                const parent = {{
+                  key: parentKey,
+                  isRegularItem: () => true,
+                  deleted: false,
+                  async reload() {{ }},
+                  async loadDataType() {{ }},
+                  libraryID: 1234567,
+                  getCollections: () => [27],
+                  hasItem: () => true,
+                }};
+                const attachment = {{
+                  isAttachment: () => true,
+                  deleted: false,
+                  parentItemKey: parentKey,
+                  attachmentContentType: "application/pdf",
+                  attachmentLinkMode: 0,
+                  async getFilePathAsync() {{
+                    return "/tmp/paper.pdf";
+                  }},
+                }};
+                const Zotero = {{
+                  File: {{
+                    async getContentsAsync(path) {{
+                      assertion(typeof path === "string", "path must be string");
+                      return files[path];
+                    }},
+                  }},
+                  Items: {{
+                    getByLibraryAndKeyAsync: async (_libraryID, key) => {
+                      if (key === noteKey) {{
+                        return note;
+                      }}
+                      if (key === parentKey) {{
+                        return parent;
+                      }}
+                      if (key === attachmentKey) {{
+                        return attachment;
+                      }}
+                      return null;
+                    }},
+                  }},
+                  Attachments: {{
+                    LINK_MODE_IMPORTED_FILE: 0,
+                    LINK_MODE_IMPORTED_URL: 1,
+                    LINK_MODE_LINKED_FILE: 2,
+                  },
+                }};
+                const IOUtils = {{
+                  async read(path) {{
+                    const entry = pathVerification.get(path);
+                    if (!entry) {{
+                      throw new Error(`missing file: ${{path}}`);
+                    }}
+                    return bytes(entry.content);
+                  }},
+                }};
+                const pathVerification = new Map([
+                  ["/tmp/paper.pdf", {{ content: pdfContent }}],
+                ]);
+                (async () => {{
+                  let message = null;
+                  let called = false;
+                  try {{
+                    await verifyEntry(entry, targetContext);
+                    called = true;
+                  }}
+                  catch (_error) {{
+                    message = String(_error && _error.message || _error);
+                  }}
+                  process.stdout.write(
+                    JSON.stringify({{
+                      called,
+                      message,
+                      oldHashHex,
+                    }}),
+                  );
+                }})().catch(error => {{
+                  console.error(error);
+                  process.exit(1);
+                }});
+                """
+            .replace("{{", "{")
+            .replace("}}", "}")
+            .replace("__FUNCTION_SOURCE__", function_source)
+        )
+        result = run_node_json(verification_js)
+        self.assertFalse(result["called"])
+        self.assertIn("unchanged note hashes are inconsistent", result["message"])
 
     def test_rejects_blocked_or_invalid_entries(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -486,6 +1994,8 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
                       parent_key: "PARENT01",
                       expected_parent_key: "PARENT01",
                       note_key: "NOTE0001",
+                      old_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      new_sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                       child_note_inventory: ["NOTE0001"],
                       child_attachment_inventory: ["PDFATT01"],
                       pdf_attachment_key: "PDFATT01",

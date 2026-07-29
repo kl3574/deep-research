@@ -11,6 +11,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import prepare_note_migration as module
+from test_verify_note_html import valid_note
 
 
 class PrepareNoteMigrationTests(unittest.TestCase):
@@ -519,6 +520,178 @@ class PrepareNoteMigrationTests(unittest.TestCase):
             manifest["entries"][0]["child_note_inventory"],
             ["NOTE0001"],
         )
+
+    def test_prepare_marks_schema9_note_as_unchanged(self) -> None:
+        selected = {
+            "library_id": 2,
+            "library_name": "PRIVATE_ZOTERO_TARGET",
+            "local_collection_id": 27,
+            "collection_path": ["Collection"],
+            "collection_name": "Collection",
+            "collection_key": "COLL",
+        }
+        with TemporaryDirectory() as temp_dir:
+            pdf_path = Path(temp_dir) / "paper.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\nfixture\n%%EOF\n")
+            args = Namespace(
+                group_id=1234567,
+                collection_key="COLL",
+                expected_collection_name="Collection",
+                output_dir=Path(temp_dir),
+                override_map=None,
+                pdf_attachment_map=None,
+            )
+            raw = valid_note()
+            with (
+                patch.object(module, "selected_target", return_value=selected),
+                patch.object(
+                    module,
+                    "get_json",
+                    side_effect=[
+                        {
+                            "version": 5,
+                            "library": {
+                                "type": "group",
+                                "id": 1234567,
+                                "name": "PRIVATE_ZOTERO_TARGET",
+                            },
+                            "data": {
+                                "name": "Collection",
+                                "parentCollection": False,
+                            },
+                        },
+                        [
+                            {
+                                "key": "PARENT01",
+                                "version": 3,
+                                "data": {
+                                    "title": "单元测试标题",
+                                    "itemType": "journalArticle",
+                                },
+                            }
+                        ],
+                        [
+                            {
+                                "key": "NOTE0001",
+                                "version": 3,
+                                "data": {
+                                    "itemType": "note",
+                                    "parentItem": "PARENT01",
+                                    "note": raw,
+                                },
+                            },
+                            {
+                                "key": "PDFATT01",
+                                "version": 3,
+                                "data": {
+                                    "itemType": "attachment",
+                                    "parentItem": "PARENT01",
+                                    "contentType": "application/pdf",
+                                    "linkMode": "imported_file",
+                                },
+                            },
+                        ],
+                    ],
+                ),
+                patch.object(module, "get_text", return_value=pdf_path.as_uri()),
+            ):
+                manifest = module.prepare(args)
+
+            entry = manifest["entries"][0]
+            self.assertEqual(entry["status"], "unchanged_verified")
+            self.assertEqual(entry["migration_kind"], "existing_schema9")
+            self.assertEqual(
+                Path(entry["new_path"]).read_text(encoding="utf-8"),
+                raw,
+            )
+            self.assertEqual(entry["old_sha256"], entry["new_sha256"])
+
+    def test_prepare_marks_matching_override_as_unchanged(self) -> None:
+        selected = {
+            "library_id": 2,
+            "library_name": "PRIVATE_ZOTERO_TARGET",
+            "local_collection_id": 27,
+            "collection_path": ["Collection"],
+            "collection_name": "Collection",
+            "collection_key": "COLL",
+        }
+        raw = valid_note()
+        with TemporaryDirectory() as temp_dir:
+            pdf_path = Path(temp_dir) / "paper.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\nfixture\n%%EOF\n")
+            override_html = Path(temp_dir) / "override.html"
+            override_html.write_text(raw, encoding="utf-8")
+            override_path = Path(temp_dir) / "override_map.json"
+            override_path.write_text(
+                f'{{"NOTE0001": "{override_html}"}}',
+                encoding="utf-8",
+            )
+            args = Namespace(
+                group_id=1234567,
+                collection_key="COLL",
+                expected_collection_name="Collection",
+                output_dir=Path(temp_dir),
+                override_map=override_path,
+                pdf_attachment_map=None,
+            )
+            with (
+                patch.object(module, "selected_target", return_value=selected),
+                patch.object(
+                    module,
+                    "get_json",
+                    side_effect=[
+                        {
+                            "version": 5,
+                            "library": {
+                                "type": "group",
+                                "id": 1234567,
+                                "name": "PRIVATE_ZOTERO_TARGET",
+                            },
+                            "data": {
+                                "name": "Collection",
+                                "parentCollection": False,
+                            },
+                        },
+                        [
+                            {
+                                "key": "PARENT01",
+                                "version": 3,
+                                "data": {
+                                    "title": "单元测试标题",
+                                    "itemType": "journalArticle",
+                                },
+                            }
+                        ],
+                        [
+                            {
+                                "key": "NOTE0001",
+                                "version": 3,
+                                "data": {
+                                    "itemType": "note",
+                                    "parentItem": "PARENT01",
+                                    "note": raw,
+                                },
+                            },
+                            {
+                                "key": "PDFATT01",
+                                "version": 3,
+                                "data": {
+                                    "itemType": "attachment",
+                                    "parentItem": "PARENT01",
+                                    "contentType": "application/pdf",
+                                    "linkMode": "imported_file",
+                                },
+                            },
+                        ],
+                    ],
+                ),
+                patch.object(module, "get_text", return_value=pdf_path.as_uri()),
+            ):
+                manifest = module.prepare(args)
+
+        entry = manifest["entries"][0]
+        self.assertEqual(entry["status"], "unchanged_verified")
+        self.assertEqual(entry["migration_kind"], "curated_override")
 
     def test_prepare_rejects_unknown_override_note_key(self) -> None:
         with TemporaryDirectory() as temp_dir:

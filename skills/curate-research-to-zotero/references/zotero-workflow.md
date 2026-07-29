@@ -28,7 +28,11 @@ and saved inside one Zotero database transaction:
    the keyed group collection hierarchy and the currently selected Desktop
    target, and refuses a mismatch. It paginates instead of accepting a
    100-item prefix and snapshots every live collection parent plus each
-   parent's child-note and attachment keys;
+   parent's child-note and attachment keys. A valid existing schema-9 note (or
+   a curated override byte-identical to live content) is
+   `unchanged_verified`; only a genuinely changed, valid projection is
+   `staged_verified`. Both statuses stay in the complete preflight inventory,
+   but only `staged_verified` is a mutation candidate;
 2. bind each staged note to one verified local PDF attachment, its parent,
    link mode, PDF magic bytes, and SHA-256. Multiple PDF children are
    ambiguous and block staging unless an approved JSON
@@ -58,7 +62,7 @@ and saved inside one Zotero database transaction:
    Add `--require-auto-sync-enabled` when the user's approved invariant is that
    automatic sync must remain on.
 
-7. apply only after the dry-run verifies every note, parent, complete child
+7. apply only after the dry-run verifies every inventory note, parent, complete child
    inventory, approved attachment/PDF, old backup, staged schema-9 HTML,
    version, collection membership, and exact selected target. The renderer
    reruns the schema validator and requires the uniquely labelled Chinese
@@ -68,8 +72,14 @@ and saved inside one Zotero database transaction:
    exists. The runner re-enumerates the
    collection and every parent's notes and attachments before the batch and
    again at transaction start, so a newly added second note blocks rather than
-   bypasses ambiguity handling. It rechecks all live notes inside one
-   transaction, rolls
+   bypasses ambiguity handling. It revalidates all previously verified
+   entries (`staged_verified` plus `unchanged_verified`) inside one transaction,
+   then passes only the manifest-bound `staged_verified` keys to
+   the save transaction; it never calls `save()` for
+   `unchanged_verified`. If every note is unchanged, apply returns
+   `no_changes` without acquiring the sync barrier or opening a write
+   transaction. The report keeps inventory and mutation counts/keys separate.
+   The transaction rolls
    back on an in-transaction failure, rechecks parent membership and target
    identity again at transaction start, and performs committed readback. If a
    post-commit callback throws, it inspects all notes and reports
@@ -191,7 +201,10 @@ For a version-guarded existing-note migration, use
 [update_existing_note.py](../scripts/update_existing_note.py) in dry-run mode
 first. It supports an authorized local route when the runtime advertises a
 server ID and a Web API fallback when a dedicated key is available. It never
-edits SQLite, never stores either key, and requires `--yes` for a write.
+edits SQLite, never stores either key, and requires `--yes` for a write. The
+runner revalidates `verify_local_source_contract` for every verified entry before
+any backup or patch operation; if any recheck fails, apply exits as
+`preflight_failed` without mutating remote or local note content.
 
 Never expose credentials. Do not use direct SQLite edits as an ordinary fallback.
 

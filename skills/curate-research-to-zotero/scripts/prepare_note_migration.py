@@ -930,24 +930,44 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
             override_path = Path(overrides[note_key]).expanduser().resolve()
             migrated = override_path.read_text(encoding="utf-8")
             migration_kind = "curated_override"
-        else:
-            migrated = build_migrated_note(
-                note_key=note_key,
-                note_version=int(note.get("version") or 0),
-                old_sha=old_sha,
-                parent_key=parent_key,
-                parent_data=parent_data,
-                raw=raw,
-                pdf_path=pdf_path,
-                pdf_sha=pdf_sha,
-                verified_at=verified_at,
+            staged_status = (
+                "unchanged_verified"
+                if migrated == raw
+                else "staged_verified"
             )
-            migration_kind = "structure_preserving_wrapper"
+        else:
+            existing_errors, _existing_warnings, existing_summary = validate_note(raw)
+            if (
+                not existing_errors
+                and str(existing_summary.get("schema_version")) == "9"
+            ):
+                migrated = raw
+                migration_kind = "existing_schema9"
+                staged_status = "unchanged_verified"
+            else:
+                migrated = build_migrated_note(
+                    note_key=note_key,
+                    note_version=int(note.get("version") or 0),
+                    old_sha=old_sha,
+                    parent_key=parent_key,
+                    parent_data=parent_data,
+                    raw=raw,
+                    pdf_path=pdf_path,
+                    pdf_sha=pdf_sha,
+                    verified_at=verified_at,
+                )
+                migration_kind = "structure_preserving_wrapper"
+                staged_status = "staged_verified"
 
         new_path = updated_dir / f"{note_key}.html"
         write_text_exclusive(new_path, migrated)
         new_sha = sha256_file(new_path)
         errors, warnings, validation_summary = validate_note(migrated)
+        status = (
+            staged_status
+            if not errors
+            else "staged_invalid"
+        )
         entries.append(
             {
                 **common_entry,
@@ -964,7 +984,7 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
                 "pdf_path": pdf_path,
                 "pdf_sha256": pdf_sha,
                 "migration_kind": migration_kind,
-                "status": "staged_verified" if not errors else "staged_invalid",
+                "status": status,
                 "validation_errors": errors,
                 "validation_warnings": warnings,
                 "validation_summary": validation_summary,
@@ -1031,6 +1051,11 @@ def main() -> int:
     invalid = sum(
         1 for entry in manifest["entries"] if entry.get("status") == "staged_invalid"
     )
+    unchanged = sum(
+        1
+        for entry in manifest["entries"]
+        if entry.get("status") == "unchanged_verified"
+    )
     blocked_notes = sum(
         1
         for entry in manifest["entries"]
@@ -1051,6 +1076,7 @@ def main() -> int:
             {
                 "manifest": str(manifest_path),
                 "staged_verified": staged,
+                "unchanged_verified": unchanged,
                 "staged_invalid": invalid,
                 "blocked_multiple_notes": blocked_notes,
                 "blocked_multiple_pdfs": blocked_pdfs,

@@ -72,6 +72,13 @@ def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+_STORAGE_NORMALIZATION_CONTROL_PATTERN = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]")
+
+
+def normalize_staged_html_for_storage(text: str) -> str:
+    return _STORAGE_NORMALIZATION_CONTROL_PATTERN.sub("", text).strip()
+
+
 def _normalize_key_list(
     value: object,
     field: str,
@@ -231,6 +238,13 @@ def verify_local_source_contract(local: dict[str, object]) -> None:
             f"{note_key}: live local note content changed "
             f"{observed_note_sha256} != {expected_old_sha256}"
         )
+
+
+def _format_preflight_error(exc: Exception) -> str:
+    message = str(exc)
+    if message.startswith("preflight failed"):
+        return message
+    return f"preflight failed: {message}"
 
 
 def request(
@@ -721,12 +735,18 @@ def verify_inventory_contract(
             group_route=group_route,
             expected_pdf_attachment_key=(
                 str(entry["pdf_attachment_key"])
-                if entry.get("status") == "staged_verified"
+                if entry.get("status") in {
+                    "staged_verified",
+                    "unchanged_verified",
+                }
                 else None
             ),
             expected_pdf_link_mode=(
                 str(entry["pdf_attachment_link_mode"])
-                if entry.get("status") == "staged_verified"
+                if entry.get("status") in {
+                    "staged_verified",
+                    "unchanged_verified",
+                }
                 else None
             ),
         )
@@ -930,6 +950,7 @@ def load_entries(manifest_path: Path, requested_keys: set[str]) -> tuple[dict[st
     )
     allowed_statuses = {
         "staged_verified",
+        "unchanged_verified",
         "staged_invalid",
         "no_existing_note",
         "blocked_multiple_notes",
@@ -960,7 +981,7 @@ def load_entries(manifest_path: Path, requested_keys: set[str]) -> tuple[dict[st
     staged_entries = [
         entry
         for entry in all_entries
-        if entry.get("status") == "staged_verified"
+        if entry.get("status") in {"staged_verified", "unchanged_verified"}
     ]
     entry_parent_keys = _normalize_key_list(
         sorted(str(entry.get("parent_key") or "") for entry in all_entries),
@@ -992,7 +1013,7 @@ def load_entries(manifest_path: Path, requested_keys: set[str]) -> tuple[dict[st
             raise ValueError(
                 f"{parent_key}: no_existing_note has a nonempty child note inventory"
             )
-        if status != "staged_verified":
+        if status not in {"staged_verified", "unchanged_verified"}:
             continue
         expected_parent_key = entry.get("expected_parent_key")
         if not ITEM_KEY_PATTERN.fullmatch(str(expected_parent_key)):
@@ -1016,7 +1037,7 @@ def load_entries(manifest_path: Path, requested_keys: set[str]) -> tuple[dict[st
             raise ValueError(f"{parent_key}: old_sha256 is invalid")
         if not isinstance(new_sha, str) or not SHA256_PATTERN.fullmatch(new_sha):
             raise ValueError(f"{parent_key}: new_sha256 is invalid")
-        if old_sha == new_sha:
+        if status != "unchanged_verified" and old_sha == new_sha:
             raise ValueError(f"{parent_key}: staged note is a no-op")
         if not isinstance(entry.get("note_version"), int) or entry["note_version"] <= 0:
             raise ValueError(f"{parent_key}: note_version is invalid")
@@ -1070,10 +1091,28 @@ def load_entries(manifest_path: Path, requested_keys: set[str]) -> tuple[dict[st
                 f"{note_key}: validation_summary full_text_sha256 does not match pdf_sha256"
             )
         try:
+            old_bytes.decode("utf-8")
             new_html = new_bytes.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ValueError(f"{note_key}: new_path is not UTF-8 HTML") from exc
-        if sha256_text(new_html.strip()) == old_sha:
+        if sha256_text(new_html) != new_sha:
+            raise ValueError(f"{note_key}: staged note hash mismatch with manifest new_sha256")
+        storage_html = normalize_staged_html_for_storage(new_html)
+        storage_html_sha = sha256_text(storage_html)
+        if status == "unchanged_verified":
+            if old_sha != new_sha:
+                raise ValueError(
+                    f"{note_key}: unchanged note hashes are inconsistent"
+                )
+            if old_bytes != new_bytes:
+                raise ValueError(
+                    f"{note_key}: unchanged note content changed"
+                )
+            if storage_html_sha != old_sha:
+                raise ValueError(
+                    f"{note_key}: unchanged note normalization changed the stored digest"
+                )
+        elif storage_html_sha == old_sha:
             raise ValueError(
                 f"{note_key}: staged note normalizes to the existing note"
             )
@@ -1102,10 +1141,11 @@ def load_entries(manifest_path: Path, requested_keys: set[str]) -> tuple[dict[st
         missing = requested_keys - selected_keys
         if missing:
             raise ValueError(
-                f"requested note keys are not staged_verified: {sorted(missing)}"
+                f"requested note keys are not staged: {sorted(missing)}"
             )
     if not staged_entries:
-        raise ValueError("no staged_verified notes selected")
+        raise ValueError("no staged notes selected")
+    target["collection_item_inventory"] = inventory
     target["_entries_for_inventory"] = all_entries
     return target, deduped
 
@@ -1200,7 +1240,6 @@ def verify_local_entry(
         "pdf_sha256": str(entry["pdf_sha256"]),
         "pdf_attachment_key": str(entry["pdf_attachment_key"]),
     }
-    verify_local_source_contract(local)
     return local
 
 
@@ -1700,8 +1739,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     manifest_path = args.manifest.expanduser().resolve()
+    requested_note_keys = set(args.note_key)
     try:
-        target, entries = load_entries(manifest_path, set(args.note_key))
+        target, entries = load_entries(manifest_path, requested_note_keys)
         contract_entries = list(target.get("_entries_for_inventory", entries))
         target_contract = resolve_target_contract(target)
         group_id = int(target_contract["group_id"])
@@ -1715,10 +1755,26 @@ def main() -> int:
         locals_verified = [
             verify_local_entry(group_id, collection_key, entry) for entry in entries
         ]
+        mutation_candidates = [
+            local for local, entry in zip(locals_verified, entries)
+            if entry.get("status") == "staged_verified"
+        ]
         capability = probe_local_write()
     except Exception as exc:
         print(f"preflight failed: {exc}", file=sys.stderr)
         return EXIT_CONFLICT
+    if args.yes and requested_note_keys:
+        immutable = [
+            local["note_key"]
+            for local, entry in zip(locals_verified, entries)
+            if entry.get("status") != "staged_verified"
+        ]
+        if immutable:
+            print(
+                f"requested note keys are not mutable: {sorted(immutable)}",
+                file=sys.stderr,
+            )
+            return EXIT_CONFLICT
 
     web_api_key = os.environ.get(args.api_key_env, "")
     route = choose_route(
@@ -1775,7 +1831,7 @@ def main() -> int:
                     {
                         "status": "preflight_failed",
                         "selected_route": "local",
-                        "error": str(exc),
+                        "error": _format_preflight_error(exc),
                         "write_performed": False,
                     },
                     ensure_ascii=False,
@@ -1800,7 +1856,7 @@ def main() -> int:
                     {
                         "status": "preflight_failed",
                         "selected_route": "web",
-                        "error": str(exc),
+                        "error": _format_preflight_error(exc),
                         "write_performed": False,
                     },
                     ensure_ascii=False,
@@ -1835,6 +1891,7 @@ def main() -> int:
             "entries_verified": len(web_remote_entries),
         },
         "note_count": len(locals_verified),
+        "mutation_count": len(mutation_candidates),
         "notes": [
             {
                 key: value
@@ -1851,6 +1908,21 @@ def main() -> int:
         else:
             print(json.dumps(preview, ensure_ascii=False, indent=2))
         return EXIT_OK if route else EXIT_CAPABILITY
+
+    if not mutation_candidates:
+        print(
+            json.dumps(
+                {
+                    **preview,
+                    "status": "no_changes",
+                    "write_performed": False,
+                    "completed_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return EXIT_OK
 
     if not route:
         print(unavailable_route_message(args.route, args.api_key_env), file=sys.stderr)
@@ -1879,6 +1951,25 @@ def main() -> int:
 
     if args.yes:
         try:
+            for local in locals_verified:
+                verify_local_source_contract(local)
+        except Exception as exc:
+            print(
+                json.dumps(
+                    {
+                        "status": "preflight_failed",
+                        "selected_route": route,
+                        "error": _format_preflight_error(exc),
+                        "write_performed": False,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                file=sys.stderr,
+            )
+            return EXIT_CONFLICT
+
+        try:
             if route == "local":
                 local_contract_checker(target_contract)
             elif route == "web":
@@ -1889,7 +1980,7 @@ def main() -> int:
                     {
                         "status": "preflight_failed",
                         "selected_route": route,
-                        "error": str(exc),
+                        "error": _format_preflight_error(exc),
                         "write_performed": False,
                     },
                     ensure_ascii=False,
@@ -1909,7 +2000,7 @@ def main() -> int:
         )
         planned_updates: list[tuple[dict[str, object], str, dict[str, object] | None]] = []
         if route == "local":
-            for local in locals_verified:
+            for local in mutation_candidates:
                 current_backup = backup_note(
                     backup_dir,
                     str(local["note_key"]),
@@ -1924,7 +2015,7 @@ def main() -> int:
                     )
                 )
         else:
-            for local in locals_verified:
+            for local in mutation_candidates:
                 remote = web_remote_entries[str(local["note_key"])]
                 planned_updates.append(
                     (
@@ -1947,7 +2038,7 @@ def main() -> int:
                 "deep-research Zotero note migrator",
             )
             local_api_key = str(authorization["api_key"])
-            if len(locals_verified) > 1 and not authorization["remember"]:
+            if len(mutation_candidates) > 1 and not authorization["remember"]:
                 raise RuntimeError(
                     "batch update requires choosing 'Always Allow' in Zotero; "
                     "no notes were changed"

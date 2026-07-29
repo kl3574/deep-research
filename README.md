@@ -111,6 +111,15 @@ SQLite。
 
 真实前向测试见
 [稀疏动力学识别与参数校准](evals/real-world/sparse-dynamics-2026-07-29.md)。
+可复现实验审计可直接运行：
+
+```bash
+python evals/real-world/audit_sparse_dynamics_run.py \
+  --output /tmp/sparse-dynamics-audit.json
+```
+
+默认读取 `~/.local/share/deep-research/sparse-dynamics-2026-07-29` 下的
+`manifest.json`、`ingestion_manifest.json`，产出 JSON 报告到标准输出。
 
 ## 边界
 

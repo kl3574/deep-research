@@ -25,6 +25,7 @@ REQUIRED_TARGET_FIELDS = {
 }
 ITEM_KEY_PATTERN = re.compile(r"^[A-Z0-9]{8}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_STORAGE_NORMALIZATION_CONTROL_PATTERN = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]")
 SUPPORTED_PDF_LINK_MODES = {
     "imported_file",
     "imported_url",
@@ -36,7 +37,13 @@ def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
-def load_and_validate_manifest(path: Path) -> tuple[bytes, dict[str, object], int]:
+def normalize_staged_html_for_storage(text: str) -> str:
+    return _STORAGE_NORMALIZATION_CONTROL_PATTERN.sub("", text).strip()
+
+
+def load_and_validate_manifest(
+    path: Path,
+) -> tuple[bytes, dict[str, object], int, int, list[str]]:
     raw = path.read_bytes()
     payload = json.loads(raw.decode("utf-8"))
     if not isinstance(payload, dict) or payload.get("manifest_version") != "2":
@@ -95,6 +102,7 @@ def load_and_validate_manifest(path: Path) -> tuple[bytes, dict[str, object], in
         )
     allowed_statuses = {
         "staged_verified",
+        "unchanged_verified",
         "staged_invalid",
         "no_existing_note",
         "blocked_multiple_notes",
@@ -170,18 +178,32 @@ def load_and_validate_manifest(path: Path) -> tuple[bytes, dict[str, object], in
     staged = [
         entry
         for entry in entries
-        if isinstance(entry, dict) and entry.get("status") == "staged_verified"
+        if isinstance(entry, dict) and entry.get("status") in {
+            "staged_verified",
+            "unchanged_verified",
+        }
+    ]
+    mutation = [
+        entry for entry in staged if str(entry.get("status")) == "staged_verified"
     ]
     if not staged:
-        raise ValueError("migration manifest has no staged_verified entries")
+        raise ValueError("migration manifest has no staged entries")
     note_keys = [entry.get("note_key") for entry in staged]
+    mutation_keys = [str(entry.get("note_key")) for entry in mutation]
     if any(
         not isinstance(key, str) or not ITEM_KEY_PATTERN.fullmatch(key)
         for key in note_keys
     ):
         raise ValueError("a staged entry has an invalid note_key")
+    if any(
+        not isinstance(key, str) or not ITEM_KEY_PATTERN.fullmatch(key)
+        for key in mutation_keys
+    ):
+        raise ValueError("a staged entry has an invalid note key")
     if len(note_keys) != len(set(note_keys)):
         raise ValueError("migration manifest contains duplicate note keys")
+    if len(mutation_keys) != len(set(mutation_keys)):
+        raise ValueError("migration manifest contains duplicate staged note keys")
     for entry in staged:
         note_key = str(entry["note_key"])
         parent_key = entry.get("expected_parent_key")
@@ -235,6 +257,7 @@ def load_and_validate_manifest(path: Path) -> tuple[bytes, dict[str, object], in
         try:
             old_bytes = old_path.read_bytes()
             new_bytes = new_path.read_bytes()
+            old_bytes.decode("utf-8")
             new_html = new_bytes.decode("utf-8")
             pdf_bytes = pdf_path.read_bytes()
         except (OSError, UnicodeError) as exc:
@@ -243,10 +266,28 @@ def load_and_validate_manifest(path: Path) -> tuple[bytes, dict[str, object], in
             raise ValueError(f"{note_key}: old_path hash does not match manifest")
         if sha256_bytes(new_bytes) != entry["new_sha256"]:
             raise ValueError(f"{note_key}: new_path hash does not match manifest")
-        if sha256_bytes(new_html.strip().encode("utf-8")) == entry["old_sha256"]:
-            raise ValueError(
-                f"{note_key}: staged note normalizes to the existing note"
+        status = str(entry.get("status"))
+        if status == "staged_verified":
+            storage_sha256 = sha256_bytes(
+                normalize_staged_html_for_storage(new_html).encode("utf-8")
             )
+            if storage_sha256 == entry["old_sha256"]:
+                raise ValueError(
+                    f"{note_key}: staged note normalizes to the existing note"
+                )
+        elif status == "unchanged_verified":
+            if entry["old_sha256"] != entry["new_sha256"]:
+                raise ValueError(
+                    f"{note_key}: unchanged note hashes are inconsistent"
+                )
+            if old_bytes != new_bytes:
+                raise ValueError(
+                    f"{note_key}: unchanged note content changed"
+                )
+            if sha256_bytes(new_bytes) != entry["old_sha256"]:
+                raise ValueError(
+                    f"{note_key}: unchanged note normalization changed the stored digest"
+                )
         if not pdf_bytes.startswith(b"%PDF-"):
             raise ValueError(f"{note_key}: pdf_path does not have PDF magic bytes")
         if sha256_bytes(pdf_bytes) != pdf_sha256:
@@ -265,7 +306,7 @@ def load_and_validate_manifest(path: Path) -> tuple[bytes, dict[str, object], in
             raise ValueError(
                 f"{note_key}: note full-text SHA-256 does not match pdf_sha256"
             )
-    return raw, payload, len(staged)
+    return raw, payload, len(staged), len(mutation), mutation_keys
 
 
 def protected_manifest_paths(
@@ -277,7 +318,13 @@ def protected_manifest_paths(
     if not isinstance(entries, list):
         return protected
     for entry in entries:
-        if not isinstance(entry, dict) or entry.get("status") != "staged_verified":
+        if (
+            not isinstance(entry, dict)
+            or entry.get("status") not in {
+                "staged_verified",
+                "unchanged_verified",
+            }
+        ):
             continue
         for field in ("old_path", "new_path", "pdf_path"):
             value = entry.get(field)
@@ -298,7 +345,9 @@ def render_runner(
     template_path: Path | None = None,
 ) -> str:
     manifest_path = manifest_path.expanduser().resolve()
-    raw, payload, note_count = load_and_validate_manifest(manifest_path)
+    raw, payload, inventory_count, mutation_count, mutation_keys = (
+        load_and_validate_manifest(manifest_path)
+    )
     mode = "apply" if apply else "dry_run"
     if report_path is None:
         report_path = manifest_path.parent / f"zotero_desktop_{mode}_report.json"
@@ -329,7 +378,9 @@ def render_runner(
         raise ValueError("Zotero Desktop runner template sentinel is missing or duplicated")
     config = {
         "apply": apply,
-        "expectedNoteCount": note_count,
+        "expectedInventoryNoteCount": inventory_count,
+        "expectedMutationCount": mutation_count,
+        "expectedMutationKeys": mutation_keys,
         "manifestPath": str(manifest_path),
         "manifestSHA256": sha256_bytes(raw),
         "requireAutoSyncEnabled": require_auto_sync_enabled,

@@ -338,6 +338,7 @@ function validateManifestContract(manifest) {
   );
   const allowedStatuses = new Set([
     "staged_verified",
+    "unchanged_verified",
     "staged_invalid",
     "no_existing_note",
     "blocked_multiple_notes",
@@ -345,6 +346,7 @@ function validateManifestContract(manifest) {
   ]);
   for (const entry of manifest.entries) {
     const parentKey = String(entry.parent_key || "");
+    const noteKey = String(entry.note_key || "");
     assertion(
       allowedStatuses.has(entry.status),
       `${parentKey}: unsupported migration status`,
@@ -363,12 +365,30 @@ function validateManifestContract(manifest) {
         `${parentKey}: no_existing_note has live note keys in the manifest`,
       );
     }
-    if (entry.status === "staged_verified") {
-      const noteKey = String(entry.note_key || "");
+    if (
+      entry.status === "staged_verified"
+      || entry.status === "unchanged_verified"
+    ) {
       assertion(
         entry.expected_parent_key === parentKey,
         `${noteKey}: parent_key and expected_parent_key differ`,
       );
+      assertion(
+        typeof entry.old_sha256 === "string"
+          && /^[0-9a-f]{64}$/.test(entry.old_sha256),
+        `${noteKey}: old SHA-256 is invalid`,
+      );
+      assertion(
+        typeof entry.new_sha256 === "string"
+          && /^[0-9a-f]{64}$/.test(entry.new_sha256),
+        `${noteKey}: new SHA-256 is invalid`,
+      );
+      if (entry.status === "unchanged_verified") {
+        assertion(
+          entry.old_sha256 === entry.new_sha256,
+          `${noteKey}: unchanged note hashes are inconsistent`,
+        );
+      }
       assertion(
         exactArrayEqual(childNoteInventory, [noteKey]),
         `${noteKey}: staged parent must have exactly the approved child note`,
@@ -685,10 +705,22 @@ async function verifyEntry(entry, targetContext) {
   );
   const expectedStoredHTML = normalizedNoteHTML(stagedHTML);
   const expectedStoredSHA256 = sha256Text(expectedStoredHTML);
-  assertion(
-    expectedStoredSHA256 !== entry.old_sha256,
-    `${noteKey}: staged note is a no-op`,
-  );
+  if (entry.status === "staged_verified") {
+    assertion(
+      expectedStoredSHA256 !== entry.old_sha256,
+      `${noteKey}: staged note is a no-op`,
+    );
+  }
+  if (entry.status === "unchanged_verified") {
+    assertion(
+      entry.old_sha256 === entry.new_sha256,
+      `${noteKey}: unchanged note hashes are inconsistent`,
+    );
+    assertion(
+      expectedStoredSHA256 === entry.old_sha256,
+      `${noteKey}: unchanged note normalization changed the stored digest`,
+    );
+  }
 
   const note = await Zotero.Items.getByLibraryAndKeyAsync(
     targetContext.library.libraryID,
@@ -761,6 +793,7 @@ async function verifyEntry(entry, targetContext) {
     note,
     parent,
     attachment,
+    status: entry.status,
     noteKey,
     parentKey,
     oldHTML,
@@ -833,6 +866,7 @@ async function verifyLiveStateAgain(verified, targetContext) {
 
 async function applyTransaction(
   verified,
+  mutationVerified,
   manifestTarget,
   manifestContract,
   onCommit,
@@ -850,7 +884,7 @@ async function applyTransaction(
       true,
     );
     await verifyLiveStateAgain(verified, transactionTargetContext);
-    for (const item of verified) {
+    for (const item of mutationVerified) {
       item.note.setNote(item.expectedStoredHTML);
       await item.note.save();
       assertion(
@@ -1025,6 +1059,7 @@ async function runMigration() {
   let transactionOutcome = "not_started";
   let transactionInspection;
   let verified = [];
+  let mutationVerified = [];
   let publicTarget;
   let syncState = {
     guardUsed: false,
@@ -1075,13 +1110,41 @@ async function runMigration() {
 
     phase = "preflight_entries";
     const entries = (manifest.entries || []).filter(
+      entry => entry && (
+        entry.status === "staged_verified"
+        || entry.status === "unchanged_verified"
+      ),
+    );
+    const mutationEntries = (manifest.entries || []).filter(
       entry => entry && entry.status === "staged_verified",
     );
-    assertion(entries.length > 0, "manifest contains no staged_verified notes");
+    assertion(entries.length > 0, "manifest contains no staged notes");
     assertion(
-      entries.length === CONFIG.expectedNoteCount,
-      "staged note count differs from the generated runner",
-      { observed: entries.length, expected: CONFIG.expectedNoteCount },
+      entries.length === CONFIG.expectedInventoryNoteCount,
+      "inventory note count differs from the generated runner",
+      { observed: entries.length, expected: CONFIG.expectedInventoryNoteCount },
+    );
+    assertion(
+      mutationEntries.length === CONFIG.expectedMutationCount,
+      "mutation note count differs from the generated runner",
+      {
+        observed: mutationEntries.length,
+        expected: CONFIG.expectedMutationCount,
+      },
+    );
+    const observedMutationKeys = mutationEntries
+      .map(entry => String(entry.note_key || ""))
+      .sort();
+    assertion(
+      exactArrayEqual(
+        observedMutationKeys,
+        (CONFIG.expectedMutationKeys || []).slice().sort(),
+      ),
+      "mutation note keys differ from the generated runner",
+      {
+        observed: observedMutationKeys,
+        expected: CONFIG.expectedMutationKeys,
+      },
     );
     const noteKeys = entries.map(entry => String(entry.note_key || ""));
     assertion(
@@ -1091,6 +1154,7 @@ async function runMigration() {
     for (const entry of entries) {
       verified.push(await verifyEntry(entry, targetContext));
     }
+    mutationVerified = verified.filter(item => item.status === "staged_verified");
 
     const publicNotes = verified.map(item => ({
       noteKey: item.noteKey,
@@ -1112,8 +1176,27 @@ async function runMigration() {
         target: publicTarget,
         inventoryEvidence,
         noteCount: verified.length,
+        mutationCount: mutationVerified.length,
+        mutationKeys: observedMutationKeys,
         notes: publicNotes,
         writePerformed: false,
+      };
+    }
+
+    if (mutationVerified.length === 0) {
+      return {
+        status: "no_changes",
+        mode: "apply",
+        startedAt,
+        completedAt: new Date().toISOString(),
+        target: publicTarget,
+        inventoryEvidence,
+        noteCount: verified.length,
+        mutationCount: mutationVerified.length,
+        mutationKeys: observedMutationKeys,
+        notes: publicNotes,
+        writePerformed: false,
+        syncState,
       };
     }
 
@@ -1144,17 +1227,18 @@ async function runMigration() {
         );
         await applyTransaction(
           verified,
+          mutationVerified,
           manifest.target,
           manifestContract,
           () => {
-          commitObserved = true;
+            commitObserved = true;
           },
         );
         writePerformed = true;
         transactionOutcome = "committed";
       }
       catch (error) {
-        transactionInspection = await inspectTransactionOutcome(verified);
+          transactionInspection = await inspectTransactionOutcome(mutationVerified);
         transactionOutcome = transactionInspection.outcome;
         if (commitObserved || transactionOutcome === "committed") {
           writePerformed = true;
@@ -1172,7 +1256,7 @@ async function runMigration() {
       }
 
       phase = "readback";
-      const results = await readBack(verified, targetContext);
+      const results = await readBack(mutationVerified, targetContext);
       await verifyLiveManifestInventory(manifestContract, targetContext, true);
       return {
         status: "completed",
@@ -1182,6 +1266,8 @@ async function runMigration() {
         target: publicTarget,
         inventoryEvidence,
         noteCount: verified.length,
+        mutationCount: mutationVerified.length,
+        mutationKeys: observedMutationKeys,
         notes: publicNotes,
         results,
         syncState,

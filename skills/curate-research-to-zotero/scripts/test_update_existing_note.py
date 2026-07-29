@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import update_existing_note as module
+from test_verify_note_html import valid_note
 
 
 class UpdateExistingNoteTests(unittest.TestCase):
@@ -554,6 +555,100 @@ class UpdateExistingNoteTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 ValueError,
                 "staged note normalizes to the existing note",
+            ):
+                module.load_entries(manifest_path, set())
+
+    def test_load_entries_accepts_unchanged_verified_without_noop_rejection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            manifest_path = Path(tmpdir) / "manifest.json"
+            entry = self._staged_entry(
+                tmp_path,
+                note_key="NOTE000A",
+                parent_key="PARENT01",
+            )
+            unchanged_note = valid_note().replace(
+                "a" * 64,
+                entry["pdf_sha256"],
+            )
+            entry["status"] = "unchanged_verified"
+            Path(str(entry["old_path"])).write_text(unchanged_note, encoding="utf-8")
+            Path(str(entry["new_path"])).write_text(unchanged_note, encoding="utf-8")
+            entry["old_sha256"] = module.sha256_text(unchanged_note)
+            entry["new_sha256"] = module.sha256_text(unchanged_note)
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "manifest_version": "2",
+                        "write_performed": False,
+                        "target": {
+                            "group_id": 1234567,
+                            "library_id": 1234567,
+                            "library_name": "PRIVATE_ZOTERO_TARGET",
+                            "local_collection_id": "C1",
+                            "collection_path": ["col"],
+                            "collection_key": "COLL",
+                        },
+                        "collection_item_inventory": ["PARENT01"],
+                        "entries": [entry],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            target, entries = module.load_entries(manifest_path, set())
+
+        self.assertEqual(target["collection_item_inventory"], ["PARENT01"])
+        self.assertEqual(entries[0]["status"], "unchanged_verified")
+
+    def test_load_entries_rejects_unchanged_verified_with_hash_divergence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            manifest_path = Path(tmpdir) / "manifest.json"
+            entry = self._staged_entry(
+                tmp_path,
+                note_key="NOTE000A",
+                parent_key="PARENT01",
+            )
+            unchanged = valid_note().replace(
+                "a" * 64,
+                entry["pdf_sha256"],
+            )
+            entry["status"] = "unchanged_verified"
+            Path(str(entry["old_path"])).write_text(unchanged, encoding="utf-8")
+            Path(str(entry["new_path"])).write_text(
+                f"{unchanged}\nwith divergence",
+                encoding="utf-8",
+            )
+            entry["old_sha256"] = module.sha256_text(unchanged)
+            entry["new_sha256"] = module.sha256_text(
+                f"{unchanged}\nwith divergence"
+            )
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "manifest_version": "2",
+                        "write_performed": False,
+                        "target": {
+                            "group_id": 1234567,
+                            "library_id": 1234567,
+                            "library_name": "PRIVATE_ZOTERO_TARGET",
+                            "local_collection_id": "C1",
+                            "collection_path": ["col"],
+                            "collection_key": "COLL",
+                        },
+                        "collection_item_inventory": ["PARENT01"],
+                        "entries": [entry],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "unchanged note hashes are inconsistent",
             ):
                 module.load_entries(manifest_path, set())
 
@@ -1526,6 +1621,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
             "library_id": 1234567,
             "library_name": "PRIVATE_ZOTERO_TARGET",
             "local_collection_id": "C1",
+            "collection_item_inventory": ["PARENT01"],
             "collection_path": ["集合"],
             "collection_key": "COLL",
         }
@@ -1681,6 +1777,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
             "library_id": 1234567,
             "library_name": "PRIVATE_ZOTERO_TARGET",
             "local_collection_id": "C1",
+            "collection_item_inventory": ["PARENT01", "PARENT02"],
             "collection_path": ["集合"],
             "collection_key": "COLL",
         }
@@ -1778,6 +1875,483 @@ class UpdateExistingNoteTests(unittest.TestCase):
         backup_note_mock.assert_not_called()
         patch_local_mock.assert_not_called()
         self.assertIn("preflight failed", report)
+
+    def test_main_yes_rejects_unchanged_note_key(self) -> None:
+        manifest = {
+            "group_id": 1234567,
+            "library_id": 1234567,
+            "library_name": "PRIVATE_ZOTERO_TARGET",
+            "local_collection_id": "C1",
+            "collection_path": ["集合"],
+            "collection_key": "COLL",
+        }
+        entries = [
+            {
+                "status": "unchanged_verified",
+                "note_key": "NOTE000A",
+                "expected_parent_key": "PARENT01",
+                "note_version": 1,
+                "new_path": "/tmp/new.html",
+                "new_sha256": module.sha256_text("<p>new</p>"),
+                "old_sha256": module.sha256_text("<p>old</p>"),
+                "parent_key": "PARENT01",
+            },
+        ]
+        stderr = io.StringIO()
+        with (
+            patch.object(
+                module,
+                "load_entries",
+                return_value=(manifest, entries),
+            ),
+            patch.object(
+                module,
+                "selected_target",
+                return_value={
+                    "libraryID": "1234567",
+                    "libraryName": "PRIVATE_ZOTERO_TARGET",
+                    "name": "集合",
+                    "id": "C1",
+                    "collectionPath": ["集合"],
+                    "editable": True,
+                    "filesEditable": True,
+                },
+            ),
+            patch.object(
+                module,
+                "verify_explicit_api_collection_contract",
+                return_value={"verified": True},
+            ),
+            patch.object(
+                module,
+                "verify_inventory_contract",
+                return_value=None,
+            ),
+            patch.object(
+                module,
+                "verify_local_entry",
+                return_value={
+                    "note_key": "NOTE000A",
+                    "parent_key": "PARENT01",
+                    "local_version": 1,
+                    "old_sha256": module.sha256_text("<p>old</p>"),
+                    "new_sha256": module.sha256_text("<p>new</p>"),
+                    "old_html": "<p>old</p>",
+                    "new_html": "<p>new</p>",
+                },
+            ),
+            patch.object(
+                module,
+                "probe_local_write",
+                return_value={"supported": True, "server_id": "server-1"},
+            ),
+            patch.object(module, "backup_note") as backup_note_mock,
+            patch.object(module, "patch_local_note") as patch_local_mock,
+            patch.object(module.sys, "argv", [
+                "update_existing_note.py",
+                "--yes",
+                "--note-key",
+                "NOTE000A",
+                "manifest.json",
+            ]),
+            contextlib.redirect_stderr(stderr),
+        ):
+            result = module.main()
+
+        self.assertEqual(result, module.EXIT_CONFLICT)
+        self.assertIn("requested note keys are not mutable", stderr.getvalue())
+        backup_note_mock.assert_not_called()
+        patch_local_mock.assert_not_called()
+
+    def test_main_yes_rejects_apply_if_local_source_contract_fails_for_verified_unchanged_entry(
+        self,
+    ) -> None:
+        manifest = {
+            "group_id": 1234567,
+            "library_id": 1234567,
+            "library_name": "PRIVATE_ZOTERO_TARGET",
+            "local_collection_id": "C1",
+            "collection_path": ["集合"],
+            "collection_key": "COLL",
+            "collection_item_inventory": ["PARENT01", "PARENT02"],
+        }
+        entries = [
+            {
+                "status": "staged_verified",
+                "note_key": "NOTE000A",
+                "expected_parent_key": "PARENT01",
+                "note_version": 1,
+                "parent_key": "PARENT01",
+                "new_path": "/tmp/new.html",
+                "new_sha256": module.sha256_text("<p>new</p>"),
+                "old_sha256": module.sha256_text("<p>old</p>"),
+            },
+            {
+                "status": "unchanged_verified",
+                "note_key": "NOTE000B",
+                "expected_parent_key": "PARENT02",
+                "note_version": 2,
+                "parent_key": "PARENT02",
+                "new_path": "/tmp/new2.html",
+                "new_sha256": module.sha256_text("<p>new2</p>"),
+                "old_sha256": module.sha256_text("<p>old2</p>"),
+            },
+        ]
+        stderr = io.StringIO()
+        with (
+            patch.object(
+                module,
+                "load_entries",
+                return_value=(manifest, entries),
+            ),
+            patch.object(
+                module,
+                "selected_target",
+                return_value={
+                    "libraryID": "1234567",
+                    "libraryName": "PRIVATE_ZOTERO_TARGET",
+                    "name": "集合",
+                    "id": "C1",
+                    "collectionPath": ["集合"],
+                    "editable": True,
+                    "filesEditable": True,
+                },
+            ),
+            patch.object(
+                module,
+                "verify_explicit_api_collection_contract",
+                return_value={"verified": True},
+            ),
+            patch.object(
+                module,
+                "verify_inventory_contract",
+                return_value=None,
+            ),
+            patch.object(
+                module,
+                "verify_local_entry",
+                side_effect=[
+                    {
+                        "note_key": "NOTE000A",
+                        "parent_key": "PARENT01",
+                        "local_version": 1,
+                        "old_sha256": module.sha256_text("<p>old</p>"),
+                        "new_sha256": module.sha256_text("<p>new</p>"),
+                        "old_html": "<p>old</p>",
+                        "new_html": "<p>new</p>",
+                    },
+                    {
+                        "note_key": "NOTE000B",
+                        "parent_key": "PARENT02",
+                        "local_version": 2,
+                        "old_sha256": module.sha256_text("<p>old2</p>"),
+                        "new_sha256": module.sha256_text("<p>new2</p>"),
+                        "old_html": "<p>old2</p>",
+                        "new_html": "<p>new2</p>",
+                    },
+                ],
+            ),
+            patch.object(
+                module,
+                "probe_local_write",
+                return_value={"supported": True, "server_id": "server-1"},
+            ),
+            patch.object(
+                module,
+                "verify_local_source_contract",
+                side_effect=[None, RuntimeError("unchanged note drifted")],
+            ) as verify_source_mock,
+            patch.object(module, "authorize_local") as authorize_local_mock,
+            patch.object(module, "backup_note") as backup_note_mock,
+            patch.object(module, "patch_local_note") as patch_local_mock,
+            patch.object(
+                module.sys,
+                "argv",
+                [
+                    "update_existing_note.py",
+                    "--yes",
+                    "--confirm-explicit-api-target",
+                    "manifest.json",
+                ],
+            ),
+            contextlib.redirect_stderr(stderr),
+        ):
+            result = module.main()
+
+        report = json.loads(stderr.getvalue())
+        self.assertEqual(result, module.EXIT_CONFLICT)
+        self.assertEqual(report["status"], "preflight_failed")
+        self.assertEqual(report["selected_route"], "local")
+        self.assertIn("preflight failed", report.get("error", ""))
+        verify_calls = [call.args[0] for call in verify_source_mock.call_args_list]
+        self.assertEqual(
+            [item["note_key"] for item in verify_calls],
+            ["NOTE000A", "NOTE000B"],
+        )
+        authorize_local_mock.assert_not_called()
+        backup_note_mock.assert_not_called()
+        patch_local_mock.assert_not_called()
+
+    def test_main_yes_applies_only_staged_and_skips_unchanged_inventory(self) -> None:
+        manifest = {
+            "group_id": 1234567,
+            "library_id": 1234567,
+            "library_name": "PRIVATE_ZOTERO_TARGET",
+            "local_collection_id": "C1",
+            "collection_path": ["集合"],
+            "collection_key": "COLL",
+            "collection_item_inventory": ["PARENT01", "PARENT02"],
+        }
+        entries = [
+            {
+                "status": "staged_verified",
+                "note_key": "NOTE000A",
+                "expected_parent_key": "PARENT01",
+                "note_version": 1,
+                "parent_key": "PARENT01",
+                "new_path": "/tmp/new.html",
+                "new_sha256": module.sha256_text("<p>new</p>"),
+                "old_sha256": module.sha256_text("<p>old</p>"),
+            },
+            {
+                "status": "unchanged_verified",
+                "note_key": "NOTE000B",
+                "expected_parent_key": "PARENT02",
+                "note_version": 2,
+                "parent_key": "PARENT02",
+                "new_path": "/tmp/new2.html",
+                "new_sha256": module.sha256_text("<p>new2</p>"),
+                "old_sha256": module.sha256_text("<p>old2</p>"),
+            },
+        ]
+        events: list[str] = []
+
+        def record_backup(
+            backup_dir: Path,
+            note_key: str,
+            version: int,
+            _old_html: str,
+        ) -> str:
+            events.append(f"backup:{note_key}")
+            return str(backup_dir / f"{note_key}.html")
+
+        def record_patch(
+            group_id: int,
+            local: dict[str, object],
+            *_args: object,
+            **_kwargs: object,
+        ) -> dict[str, object]:
+            events.append(f"patch:{local['note_key']}")
+            return {"local_version": 2, "local_verified": True}
+
+        with (
+            patch.object(
+                module,
+                "load_entries",
+                return_value=(manifest, entries),
+            ),
+            patch.object(
+                module,
+                "selected_target",
+                return_value={
+                    "libraryID": "1234567",
+                    "libraryName": "PRIVATE_ZOTERO_TARGET",
+                    "name": "集合",
+                    "id": "C1",
+                    "collectionPath": ["集合"],
+                    "editable": True,
+                    "filesEditable": True,
+                },
+            ),
+            patch.object(
+                module,
+                "verify_explicit_api_collection_contract",
+                return_value={"verified": True},
+            ),
+            patch.object(
+                module,
+                "verify_inventory_contract",
+                return_value=None,
+            ),
+            patch.object(module, "verify_local_source_contract", return_value=None),
+            patch.object(
+                module,
+                "verify_local_entry",
+                side_effect=[
+                    {
+                        "note_key": "NOTE000A",
+                        "parent_key": "PARENT01",
+                        "local_version": 1,
+                        "old_sha256": module.sha256_text("<p>old</p>"),
+                        "new_sha256": module.sha256_text("<p>new</p>"),
+                        "old_html": "<p>old</p>",
+                        "new_html": "<p>new</p>",
+                        "group_id": 1234567,
+                        "pdf_attachment_key": "PDFATTA1",
+                        "pdf_sha256": "a" * 64,
+                        "pdf_path": "/tmp/NOTE000A.pdf",
+                    },
+                    {
+                        "note_key": "NOTE000B",
+                        "parent_key": "PARENT02",
+                        "local_version": 2,
+                        "old_sha256": module.sha256_text("<p>old2</p>"),
+                        "new_sha256": module.sha256_text("<p>new2</p>"),
+                        "old_html": "<p>old2</p>",
+                        "new_html": "<p>new2</p>",
+                        "group_id": 1234567,
+                        "pdf_attachment_key": "PDFATTB1",
+                        "pdf_sha256": "b" * 64,
+                        "pdf_path": "/tmp/NOTE000B.pdf",
+                    },
+                ],
+            ),
+            patch.object(
+                module,
+                "probe_local_write",
+                return_value={"supported": True, "server_id": "server-1"},
+            ),
+            patch.object(
+                module,
+                "authorize_local",
+                return_value={"api_key": "local-key", "remember": True},
+            ),
+            patch.object(module, "backup_note", side_effect=record_backup),
+            patch.object(module, "patch_local_note", side_effect=record_patch),
+            patch.object(
+                module.sys,
+                "argv",
+                [
+                    "update_existing_note.py",
+                    "--yes",
+                    "--confirm-explicit-api-target",
+                    "manifest.json",
+                ],
+            ),
+        ):
+            result = module.main()
+
+        self.assertEqual(result, module.EXIT_OK)
+        self.assertEqual(events, ["backup:NOTE000A", "patch:NOTE000A"])
+
+    def test_main_yes_no_staged_entries_skips_all_backup_and_patch(self) -> None:
+        manifest = {
+            "group_id": 1234567,
+            "library_id": 1234567,
+            "library_name": "PRIVATE_ZOTERO_TARGET",
+            "local_collection_id": "C1",
+            "collection_item_inventory": ["PARENT01", "PARENT02"],
+            "collection_path": ["集合"],
+            "collection_key": "COLL",
+        }
+        entries = [
+            {
+                "status": "unchanged_verified",
+                "note_key": "NOTE000A",
+                "expected_parent_key": "PARENT01",
+                "note_version": 1,
+                "new_path": "/tmp/new.html",
+                "new_sha256": module.sha256_text("<p>new</p>"),
+                "old_sha256": module.sha256_text("<p>old</p>"),
+                "parent_key": "PARENT01",
+            },
+            {
+                "status": "unchanged_verified",
+                "note_key": "NOTE000B",
+                "expected_parent_key": "PARENT02",
+                "note_version": 2,
+                "new_path": "/tmp/new2.html",
+                "new_sha256": module.sha256_text("<p>new2</p>"),
+                "old_sha256": module.sha256_text("<p>old2</p>"),
+                "parent_key": "PARENT02",
+            },
+        ]
+        stdout = io.StringIO()
+        with (
+            patch.object(
+                module,
+                "load_entries",
+                return_value=(manifest, entries),
+            ),
+            patch.object(
+                module,
+                "selected_target",
+                return_value={
+                    "libraryID": "1234567",
+                    "libraryName": "PRIVATE_ZOTERO_TARGET",
+                    "name": "集合",
+                    "id": "C1",
+                    "collectionPath": ["集合"],
+                    "editable": True,
+                    "filesEditable": True,
+                },
+            ),
+            patch.object(
+                module,
+                "verify_explicit_api_collection_contract",
+                return_value={"verified": True},
+            ),
+            patch.object(
+                module,
+                "verify_inventory_contract",
+                return_value=None,
+            ),
+            patch.object(
+                module,
+                "verify_local_entry",
+                side_effect=[
+                    {
+                        "note_key": "NOTE000A",
+                        "parent_key": "PARENT01",
+                        "local_version": 1,
+                        "old_sha256": module.sha256_text("<p>old</p>"),
+                        "new_sha256": module.sha256_text("<p>new</p>"),
+                        "old_html": "<p>old</p>",
+                        "new_html": "<p>new</p>",
+                    },
+                    {
+                        "note_key": "NOTE000B",
+                        "parent_key": "PARENT02",
+                        "local_version": 2,
+                        "old_sha256": module.sha256_text("<p>old2</p>"),
+                        "new_sha256": module.sha256_text("<p>new2</p>"),
+                        "old_html": "<p>old2</p>",
+                        "new_html": "<p>new2</p>",
+                    },
+                ],
+            ),
+            patch.object(
+                module,
+                "choose_route",
+                return_value="local",
+            ),
+            patch.object(
+                module,
+                "probe_local_write",
+                return_value={"supported": True, "server_id": "server-1"},
+            ),
+            patch.object(module, "backup_note") as backup_note_mock,
+            patch.object(module, "patch_local_note") as patch_local_mock,
+            patch.object(
+                module.sys,
+                "argv",
+                [
+                    "update_existing_note.py",
+                    "--yes",
+                    "manifest.json",
+                ],
+            ),
+            contextlib.redirect_stdout(stdout),
+        ):
+            result = module.main()
+
+        report = json.loads(stdout.getvalue())
+        self.assertEqual(result, module.EXIT_OK)
+        self.assertEqual(report["status"], "no_changes")
+        self.assertEqual(report["mutation_count"], 0)
+        self.assertFalse(report["write_performed"])
+        backup_note_mock.assert_not_called()
+        patch_local_mock.assert_not_called()
 
     def test_main_web_apply_rejects_second_child_note_during_remote_preflight(self) -> None:
         manifest = {
@@ -2012,6 +2586,10 @@ class UpdateExistingNoteTests(unittest.TestCase):
             "new_sha256": module.sha256_text("<p>new</p>"),
             "old_html": "<p>old</p>",
             "new_html": "<p>new</p>",
+            "group_id": 1234567,
+            "pdf_attachment_key": "PDFATTA1",
+            "pdf_sha256": "a" * 64,
+            "pdf_path": "/tmp/NOTE000A.pdf",
         }
         with (
             patch.object(
@@ -2047,6 +2625,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                 return_value=None,
             ) as verify_inventory_mock,
             patch.object(module, "verify_local_entry", return_value=local),
+            patch.object(module, "verify_local_source_contract", return_value=None),
             patch.object(
                 module,
                 "probe_local_write",
@@ -2174,6 +2753,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                 "verify_inventory_contract",
                 return_value=None,
             ),
+            patch.object(module, "verify_local_source_contract", return_value=None),
             patch.object(
                 module,
                 "verify_local_entry",
@@ -2186,6 +2766,10 @@ class UpdateExistingNoteTests(unittest.TestCase):
                         "new_sha256": module.sha256_text("<p>new</p>"),
                         "old_html": "<p>old</p>",
                         "new_html": "<p>new</p>",
+                        "group_id": 1234567,
+                        "pdf_attachment_key": "PDFATTA1",
+                        "pdf_sha256": "a" * 64,
+                        "pdf_path": "/tmp/NOTE1234.pdf",
                     },
                     {
                         "note_key": "NOTE5678",
@@ -2195,6 +2779,10 @@ class UpdateExistingNoteTests(unittest.TestCase):
                         "new_sha256": module.sha256_text("<p>new2</p>"),
                         "old_html": "<p>old2</p>",
                         "new_html": "<p>new2</p>",
+                        "group_id": 1234567,
+                        "pdf_attachment_key": "PDFATTB1",
+                        "pdf_sha256": "b" * 64,
+                        "pdf_path": "/tmp/NOTE5678.pdf",
                     },
                 ],
             ),
@@ -2302,6 +2890,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                 "verify_inventory_contract",
                 return_value=None,
             ),
+            patch.object(module, "verify_local_source_contract", return_value=None),
             patch.object(
                 module,
                 "verify_local_entry",
@@ -2314,6 +2903,10 @@ class UpdateExistingNoteTests(unittest.TestCase):
                     "old_html": "<p>old</p>",
                     "new_html": "<p>new</p>",
                     "new_path": "/tmp/new.html",
+                    "group_id": 1234567,
+                    "pdf_attachment_key": "PDFATTA1",
+                    "pdf_sha256": "a" * 64,
+                    "pdf_path": "/tmp/NOTE1234.pdf",
                 },
             ),
             patch.object(module, "probe_local_write", return_value={"supported": True, "server_id": "server-1"}),
@@ -2415,6 +3008,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                 "verify_inventory_contract",
                 return_value=None,
             ),
+            patch.object(module, "verify_local_source_contract", return_value=None),
             patch.object(
                 module,
                 "verify_local_entry",
@@ -2427,6 +3021,10 @@ class UpdateExistingNoteTests(unittest.TestCase):
                         "new_sha256": module.sha256_text("<p>new</p>"),
                         "old_html": "<p>old</p>",
                         "new_html": "<p>new</p>",
+                        "group_id": 1234567,
+                        "pdf_attachment_key": "PDFATTA1",
+                        "pdf_sha256": "a" * 64,
+                        "pdf_path": "/tmp/NOTE1234.pdf",
                     },
                     {
                         "note_key": "NOTE5678",
@@ -2436,6 +3034,10 @@ class UpdateExistingNoteTests(unittest.TestCase):
                         "new_sha256": module.sha256_text("<p>new2</p>"),
                         "old_html": "<p>old2</p>",
                         "new_html": "<p>new2</p>",
+                        "group_id": 1234567,
+                        "pdf_attachment_key": "PDFATTB1",
+                        "pdf_sha256": "b" * 64,
+                        "pdf_path": "/tmp/NOTE5678.pdf",
                     },
                 ],
             ),
@@ -2541,6 +3143,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                 "verify_inventory_contract",
                 return_value=None,
             ),
+            patch.object(module, "verify_local_source_contract", return_value=None),
             patch.object(
                 module,
                 "verify_local_entry",
@@ -2553,6 +3156,10 @@ class UpdateExistingNoteTests(unittest.TestCase):
                         "new_sha256": module.sha256_text("<p>new</p>"),
                         "old_html": "<p>old</p>",
                         "new_html": "<p>new</p>",
+                        "group_id": 1234567,
+                        "pdf_attachment_key": "PDFATTA1",
+                        "pdf_sha256": "a" * 64,
+                        "pdf_path": "/tmp/NOTE1234.pdf",
                     },
                     {
                         "note_key": "NOTE5678",
@@ -2562,6 +3169,10 @@ class UpdateExistingNoteTests(unittest.TestCase):
                         "new_sha256": module.sha256_text("<p>new2</p>"),
                         "old_html": "<p>old2</p>",
                         "new_html": "<p>new2</p>",
+                        "group_id": 1234567,
+                        "pdf_attachment_key": "PDFATTB1",
+                        "pdf_sha256": "b" * 64,
+                        "pdf_path": "/tmp/NOTE5678.pdf",
                     },
                 ],
             ),
