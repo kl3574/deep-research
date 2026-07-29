@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
+
+# Research corpora and Zotero exports stay outside the public skill repository.
+*.pdf
+zotero-note-migration-*/
+corpus/
+downloads/

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Learn from Papers"
+  short_description: "Read, verify, and synthesize academic papers"
+  default_prompt: "Use $learn-from-papers to read this paper efficiently, reconstruct its reasoning, and report evidence-linked insights."

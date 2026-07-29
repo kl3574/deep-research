@@ -1,0 +1,4 @@
+interface:
+  display_name: "Curate Research to Zotero"
+  short_description: "Verify research files and safely sync Zotero"
+  default_prompt: "Use $curate-research-to-zotero to legally acquire accepted sources from $deep-research, verify a provenance manifest, preview the exact Zotero target, and synchronize only after the target gate passes."
