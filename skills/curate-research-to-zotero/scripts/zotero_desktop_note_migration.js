@@ -911,7 +911,7 @@ async function inspectTransactionOutcome(verified) {
         && sha256 === item.oldSHA256;
       const isNew =
         parentMatches
-        && item.note.version > item.oldVersion
+        && item.note.version >= item.oldVersion
         && (
           sha256 === item.expectedStoredSHA256
           || semanticHTMLSHA256(html)
@@ -997,45 +997,80 @@ async function acquireSyncBarrier(timeoutMS = 60000, leaseMS = 120000) {
 }
 
 async function readBack(verified, targetContext) {
+  const refreshItemFromKey = async (key, label) => {
+    if (
+      Zotero.Items
+      && typeof Zotero.Items.getByLibraryAndKeyAsync === "function"
+    ) {
+      const item = await Zotero.Items.getByLibraryAndKeyAsync(
+        targetContext.library.libraryID,
+        key,
+      );
+      assertion(
+        item,
+        `${label}: committed lookup did not return item ${key}`,
+      );
+      return item;
+    }
+    assertion(
+      false,
+      `${label}: committed lookup did not expose a way to refresh item state`,
+    );
+  };
   const results = [];
   for (const item of verified) {
-    await item.note.reload(["primaryData", "note"], true);
-    const observedSHA256 = sha256Text(item.note.getNote());
-    const observedSemanticSHA256 = semanticHTMLSHA256(item.note.getNote());
+    const note = await refreshItemFromKey(
+      item.noteKey,
+      `${item.noteKey}: failed to refresh committed note`,
+    );
+    const parent = await refreshItemFromKey(
+      item.parentKey,
+      `${item.noteKey}: failed to refresh committed note parent`,
+    );
+    await note.reload(["primaryData", "note"], true);
+    await parent.reload(["primaryData", "collections"], true);
+    const observedSHA256 = sha256Text(note.getNote());
+    const observedSemanticSHA256 = semanticHTMLSHA256(note.getNote());
     const expectedSemanticSHA256 = semanticHTMLSHA256(item.expectedStoredHTML);
     const byteExact = observedSHA256 === item.expectedStoredSHA256;
     const semanticEquivalent =
       observedSemanticSHA256 === expectedSemanticSHA256;
+    const noteTypeMatches = typeof note.isNote === "function"
+      ? note.isNote()
+      : note.itemType === "note";
+    const serverVersionAdvanced = note.version > item.oldVersion;
     assertion(
-      item.note.isNote()
-        && !item.note.deleted
-        && item.note.parentItemKey === item.parentKey
-        && item.note.version > item.oldVersion
+      noteTypeMatches
+        && !note.deleted
+        && note.parentItemKey === item.parentKey
+        && note.version >= item.oldVersion
         && (byteExact || semanticEquivalent),
       `${item.noteKey}: committed readback verification failed`,
       {
-        itemType: item.note.itemType,
-        deleted: item.note.deleted,
-        parentItemKey: item.note.parentItemKey,
+        itemType: note.itemType,
+        deleted: note.deleted,
+        parentItemKey: note.parentItemKey,
         oldVersion: item.oldVersion,
-        readbackVersion: item.note.version,
+        serverVersionAdvanced,
+        readbackVersion: note.version,
         observedSHA256,
         expectedSHA256: item.expectedStoredSHA256,
         observedSemanticSHA256,
         expectedSemanticSHA256,
       },
     );
-    await item.parent.reload(["primaryData", "collections"], true);
     assertion(
-      !item.parent.deleted
-        && item.parent.getCollections().includes(targetContext.collection.id),
+      !parent.deleted
+        && parent.isRegularItem()
+        && parent.getCollections().includes(targetContext.collection.id),
       `${item.noteKey}: parent collection membership changed after commit`,
     );
     results.push({
       noteKey: item.noteKey,
       parentKey: item.parentKey,
       oldVersion: item.oldVersion,
-      readbackVersion: item.note.version,
+      readbackVersion: note.version,
+      serverVersionAdvanced,
       oldSHA256: item.oldSHA256,
       stagedSourceSHA256: item.sourceSHA256,
       readbackSHA256: observedSHA256,

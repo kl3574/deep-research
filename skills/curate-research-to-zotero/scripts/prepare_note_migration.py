@@ -409,6 +409,17 @@ def strip_tags(fragment: str) -> str:
     return " ".join(html.unescape(text).split())
 
 
+_ZOTERO_NOTE_CONTROL_CHARACTERS = re.compile(
+    r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]"
+)
+
+
+def trim_note_html_for_comparison(html_text: str) -> str:
+    """Normalize note HTML using the Zotero trim behavior used before persistence."""
+    without_control = _ZOTERO_NOTE_CONTROL_CHARACTERS.sub("", html_text)
+    return without_control.strip()
+
+
 def first_matching_section(raw: str, names: tuple[str, ...]) -> str:
     for name in names:
         match = re.search(
@@ -928,13 +939,17 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
         if note_key in overrides:
             used_overrides.add(note_key)
             override_path = Path(overrides[note_key]).expanduser().resolve()
-            migrated = override_path.read_text(encoding="utf-8")
+            override_html = override_path.read_text(encoding="utf-8")
             migration_kind = "curated_override"
-            staged_status = (
-                "unchanged_verified"
-                if migrated == raw
-                else "staged_verified"
-            )
+            if (
+                trim_note_html_for_comparison(override_html)
+                == trim_note_html_for_comparison(raw)
+            ):
+                migrated = raw
+                staged_status = "unchanged_verified"
+            else:
+                migrated = override_html
+                staged_status = "staged_verified"
         else:
             existing_errors, _existing_warnings, existing_summary = validate_note(raw)
             if (

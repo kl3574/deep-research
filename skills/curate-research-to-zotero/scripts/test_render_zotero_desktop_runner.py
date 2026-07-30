@@ -2453,7 +2453,7 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
         )
 
     @unittest.skipUnless(NODE, "Node.js is required for runner execution tests")
-    def test_committed_readback_requires_version_advancement(self) -> None:
+    def test_committed_readback_accepts_same_version_new_content(self) -> None:
         function_source = extract_js_function(
             "async function readBack",
             "\nasync function runMigration",
@@ -2466,6 +2466,40 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
                 }}
                 const sha256Text = value => value;
                 const semanticHTMLSHA256 = value => value;
+                const parentItem = {{
+                  key: "PARENT01",
+                  deleted: false,
+                  itemType: "journalArticle",
+                  isRegularItem: () => true,
+                  async reload() {{}},
+                  getCollections: () => [27],
+                }};
+                const makeNote = (version, html) => ({{
+                  key: "NOTE0001",
+                  version,
+                  itemType: "note",
+                  deleted: false,
+                  parentItemKey: "PARENT01",
+                  isNote: () => true,
+                  async reload() {{}},
+                  getNote: () => html,
+                }});
+                const noteVersions = {{
+                  advanced: {{
+                    NOTE0001: makeNote(2, "new"),
+                    PARENT01: parentItem,
+                  }},
+                  sameVersionNew: {{
+                    NOTE0001: makeNote(1, "new"),
+                    PARENT01: parentItem,
+                  }},
+                  sameVersionWrong: {{
+                    NOTE0001: makeNote(1, "wrong"),
+                    PARENT01: parentItem,
+                  }},
+                }};
+                let liveItems = noteVersions.advanced;
+                const stateGetter = (_libraryID, key) => liveItems[key];
                 {function_source}
                 function item(version) {{
                   return {{
@@ -2486,26 +2520,50 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
                       async reload() {{}},
                       getNote: () => "new",
                     }},
-                    parent: {{
-                      deleted: false,
-                      async reload() {{}},
-                      getCollections: () => [27],
-                    }},
+                    parent: parentItem,
                   }};
                 }}
+                const Zotero = {{
+                  Items: {{
+                    getByLibraryAndKeyAsync: stateGetter,
+                  }},
+                }};
                 (async () => {{
-                  const target = {{ collection: {{ id: 27 }} }};
-                  const advanced = await readBack([item(2)], target);
-                  let sameVersionRejected = false;
+                  const target = {{
+                    collection: {{ id: 27 }},
+                    library: {{ libraryID: 1234567 }},
+                  }};
+                  liveItems = noteVersions.advanced;
+                  const advanced = await readBack([item(1)], target);
+                  liveItems = noteVersions.sameVersionNew;
+                  const sameVersionNew = await readBack([item(1)], target);
+                  let sameVersionWrongRejected = false;
+                  let sameVersionWrongError;
                   try {{
+                    liveItems = noteVersions.sameVersionWrong;
                     await readBack([item(1)], target);
                   }}
                   catch (_error) {{
-                    sameVersionRejected = true;
+                    sameVersionWrongRejected = true;
+                    sameVersionWrongError = String(_error.message || _error)
+                      .includes("committed readback verification failed");
                   }}
                   process.stdout.write(JSON.stringify({{
-                    advancedVerified: advanced[0].verified,
-                    sameVersionRejected,
+                    advancedVerified: !!(advanced && advanced[0] && advanced[0].verified),
+                    advancedVersion: advanced && advanced[0].readbackVersion,
+                    advancedServerVersionAdvanced: advanced
+                      && advanced[0] && advanced[0].serverVersionAdvanced,
+                    sameVersionNewVerified: !!(
+                      sameVersionNew
+                      && sameVersionNew[0]
+                      && sameVersionNew[0].verified
+                    ),
+                    sameVersionNewVersion: sameVersionNew && sameVersionNew[0].readbackVersion,
+                    sameVersionNewServerVersionAdvanced: sameVersionNew
+                      && sameVersionNew[0]
+                      && sameVersionNew[0].serverVersionAdvanced,
+                    sameVersionWrongRejected,
+                    sameVersionWrongError,
                   }}));
                 }})().catch(error => {{
                   console.error(error);
@@ -2519,7 +2577,13 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
             result,
             {
                 "advancedVerified": True,
-                "sameVersionRejected": True,
+                "advancedVersion": 2,
+                "advancedServerVersionAdvanced": True,
+                "sameVersionNewVerified": True,
+                "sameVersionNewVersion": 1,
+                "sameVersionNewServerVersionAdvanced": False,
+                "sameVersionWrongRejected": True,
+                "sameVersionWrongError": True,
             },
         )
 
@@ -2536,10 +2600,10 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
                 const semanticHTMLSHA256 = value => value;
                 const plainError = error => ({{ message: String(error) }});
                 {function_source}
-                function item(content, version) {{
+                function item(content, version, parentKey = "PARENT01") {{
                   return {{
                     noteKey: "NOTE0001",
-                    parentKey: "PARENT01",
+                    parentKey,
                     oldVersion: 1,
                     oldSHA256: "old",
                     expectedStoredSHA256: "new",
@@ -2555,13 +2619,19 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
                 (async () => {{
                   const committed = await inspectTransactionOutcome([item("new", 2)]);
                   const rolledBack = await inspectTransactionOutcome([item("old", 1)]);
-                  const unknown = await inspectTransactionOutcome([item("other", 2)]);
                   const sameVersionNew = await inspectTransactionOutcome([item("new", 1)]);
+                  const sameVersionWrong = await inspectTransactionOutcome([
+                    item("wrong", 1),
+                  ]);
+                  const parentMismatched = await inspectTransactionOutcome([
+                    item("new", 1, "OTHERPAR"),
+                  ]);
                   process.stdout.write(JSON.stringify({{
                     committed: committed.outcome,
+                    committedSameVersion: sameVersionNew.outcome,
                     rolledBack: rolledBack.outcome,
-                    unknown: unknown.outcome,
-                    sameVersionNew: sameVersionNew.outcome,
+                    unknown: sameVersionWrong.outcome,
+                    parentMismatched: parentMismatched.outcome,
                   }}));
                 }})().catch(error => {{
                   console.error(error);
@@ -2575,9 +2645,10 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
             result,
             {
                 "committed": "committed",
+                "committedSameVersion": "committed",
                 "rolledBack": "rolled_back",
                 "unknown": "unknown",
-                "sameVersionNew": "unknown",
+                "parentMismatched": "unknown",
             },
         )
 

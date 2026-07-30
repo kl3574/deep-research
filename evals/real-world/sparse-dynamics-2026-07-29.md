@@ -176,18 +176,42 @@ false-positive failure record, paired with
 `post_write_audit.json` under
 `~/.local/share/deep-research/zotero-private-staging`.
 
-After those writes, the hardened manifest-v2 stager was exercised again
-against the then-current collection without writing Zotero: 33/33 parents were
-enumerated, 32 each had exactly one child note and one explicitly bound PDF, one had
-no existing note, and zero had multiple notes or ambiguous PDFs. The
-independent local HTTP contract check matched all 33 parent, note, attachment,
-content-type, link-mode, and collection snapshots. The final apply runner was
-generated and syntax-checked but was not applied a second time; its new
-inventory guards were executed with mutation fixtures, while the DOM
-projection, sync watchdog, and transaction-outcome classifier were executed in
-browser/Node harnesses. After the completion-audit iteration, the current tree
-passes 139 curation-helper tests plus 30 read-only reproducibility-audit tests;
-these fixture/mock tests are not evidence of a live Zotero write.
+After those writes, the hardened manifest-v2 `v3` stager and dry-run approved
+an exact inventory of 33 parents: 28 unchanged notes, four staged note updates,
+and one parent without a note. Before apply, a synchronized parent
+`TEST0001` appeared. Transaction-start inventory re-enumeration observed 34
+parents and failed closed before any write (`writePerformed=false`).
+
+A fresh `v4` staging bound the new 34-parent inventory: 32 existing notes,
+28 unchanged notes, four mutations, and two parents without notes. Its
+manifest-bound dry-run returned `preflight_ok`. The Desktop transaction then
+committed all four mutations (`writePerformed=true`, `rolledBack=false`).
+Automatic sync remained enabled before and after the run, its preference was
+not changed, and the temporary barrier was released without lease expiry.
+
+The immediate App readback returned a false positive on `TEST0001`: the byte
+and semantic hashes already matched, but its server object version was still
+the pre-sync value `3918`. Zotero's
+[local-object-version contract](https://www.zotero.org/support/dev/web_api/v3/syncing#local_object_versions)
+leaves an object's server version unchanged until upload. Independent
+local-API readback after barrier release found all four notes at version
+`4034`, with the expected parents and exact stored hashes. This proves the
+local transaction and later local API state; no independent Web API check was
+performed, so this report does not claim Zotero Cloud synchronization.
+
+A `v5` read-only rerun exposed one remaining idempotence defect: the stager
+compared curated overrides before Zotero's predictable outer-whitespace trim.
+The first status-only correction produced a zero-mutation `v6` manifest, but
+runner generation correctly rejected it because the `unchanged_verified`
+artifact still held the untrimmed override and therefore had a different hash.
+The final correction reuses the exact live HTML whenever the storage-normalized
+override is equal. Fresh `v7` staging reports 32 `unchanged_verified`, two
+`no_existing_note`, zero mutations, and zero unchanged-hash mismatches; both
+dry-run and apply/no-change runner generation pass. The final live audit passes
+three ingestion bundles, all 10 PDFs, and all four reconstruction notes; the
+three research ingestion records are now `verified`. The current tree passes
+141 curation-helper tests plus 30 read-only reproducibility-audit tests
+(171 total). Fixture/mock tests are not live-write evidence.
 
 ## Skill defects observed and changes made
 
@@ -230,11 +254,12 @@ these fixture/mock tests are not evidence of a live Zotero write.
 | Fixed-size item queries could silently prove only a collection prefix | Added advancing pagination and fail-closed duplicate/malformed-page checks |
 | A Zotero attachment could be redirected while an old PDF path still retained the approved bytes | Bound the current Desktop attachment path and local `/file/view/url` to the manifest path, then rechecked it immediately before mutation |
 | The reproducibility audit treated Zotero's attachment MD5 as a SHA-256 and compared the wrong path field | Resolve the live `/file/view/url`, hash the actual stored file with both SHA-256 and MD5, and require exact agreement with source, ingestion readback, API metadata, and stored path |
+| Committed-write readback did not distinguish local DB write from server-version progression | Local transaction success can occur while `object.version` stays unchanged before sync; committed-path classification now accepts freshly reloaded new content with a nondecreasing version, records server-version advancement separately, and leaves cloud claims to an authenticated remote readback |
 | Three reconstruction notes retained a pre-ingestion “not written to Zotero” snapshot after successful import | Added a dated Chinese provenance addendum with parent/attachment/note keys and require a fresh live note update plus API readback before restoring `verified` status |
+| Curated override comparison ignored Zotero whitespace normalization | Comparison now mirrors Zotero's control-character removal and outer trim; if equivalent, staging reuses the exact live HTML so `unchanged_verified`, file bytes, and hashes remain mutually consistent |
 | Web fallback could miss an unsynchronized local edit or local-only child change | Rechecked both local and remote inventories for every Web mutation and made the fresh local note version/hash the last pre-request gate |
 | Python's HTML stack treated `<br>` as a container and could miss a trailing second root | Added void-element and matched-stack handling, exact one-root enforcement, and rejection of active elements, event handlers, and control-obfuscated active URLs |
 | A timeout or HTTP 5xx left mutation outcome ambiguous | Classified transport/5xx outcomes by verified readback and reported an explicit unknown state when readback could not decide |
-| Same-version new content could be misclassified as a committed Desktop write | Required every committed readback and transaction-outcome classification to advance beyond the old item version |
 | A mistyped curated-override note key silently fell back to a generic wrapper | Validated every override key/path and rejected any override not consumed by exactly one eligible live note |
 | Deleted objects or an unavailable PDF could survive into a half-bound staging manifest | Rejected deleted parents/children and made a readable local PDF with magic bytes, path, attachment identity, and hash mandatory |
 | A reusable or group-writable staging tree exposed path-alias and replacement risk | Required a current-user, non-group/other-writable fresh root; reserved directories and files are exclusively created with no-follow leaf writes |

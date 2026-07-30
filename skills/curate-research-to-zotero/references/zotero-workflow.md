@@ -29,10 +29,12 @@ and saved inside one Zotero database transaction:
    target, and refuses a mismatch. It paginates instead of accepting a
    100-item prefix and snapshots every live collection parent plus each
    parent's child-note and attachment keys. A valid existing schema-9 note (or
-   a curated override byte-identical to live content) is
-   `unchanged_verified`; only a genuinely changed, valid projection is
-   `staged_verified`. Both statuses stay in the complete preflight inventory,
-   but only `staged_verified` is a mutation candidate;
+   a curated override equal after Zotero's storage trim) is
+   `unchanged_verified`; in the latter case, stage the exact live bytes so the
+   unchanged file and old/new hashes remain identical. Only a genuinely
+   changed, valid projection is `staged_verified`. Both statuses stay in the
+   complete preflight inventory, but only `staged_verified` is a mutation
+   candidate;
 2. bind each staged note to one verified local PDF attachment, its parent,
    link mode, PDF magic bytes, and SHA-256. Multiple PDF children are
    ambiguous and block staging unless an approved JSON
@@ -90,7 +92,14 @@ and saved inside one Zotero database transaction:
    transaction. The report keeps inventory and mutation counts/keys separate.
    The transaction rolls
    back on an in-transaction failure, rechecks parent membership and target
-   identity again at transaction start, and performs committed readback. If a
+   identity again at transaction start, and performs committed local-database
+   readback. That readback must reload the saved note and verify item type,
+   deletion state, parent, content, and a nondecreasing object version. It must
+   not require the object version to advance inside the sync barrier: Zotero's
+   [sync contract](https://www.zotero.org/support/dev/web_api/v3/syncing#local_object_versions)
+   leaves the server object version unchanged for a local edit and advances it
+   only after upload. Record local commit verification separately from later
+   server-version advancement. If a
    post-commit callback throws, it inspects all notes and reports
    committed/rolled-back/unknown instead of assuming rollback. It waits for an
    active sync to finish, uses Zotero's in-memory
@@ -101,10 +110,12 @@ and saved inside one Zotero database transaction:
    preference is never changed, is checked again at transaction start and
    completion, and is reported before/after;
 8. independently read back through the local API, update the manifest from
-   observed state, verify that the original automatic-sync preference was
-   preserved, and confirm the synchronized state. If sync was intentionally
-   paused outside this runner, restore it before the final synchronization
-   check.
+   observed state, and verify that the original automatic-sync preference was
+   preserved. This proves local persistence, not cloud synchronization. Claim
+   cloud synchronization only after a separate authenticated Web API readback
+   shows the uploaded content and an advanced server object version. If sync
+   was intentionally paused outside this runner, restore it before any remote
+   synchronization check.
 
 Do not paste `zotero_desktop_note_migration.js` directly: it is a template and
 has no bound manifest. A dry-run writes only its diagnostic report, not Zotero

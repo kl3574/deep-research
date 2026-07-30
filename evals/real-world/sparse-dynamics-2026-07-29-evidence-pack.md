@@ -34,6 +34,33 @@ scoping review 或算法复现
 | Assumptions | 本地 manifest 中的文件身份、访问来源、页数和哈希是本次资产审计的基准；四篇 schema-9 笔记中的 Claim ID/双定位是决策性全文证据入口。canonical publication 与实际 read copy 始终分开。 |
 | Success criteria | 交付全局地图、分离维度矩阵、路线矩阵、10 项 source registry、原子 claim ledger、冲突/缺口、真实 search trail 和诚实 stop decision；所有高影响结论有全文定位、被限定，或明确标成 unresolved。 |
 
+## 1.1 收口修正（2026-07-30）
+
+本回次与补充审计的收口为：
+
+- `v3`：dry-run 先核准 33 parents；新父条目 `TEST0001`
+  随后出现，apply 重枚举得到 34 observed / 33 approved，并在写前
+  fail-closed（`writePerformed=false`）；
+- `v4`：fresh inventory 为 `34` parents、`32` existing notes、`28` unchanged、`4` mutations、`2` no_existing_note，`preflight_ok`；
+- `v4`：Desktop 事务提交 4 notes，`writePerformed=true`、`rolledBack=false`；自动同步偏好写前/写后均为 `true`，barrier 正常释放；
+- `D6` 的 App 立即回读出现 false-positive（server-version 保持 `3918`，
+  byte 与语义 hash 都完全匹配）；Zotero 本地修改在上传前不推进 object
+  version。屏障释放后的独立本地 API 最终验证四条都为 `version=4034`
+  且 parent/hash 精确一致，但未做远端 Web API 读回，因此不声称 Cloud
+  同步已独立核验；
+- `v5` 暴露出 outer-whitespace trim 非幂等问题；第一次修正生成的 `v6`
+  虽显示 `0` mutation，但 runner 因 unchanged 文件与旧 hash 不一致而
+  fail-closed；
+- 最终修正对 storage-normalized 相等的 override 复用 live HTML；`v7`
+  只读复核为 `32` unchanged、`2` no existing note、`0` mutation、
+  `0` unchanged-hash mismatch，dry-run 与 apply/no-change runner 均成功
+  生成；
+- 结果收口为 `3` bundles、`10` PDFs、`4` notes 通过；`3` 条研究吸收记录通过核验；
+- 审计闭环总计：`141` curator tests + `30` reproducibility tests = `171`；
+- 首次 post-v4 审核把已含 `/api` 的 base URL 再拼接 `/api`，请求落到
+  `/api/api/...` 并失败；保留该原始 artifact，但它已被正确 endpoint 的
+  最终通过报告取代，不作收口证据。
+
 ## 2. 有界结论
 
 当前证据支持的最短决策链是：
@@ -351,7 +378,7 @@ process-noise 部分保持 unresolved，不能宣称检索完整或停止规则�
 整理后的本地验证（2026-07-30）：
 
 - `python3 -m unittest discover -s skills/curate-research-to-zotero/scripts -p 'test_*.py'`
-  运行 139 项 fixture/mock 测试，结果 `OK`；这不是 live Zotero 写入。
+  运行 141 项 fixture/mock 测试，结果 `OK`；这不是 live Zotero 写入。
 - `python3 -m unittest discover -s evals/real-world -p 'test_*.py'`
   运行 30 项只读审计 harness 测试，结果 `OK`。
 - 对三个技能分别运行 `skill-creator/scripts/quick_validate.py`，结果
