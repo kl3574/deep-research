@@ -107,7 +107,7 @@ def make_bundle(
     group_id: int = 123456,
     library_name: str = "PRIVATE_ZOTERO_TARGET",
     library_id: int = 2,
-    collection_key: str = "TEST0001",
+    collection_key: str = "TESTCOL1",
     collection_path: str = "PRIVATE_ZOTERO_TARGET/PRIVATE_ZOTERO_TARGET/PRIVATE_ZOTERO_TARGET",
     doi: str = "10.1234/undefined",
 ) -> None:
@@ -340,7 +340,7 @@ class AuditSparseDynamicsRunTests(unittest.TestCase):
             "library_name": "PRIVATE_ZOTERO_TARGET",
             "library_id": 2,
             "group_id": group_id,
-            "collection_key": "TEST0001",
+            "collection_key": "TESTCOL1",
             "collection_path": "PRIVATE_ZOTERO_TARGET/PRIVATE_ZOTERO_TARGET/PRIVATE_ZOTERO_TARGET",
         }
 
@@ -477,7 +477,7 @@ class AuditSparseDynamicsRunTests(unittest.TestCase):
     ) -> tuple[dict[tuple[str, str], dict[str, object]], dict[tuple[str, str], str]]:
         payloads: dict[tuple[str, str], dict[str, object]] = {}
         file_urls: dict[tuple[str, str], str] = {}
-        collection_key = "TEST0001"
+        collection_key = "TESTCOL1"
         group_id = 123456
         notes_dir = root / "notes"
         pdf_dir = root / "pdfs"
@@ -1031,7 +1031,7 @@ class AuditSparseDynamicsRunTests(unittest.TestCase):
                     "library_name": "PRIVATE_ZOTERO_TARGET",
                     "library_id": 2,
                     "group_id": 123456,
-                    "collection_key": "TEST0001",
+                    "collection_key": "TESTCOL1",
                     "collection_path": "PRIVATE_ZOTERO_TARGET/PRIVATE_ZOTERO_TARGET/PRIVATE_ZOTERO_TARGET",
                     "name": "sparse_dynamics",
                 },
@@ -1168,7 +1168,7 @@ class AuditSparseDynamicsRunTests(unittest.TestCase):
                             "library_name": "PRIVATE_ZOTERO_TARGET",
                             "library_id": 2,
                             "group_id": 123456,
-                            "collection_key": "TEST0001",
+                            "collection_key": "TESTCOL1",
                             "collection_path": "PRIVATE_ZOTERO_TARGET/PRIVATE_ZOTERO_TARGET/PRIVATE_ZOTERO_TARGET",
                         },
                     },
@@ -1726,7 +1726,7 @@ class AuditSparseDynamicsRunTests(unittest.TestCase):
                         "library_name": "PRIVATE_ZOTERO_TARGET",
                         "library_id": 2,
                         "group_id": 123456,
-                        "collection_key": "TEST0001",
+                        "collection_key": "TESTCOL1",
                         "collection_path": "PRIVATE_ZOTERO_TARGET/PRIVATE_ZOTERO_TARGET/PRIVATE_ZOTERO_TARGET",
                     },
                     "doi": f"10.1234/{source_id}",

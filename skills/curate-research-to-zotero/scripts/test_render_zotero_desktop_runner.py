@@ -68,7 +68,7 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
                         "library_id": 2,
                         "library_name": "PRIVATE_ZOTERO_TARGET",
                         "local_collection_id": 27,
-                        "collection_key": "TEST0001",
+                        "collection_key": "TESTCOL1",
                         "collection_name": "PRIVATE_ZOTERO_TARGET",
                         "collection_path": [
                             "PRIVATE_ZOTERO_TARGET",
@@ -379,7 +379,7 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
                     "library_id": 1234567,
                     "library_name": "PRIVATE_ZOTERO_TARGET",
                     "local_collection_id": 27,
-                    "collection_key": "TEST0001",
+                    "collection_key": "TESTCOL1",
                     "collection_name": "PRIVATE_ZOTERO_TARGET",
                     "collection_path": [
                         "PRIVATE_ZOTERO_TARGET",
@@ -583,7 +583,7 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
                     library: {{ libraryID: 1234567 }},
                     publicTarget: {{
                       group_id: 1234567,
-                      collection_key: "TEST0001",
+                      collection_key: "TESTCOL1",
                     }},
                   }};
                 }}
@@ -678,7 +678,7 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
                     "library_id": 1234567,
                     "library_name": "PRIVATE_ZOTERO_TARGET",
                     "local_collection_id": 27,
-                    "collection_key": "TEST0001",
+                    "collection_key": "TESTCOL1",
                     "collection_name": "PRIVATE_ZOTERO_TARGET",
                     "collection_path": [
                         "PRIVATE_ZOTERO_TARGET",
@@ -882,7 +882,7 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
                     library: {{ libraryID: 1234567 }},
                     publicTarget: {{
                       group_id: 1234567,
-                      collection_key: "TEST0001",
+                      collection_key: "TESTCOL1",
                     }},
                   }};
                 }}
@@ -1163,7 +1163,7 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
                 "library_id": 1234567,
                 "library_name": "PRIVATE_ZOTERO_TARGET",
                 "local_collection_id": 27,
-                "collection_key": "TEST0001",
+                "collection_key": "TESTCOL1",
                 "collection_name": "PRIVATE_ZOTERO_TARGET",
                 "collection_path": [
                     "PRIVATE_ZOTERO_TARGET",
@@ -1386,7 +1386,7 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
                     library: { libraryID: 1234567 },
                     publicTarget: {
                       group_id: 1234567,
-                      collection_key: "TEST0001",
+                      collection_key: "TESTCOL1",
                     },
                   };
                 }
@@ -1490,7 +1490,7 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
                     "library_id": 1234567,
                     "library_name": "PRIVATE_ZOTERO_TARGET",
                     "local_collection_id": 27,
-                    "collection_key": "TEST0001",
+                    "collection_key": "TESTCOL1",
                     "collection_name": "PRIVATE_ZOTERO_TARGET",
                     "collection_path": [
                         "PRIVATE_ZOTERO_TARGET",
@@ -1676,7 +1676,7 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
                     library: {{ libraryID: 1234567 }},
                     publicTarget: {{
                       group_id: 1234567,
-                      collection_key: "TEST0001",
+                      collection_key: "TESTCOL1",
                     }},
                   }};
                 }}

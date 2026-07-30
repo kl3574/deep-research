@@ -274,7 +274,7 @@ class PrepareNoteMigrationTests(unittest.TestCase):
             "local_collection_id": 27,
             "collection_path": ["A", "B"],
             "collection_name": "C",
-            "collection_key": "TEST0001",
+            "collection_key": "TESTCOL1",
         }
 
         with (
@@ -310,7 +310,7 @@ class PrepareNoteMigrationTests(unittest.TestCase):
             ),
         ):
             with self.assertRaisesRegex(RuntimeError, "collection name mismatch"):
-                module.resolve_target_contract(1234567, "TEST0001")
+                module.resolve_target_contract(1234567, "TESTCOL1")
 
     def test_resolve_target_contract_outputs_full_manifest_fields(self) -> None:
         selected = {
@@ -323,7 +323,7 @@ class PrepareNoteMigrationTests(unittest.TestCase):
                 "PRIVATE_ZOTERO_TARGET",
             ],
             "collection_name": "PRIVATE_ZOTERO_TARGET",
-            "collection_key": "TEST0001",
+            "collection_key": "TESTCOL1",
         }
 
         with (
@@ -373,7 +373,7 @@ class PrepareNoteMigrationTests(unittest.TestCase):
         ):
             target = module.resolve_target_contract(
                 1234567,
-                "TEST0001",
+                "TESTCOL1",
                 expected_collection_name="PRIVATE_ZOTERO_TARGET",
             )
 
@@ -381,7 +381,7 @@ class PrepareNoteMigrationTests(unittest.TestCase):
         self.assertEqual(target["library_id"], 2)
         self.assertEqual(target["library_name"], "PRIVATE_ZOTERO_TARGET")
         self.assertEqual(target["local_collection_id"], 27)
-        self.assertEqual(target["collection_key"], "TEST0001")
+        self.assertEqual(target["collection_key"], "TESTCOL1")
         self.assertEqual(target["collection_version"], 2209)
         self.assertEqual(
             target["collection_path"],
