@@ -93,12 +93,33 @@ evals/
 
 - `zotero-note-html.md` 定义中文 schema-9 知识笔记契约；
 - `verify_note_html.py` 检查章节、Claim ID、定位、LaTeX 与溯源；
-- `prepare_note_migration.py` 和 `update_existing_note.py` 分别负责无写入暂存与版本保护的既有笔记更新。
+- `prepare_note_migration.py` 负责无写入暂存；`render_zotero_desktop_runner.py`
+  可生成绑定 manifest 哈希的 Zotero App 预检/事务写入脚本；
+  `update_existing_note.py` 是版本保护的 HTTP/Web 备用路线。
 
-Zotero 版本能力在运行时探测。当前版本若不支持受授权的本地 `PATCH`，更新脚本只接受通过本机环境变量提供的专用 Web API key；不会把 key 写入文件或日志，也不会直接编辑 SQLite。
+已有笔记优先使用 Zotero Desktop 官方 `工具 → 开发者 → 运行
+JavaScript`：无需 API key，manifest v2 干运行先核验完整目标路径、父条目/
+子笔记/附件清单、明确 PDF、版本和文件哈希，应用时在一个 Zotero 数据库
+事务中重枚举并写入；可用短期内存
+屏障保持“自动同步”设置开启，并在写后区分字节一致与严格语义一致。若无法由用户
+操作 App，再运行时探测 `Zotero-Server-ID`，或回退到通过本机环境变量
+提供的专用 Web API key。Web 干运行会核验 key 对目标 group 的读写权限
+并预检全部远端对象；由于 Connector 不暴露 local collection ID 到
+group/key 的可靠绑定，HTTP/Web 实写还要求用户单独确认预览中的
+`group_id` 与 `collection_key`。任何路线都不记录 key，也不直接编辑
+SQLite。
 
 真实前向测试见
 [稀疏动力学识别与参数校准](evals/real-world/sparse-dynamics-2026-07-29.md)。
+可复现实验审计可直接运行：
+
+```bash
+python evals/real-world/audit_sparse_dynamics_run.py \
+  --output /tmp/sparse-dynamics-audit.json
+```
+
+默认读取 `~/.local/share/deep-research/sparse-dynamics-2026-07-29` 下的
+`manifest.json`、`ingestion_manifest.json`，产出 JSON 报告到标准输出。
 
 ## 边界
 

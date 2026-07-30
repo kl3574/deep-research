@@ -72,6 +72,42 @@ SHA_RE = re.compile(r"\b[0-9a-f]{64}\b")
 DOI_RE = re.compile(r"\b10\.\d{4,9}/\S+", re.I)
 URL_RE = re.compile(r"\bhttps?://\S+", re.I)
 CLAIM_ID_RE = re.compile(r"^C[1-9]\d*$")
+VOID_ELEMENTS = {
+    "area",
+    "base",
+    "br",
+    "col",
+    "embed",
+    "hr",
+    "img",
+    "input",
+    "link",
+    "meta",
+    "param",
+    "source",
+    "track",
+    "wbr",
+}
+DANGEROUS_ELEMENTS = {
+    "base",
+    "button",
+    "embed",
+    "form",
+    "iframe",
+    "input",
+    "link",
+    "math",
+    "meta",
+    "object",
+    "option",
+    "script",
+    "select",
+    "style",
+    "svg",
+    "template",
+    "textarea",
+}
+URL_ATTRIBUTES = {"action", "formaction", "href", "poster", "src", "xlink:href"}
 
 
 class NoteParser(HTMLParser):
@@ -84,16 +120,52 @@ class NoteParser(HTMLParser):
         self.rows: list[list[str]] = []
         self.math_blocks: list[str] = []
         self.paragraphs: list[str] = []
+        self.structural_errors: list[str] = []
         self._capture: str | None = None
         self._buffer: list[str] = []
         self._row: list[str] | None = None
         self._cell: list[str] | None = None
 
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+    def _handle_start(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+        *,
+        self_closing: bool,
+    ) -> None:
         clean = {key: value or "" for key, value in attrs}
+        if tag in DANGEROUS_ELEMENTS:
+            self.structural_errors.append(
+                f"NF-18: forbidden active or embedded element '<{tag}>'"
+            )
+        for key, value in clean.items():
+            normalized_value = value.strip().lower()
+            browser_scheme_value = re.sub(
+                r"[\x00-\x20\x7f]+",
+                "",
+                normalized_value,
+            )
+            if key.startswith("on") or key == "srcdoc":
+                self.structural_errors.append(
+                    f"NF-18: forbidden active attribute '{key}' on '<{tag}>'"
+                )
+            elif key in URL_ATTRIBUTES and browser_scheme_value.startswith(
+                ("javascript:", "vbscript:", "data:text/html")
+            ):
+                self.structural_errors.append(
+                    f"NF-18: forbidden active URL in '{key}' on '<{tag}>'"
+                )
+            elif key == "style" and (
+                "javascript:" in normalized_value
+                or "expression(" in normalized_value
+            ):
+                self.structural_errors.append(
+                    f"NF-18: forbidden active CSS on '<{tag}>'"
+                )
         if not self.stack:
             self.root_tags.append((tag, clean))
-        self.stack.append(tag)
+        if not self_closing and tag not in VOID_ELEMENTS:
+            self.stack.append(tag)
         if tag in {"h1", "h2", "p"}:
             self._capture = tag
             self._buffer = []
@@ -105,7 +177,33 @@ class NoteParser(HTMLParser):
         elif tag in {"th", "td"} and self._row is not None:
             self._cell = []
 
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self._handle_start(tag, attrs, self_closing=False)
+
+    def handle_startendtag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> None:
+        self._handle_start(tag, attrs, self_closing=True)
+
     def handle_endtag(self, tag: str) -> None:
+        if tag in VOID_ELEMENTS:
+            self.structural_errors.append(
+                f"NF-02: void element '<{tag}>' must not have an end tag"
+            )
+            return
+        if not self.stack:
+            self.structural_errors.append(
+                f"NF-02: unexpected closing tag '</{tag}>'"
+            )
+            return
+        if self.stack[-1] != tag:
+            self.structural_errors.append(
+                f"NF-02: mismatched closing tag '</{tag}>'; "
+                f"expected '</{self.stack[-1]}>'"
+            )
+            return
         text = " ".join("".join(self._buffer).split())
         if tag == "h1" and self._capture == "h1":
             self.h1.append(text)
@@ -125,10 +223,13 @@ class NoteParser(HTMLParser):
         elif tag == "tr" and self._row is not None:
             self.rows.append(self._row)
             self._row = None
-        if self.stack:
-            self.stack.pop()
+        self.stack.pop()
 
     def handle_data(self, data: str) -> None:
+        if not self.stack and data.strip():
+            self.structural_errors.append(
+                "NF-02: non-whitespace text occurs outside the root element"
+            )
         if self._capture is not None:
             self._buffer.append(data)
         if self._cell is not None:
@@ -154,8 +255,15 @@ def validate_note(raw: str) -> tuple[list[str], list[str], dict[str, object]]:
     parser = NoteParser()
     try:
         parser.feed(raw)
+        parser.close()
     except Exception as exc:
         return [f"HTML parse failure: {exc}"], warnings, {}
+    errors.extend(parser.structural_errors)
+    if parser.stack:
+        errors.append(
+            "NF-02: unclosed element stack: "
+            + " > ".join(f"<{tag}>" for tag in parser.stack)
+        )
 
     if len(parser.root_tags) != 1:
         errors.append(f"NF-02: expected exactly one root element, found {len(parser.root_tags)}")
@@ -180,7 +288,10 @@ def validate_note(raw: str) -> tuple[list[str], list[str], dict[str, object]]:
         errors.append("NF-03: required sections are not in contract order")
 
     status_html = section_text(raw, "资料与阅读状态")
-    status_text = re.sub(r"<[^>]+>", "", status_html)
+    # Zotero may compact source newlines while retaining semantic separators
+    # such as <br>, or insert inline wrappers such as <strong>. Replace tags
+    # with spaces so adjacent metadata values do not merge into one token.
+    status_text = re.sub(r"<[^>]+>", " ", status_html)
     for label in REQUIRED_METADATA_LABELS:
         if label not in status_text:
             errors.append(f"NF-06: missing metadata label '{label}'")
@@ -190,8 +301,25 @@ def validate_note(raw: str) -> tuple[list[str], list[str], dict[str, object]]:
         reading_depth = None
     else:
         reading_depth = depth_matches[0].lower()
-    if "全文SHA-256" in status_text and not SHA_RE.search(status_text.lower()):
-        errors.append("NF-06: full-text SHA-256 must be 64 lowercase hex characters")
+    full_text_sha_labels = re.findall(r"全文SHA-256\s*[：:]", status_text)
+    full_text_sha_matches = re.findall(
+        r"全文SHA-256\s*[：:]\s*([0-9a-f]{64})(?![0-9A-Fa-f])",
+        status_text,
+    )
+    if len(full_text_sha_labels) != 1 or len(full_text_sha_matches) != 1:
+        errors.append(
+            "NF-06: full-text SHA-256 must occur exactly once as "
+            "'全文SHA-256：' followed by 64 lowercase hex characters"
+        )
+        full_text_sha256 = None
+    else:
+        full_text_sha256 = full_text_sha_matches[0]
+    access_match = re.search(
+        r"访问层级[：:]\s*([a-z_]+)",
+        status_text,
+        flags=re.I,
+    )
+    access_level = access_match.group(1).lower() if access_match else None
     if "DOI或稳定标识" in status_text and not (
         DOI_RE.search(status_text) or URL_RE.search(status_text) or "unresolved" in status_text
     ):
@@ -294,6 +422,8 @@ def validate_note(raw: str) -> tuple[list[str], list[str], dict[str, object]]:
         "claim_ids": sorted(seen_claim_ids),
         "math_block_count": len(parser.math_blocks),
         "reading_depth": reading_depth,
+        "access_level": access_level,
+        "full_text_sha256": full_text_sha256,
     }
     if not parser.math_blocks:
         warnings.append("No display-math block present; acceptable only when the source note needs no display equation")

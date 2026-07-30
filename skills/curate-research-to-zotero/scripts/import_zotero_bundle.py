@@ -495,7 +495,18 @@ def main() -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return EXIT_OK
     except BundleError as exc:
-        print(json.dumps({"status": "error", "exit_code": exc.code, "error": str(exc)}, ensure_ascii=False, indent=2), file=sys.stderr)
+        print(
+            json.dumps(
+                {
+                    "status": "error",
+                    "exit_code": exc.code,
+                    "error": str(exc),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            file=sys.stderr,
+        )
         return exc.code
 
 
