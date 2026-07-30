@@ -38,16 +38,16 @@ scoping review 或算法复现
 
 本回次与补充审计的收口为：
 
-- `v3`：dry-run 先核准 33 parents；新父条目 `TEST0001`
-  随后出现，apply 重枚举得到 34 observed / 33 approved，并在写前
-  fail-closed（`writePerformed=false`）；
+- `v3`：dry-run 先核准 33 parents；一个新同步父条目随后出现，apply
+  重枚举得到 34 observed / 33 approved，并在写前 fail-closed
+  （`writePerformed=false`）；
 - `v4`：fresh inventory 为 `34` parents、`32` existing notes、`28` unchanged、`4` mutations、`2` no_existing_note，`preflight_ok`；
 - `v4`：Desktop 事务提交 4 notes，`writePerformed=true`、`rolledBack=false`；自动同步偏好写前/写后均为 `true`，barrier 正常释放；
-- `D6` 的 App 立即回读出现 false-positive（server-version 保持 `3918`，
-  byte 与语义 hash 都完全匹配）；Zotero 本地修改在上传前不推进 object
-  version。屏障释放后的独立本地 API 最终验证四条都为 `version=4034`
-  且 parent/hash 精确一致，但未做远端 Web API 读回，因此不声称 Cloud
-  同步已独立核验；
+- identifiability 笔记的 App 立即回读出现 false-positive
+  （server-version 保持 `3918`，byte 与语义 hash 都完全匹配）；Zotero
+  本地修改在上传前不推进 object version。屏障释放后的独立本地 API
+  最终验证四条都为 `version=4034` 且 parent/hash 精确一致，但未做远端
+  Web API 读回，因此不声称 Cloud 同步已独立核验；
 - `v5` 暴露出 outer-whitespace trim 非幂等问题；第一次修正生成的 `v6`
   虽显示 `0` mutation，但 runner 因 unchanged 文件与旧 hash 不一致而
   fail-closed；

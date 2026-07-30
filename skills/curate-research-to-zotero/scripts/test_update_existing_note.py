@@ -1018,7 +1018,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
         ):
             access, remotes = module.preflight_web_route(
                 1234567,
-                "TEST0001",
+                "TESTCOL1",
                 locals_verified,
                 "web-secret-for-test",
             )
@@ -1045,7 +1045,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
         parent_obj = {
             "data": {
                 "itemType": "journalArticle",
-                "collections": ["TEST0001"],
+                "collections": ["TESTCOL1"],
             }
         }
         with patch.object(
@@ -1058,7 +1058,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
         ) as get_json_mock:
             result = module.verify_remote_entry(
                 1234567,
-                "TEST0001",
+                "TESTCOL1",
                 local,
                 "web-secret-for-test",
             )
@@ -1084,7 +1084,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
         parent_obj = {
             "data": {
                 "itemType": "journalArticle",
-                "collections": ["TEST0001"],
+                "collections": ["TESTCOL1"],
             }
         }
         with patch.object(
@@ -1098,7 +1098,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "version has invalid type bool"):
                 module.verify_remote_entry(
                     1234567,
-                    "TEST0001",
+                    "TESTCOL1",
                     local,
                     "web-secret-for-test",
                 )
@@ -1120,7 +1120,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
         parent_obj = {
             "data": {
                 "itemType": "journalArticle",
-                "collections": ["TEST0001"],
+                "collections": ["TESTCOL1"],
             }
         }
         with patch.object(
@@ -1137,7 +1137,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                 ):
                     module.verify_remote_entry(
                         1234567,
-                        "TEST0001",
+                        "TESTCOL1",
                         local,
                         "web-secret-for-test",
                     )

@@ -145,7 +145,8 @@ separate version facts.
 Three new parent/PDF/note bundles were imported one at a time into the confirmed
 group collection
 `PRIVATE_ZOTERO_TARGET -> PRIVATE_ZOTERO_TARGET -> PRIVATE_ZOTERO_TARGET -> PRIVATE_ZOTERO_TARGET`
-(`TEST0001`). Readback verified:
+(the internal collection key is intentionally omitted from the public report).
+Readback verified:
 
 - 3/3 parent DOI and collection memberships;
 - 3/3 schema-9 Chinese child notes by normalized HTML equality;
@@ -178,9 +179,9 @@ false-positive failure record, paired with
 
 After those writes, the hardened manifest-v2 `v3` stager and dry-run approved
 an exact inventory of 33 parents: 28 unchanged notes, four staged note updates,
-and one parent without a note. Before apply, a synchronized parent
-`TEST0001` appeared. Transaction-start inventory re-enumeration observed 34
-parents and failed closed before any write (`writePerformed=false`).
+and one parent without a note. Before apply, a new synchronized parent
+appeared. Transaction-start inventory re-enumeration observed 34 parents and
+failed closed before any write (`writePerformed=false`).
 
 A fresh `v4` staging bound the new 34-parent inventory: 32 existing notes,
 28 unchanged notes, four mutations, and two parents without notes. Its
@@ -189,9 +190,9 @@ committed all four mutations (`writePerformed=true`, `rolledBack=false`).
 Automatic sync remained enabled before and after the run, its preference was
 not changed, and the temporary barrier was released without lease expiry.
 
-The immediate App readback returned a false positive on `TEST0001`: the byte
-and semantic hashes already matched, but its server object version was still
-the pre-sync value `3918`. Zotero's
+The immediate App readback returned a false positive on the identifiability
+note: the byte and semantic hashes already matched, but its server object
+version was still the pre-sync value `3918`. Zotero's
 [local-object-version contract](https://www.zotero.org/support/dev/web_api/v3/syncing#local_object_versions)
 leaves an object's server version unchanged until upload. Independent
 local-API readback after barrier release found all four notes at version
