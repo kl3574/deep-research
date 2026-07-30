@@ -351,7 +351,7 @@ process-noise 部分保持 unresolved，不能宣称检索完整或停止规则�
 整理后的本地验证（2026-07-30）：
 
 - `python3 -m unittest discover -s skills/curate-research-to-zotero/scripts -p 'test_*.py'`
-  运行 133 项 fixture/mock 测试，结果 `OK`；这不是 live Zotero 写入。
+  运行 139 项 fixture/mock 测试，结果 `OK`；这不是 live Zotero 写入。
 - `python3 -m unittest discover -s evals/real-world -p 'test_*.py'`
   运行 30 项只读审计 harness 测试，结果 `OK`。
 - 对三个技能分别运行 `skill-creator/scripts/quick_validate.py`，结果

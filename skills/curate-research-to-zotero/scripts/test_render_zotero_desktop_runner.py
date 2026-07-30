@@ -115,11 +115,30 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
 
         self.assertNotIn(module.SENTINEL, rendered)
         self.assertIn('"apply": false', rendered)
+        self.assertIn('"requireAutoSyncEnabled": false', rendered)
         self.assertIn('"expectedInventoryNoteCount": 1', rendered)
         self.assertIn('"expectedMutationCount": 1', rendered)
         self.assertIn('"expectedMutationKeys": ["ABCDEFGH"]', rendered)
         self.assertIn(manifest_sha256, rendered)
         self.assertIn("const migrationReport = await runMigration();", rendered)
+
+    def test_render_runner_respects_require_auto_sync_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manifest = self.manifest(Path(temp_dir))
+
+            rendered_disabled = module.render_runner(
+                manifest,
+                apply=False,
+                require_auto_sync_enabled=False,
+            )
+            rendered_enabled = module.render_runner(
+                manifest,
+                apply=False,
+                require_auto_sync_enabled=True,
+            )
+
+        self.assertIn('"requireAutoSyncEnabled": false', rendered_disabled)
+        self.assertIn('"requireAutoSyncEnabled": true', rendered_enabled)
 
     def test_apply_uses_internal_sync_barrier(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -951,9 +970,513 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
         self.assertFalse(result["applyTransactionCalled"])
         self.assertFalse(result["readBackCalled"])
 
+    @unittest.skipUnless(NODE, "Node.js is required for runner execution tests")
+    def test_run_migration_dry_run_succeeds_when_auto_sync_enabled(self) -> None:
+        result = self._run_auto_sync_preference_scenario(
+            status="staged_verified",
+            apply=False,
+            require_auto_sync_enabled=True,
+            sync_values=[True, True],
+            expected_mutation_count=1,
+            expected_mutation_keys=["STAGE001"],
+        )
+
+        self.assertEqual(result["status"], "preflight_ok")
+        self.assertEqual(result["mode"], "dry_run")
+        self.assertFalse(result["writePerformed"])
+        self.assertTrue(result["autoSyncObserved"])
+        self.assertTrue(result["autoSyncAfter"])
+        self.assertGreaterEqual(result["syncReads"], 2)
+        self.assertFalse(result["preferenceChanged"])
+        self.assertFalse(result["syncWritePerformed"])
+        self.assertEqual(result["mutationCount"], 1)
+        self.assertTrue(result["verifyLiveManifestInventoryCalled"])
+        self.assertTrue(result["resolveAndVerifyTargetCalled"])
+        self.assertFalse(result["verifyLiveStateAgainCalled"])
+        self.assertFalse(result["acquireSyncBarrierCalled"])
+        self.assertFalse(result["applyTransactionCalled"])
+
+    @unittest.skipUnless(NODE, "Node.js is required for runner execution tests")
+    def test_run_migration_dry_run_fails_when_auto_sync_disabled(self) -> None:
+        result = self._run_auto_sync_preference_scenario(
+            status="staged_verified",
+            apply=False,
+            require_auto_sync_enabled=True,
+            sync_values=[False],
+            expected_mutation_count=1,
+            expected_mutation_keys=["STAGE001"],
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["mode"], "dry_run")
+        self.assertEqual(result["phase"], "load_manifest")
+        self.assertFalse(result["writePerformed"])
+        self.assertFalse(result["autoSyncObserved"])
+        self.assertFalse(result["preferenceChanged"])
+        self.assertFalse(result["syncWritePerformed"])
+        self.assertFalse(result["resolveAndVerifyTargetCalled"])
+        self.assertFalse(result["verifyLiveManifestInventoryCalled"])
+        self.assertFalse(result["verifyLiveStateAgainCalled"])
+        self.assertFalse(result["applyTransactionCalled"])
+        self.assertFalse(result["acquireSyncBarrierCalled"])
+        self.assertIn("automatic sync is not enabled", result["errorMessage"])
 
     @unittest.skipUnless(NODE, "Node.js is required for runner execution tests")
     def test_run_migration_no_changes_when_no_staged_mutations(self) -> None:
+        result = self._run_auto_sync_preference_scenario(
+            status="unchanged_verified",
+            apply=True,
+            require_auto_sync_enabled=True,
+            sync_values=[True, True],
+            expected_mutation_count=0,
+            expected_mutation_keys=[],
+        )
+
+        self.assertEqual(result["status"], "no_changes")
+        self.assertEqual(result["mode"], "apply")
+        self.assertFalse(result["writePerformed"])
+        self.assertTrue(result["autoSyncObserved"])
+        self.assertTrue(result["autoSyncAfter"])
+        self.assertFalse(result["preferenceChanged"])
+        self.assertTrue(result["preferencePreserved"])
+        self.assertFalse(result["syncWritePerformed"])
+        self.assertEqual(result["mutationCount"], 0)
+        self.assertEqual(result["mutationKeys"], [])
+        self.assertEqual(result["syncReads"], 2)
+        self.assertFalse(result["applyTransactionCalled"])
+        self.assertFalse(result["acquireSyncBarrierCalled"])
+        self.assertFalse(result["readBackCalled"])
+
+    @unittest.skipUnless(NODE, "Node.js is required for runner execution tests")
+    def test_run_migration_no_changes_fails_when_auto_sync_turns_off(self) -> None:
+        result = self._run_auto_sync_preference_scenario(
+            status="unchanged_verified",
+            apply=True,
+            require_auto_sync_enabled=True,
+            sync_values=[True, False],
+            expected_mutation_count=0,
+            expected_mutation_keys=[],
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["mode"], "apply")
+        self.assertEqual(result["phase"], "preflight_entries")
+        self.assertFalse(result["writePerformed"])
+        self.assertTrue(result["autoSyncObserved"])
+        self.assertFalse(result["autoSyncAfter"])
+        self.assertTrue(result["preferenceChanged"])
+        self.assertFalse(result["preferencePreserved"])
+        self.assertFalse(result["syncWritePerformed"])
+        self.assertEqual(result["syncReads"], 2)
+        self.assertIn("no longer enabled", result["errorMessage"])
+        self.assertFalse(result["applyTransactionCalled"])
+        self.assertFalse(result["acquireSyncBarrierCalled"])
+        self.assertFalse(result["readBackCalled"])
+
+    @unittest.skipUnless(NODE, "Node.js is required for runner execution tests")
+    def test_run_migration_dry_run_fails_when_auto_sync_turns_off(self) -> None:
+        result = self._run_auto_sync_preference_scenario(
+            status="staged_verified",
+            apply=False,
+            require_auto_sync_enabled=True,
+            sync_values=[True, False],
+            expected_mutation_count=1,
+            expected_mutation_keys=["STAGE001"],
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["mode"], "dry_run")
+        self.assertEqual(result["phase"], "preflight_entries")
+        self.assertFalse(result["writePerformed"])
+        self.assertTrue(result["autoSyncObserved"])
+        self.assertFalse(result["autoSyncAfter"])
+        self.assertTrue(result["preferenceChanged"])
+        self.assertFalse(result["preferencePreserved"])
+        self.assertFalse(result["syncWritePerformed"])
+        self.assertEqual(result["syncReads"], 2)
+        self.assertIn("disabled during dry-run", result["errorMessage"])
+        self.assertTrue(result["resolveAndVerifyTargetCalled"])
+        self.assertTrue(result["verifyLiveManifestInventoryCalled"])
+        self.assertFalse(result["verifyLiveStateAgainCalled"])
+        self.assertFalse(result["acquireSyncBarrierCalled"])
+
+    @unittest.skipUnless(NODE, "Node.js is required for runner execution tests")
+    def test_run_migration_dry_run_succeeds_when_auto_sync_flag_disabled(self) -> None:
+        result = self._run_auto_sync_preference_scenario(
+            status="staged_verified",
+            apply=False,
+            require_auto_sync_enabled=False,
+            sync_values=[False, False],
+            expected_mutation_count=1,
+            expected_mutation_keys=["STAGE001"],
+        )
+
+        self.assertEqual(result["status"], "preflight_ok")
+        self.assertEqual(result["mode"], "dry_run")
+        self.assertFalse(result["writePerformed"])
+        self.assertFalse(result["autoSyncObserved"])
+        self.assertFalse(result["autoSyncAfter"])
+        self.assertFalse(result["preferenceChanged"])
+        self.assertTrue(result["preferencePreserved"])
+        self.assertFalse(result["syncWritePerformed"])
+        self.assertEqual(result["mutationCount"], 1)
+        self.assertEqual(result["syncReads"], 2)
+        self.assertTrue(result["resolveAndVerifyTargetCalled"])
+        self.assertTrue(result["verifyLiveManifestInventoryCalled"])
+        self.assertFalse(result["verifyLiveStateAgainCalled"])
+        self.assertFalse(result["acquireSyncBarrierCalled"])
+
+    def _build_auto_sync_manifest(
+        self,
+        *,
+        status,
+        collection_path_tail="PRIVATE_ZOTERO_TARGET",
+    ):
+        if status == "unchanged_verified":
+            note_key = "NOOP0001"
+            old_sha = "d" * 64
+            new_sha = "d" * 64
+            old_path = "/tmp/unchanged.old.html"
+            new_path = "/tmp/unchanged.new.html"
+            pdf_path = "/tmp/unchanged.pdf"
+            pdf_sha256 = "f" * 64
+            child_note_inventory = ["NOOP0001"]
+            child_attachment_inventory = ["PDFATTB1"]
+            pdf_attachment_key = "PDFATTB1"
+        else:
+            note_key = "STAGE001"
+            old_sha = "a" * 64
+            new_sha = "b" * 64
+            old_path = "/tmp/stage.old.html"
+            new_path = "/tmp/stage.new.html"
+            pdf_path = "/tmp/stage.pdf"
+            pdf_sha256 = "c" * 64
+            child_note_inventory = ["STAGE001"]
+            child_attachment_inventory = ["PDFATTA1"]
+            pdf_attachment_key = "PDFATTA1"
+
+        return {
+            "manifest_version": "2",
+            "write_performed": False,
+            "target": {
+                "group_id": 1234567,
+                "library_id": 1234567,
+                "library_name": "PRIVATE_ZOTERO_TARGET",
+                "local_collection_id": 27,
+                "collection_key": "TEST0001",
+                "collection_name": "PRIVATE_ZOTERO_TARGET",
+                "collection_path": [
+                    "PRIVATE_ZOTERO_TARGET",
+                    "PRIVATE_ZOTERO_TARGET",
+                    collection_path_tail,
+                ],
+            },
+            "collection_item_inventory": ["HGFEDCBA"],
+            "entries": [
+                {
+                    "status": status,
+                    "note_key": note_key,
+                    "parent_key": "HGFEDCBA",
+                    "expected_parent_key": "HGFEDCBA",
+                    "child_note_inventory": child_note_inventory,
+                    "child_attachment_inventory": child_attachment_inventory,
+                    "note_version": 1,
+                    "old_path": old_path,
+                    "new_path": new_path,
+                    "old_sha256": old_sha,
+                    "new_sha256": new_sha,
+                    "pdf_path": pdf_path,
+                    "pdf_sha256": pdf_sha256,
+                    "pdf_attachment_key": pdf_attachment_key,
+                    "pdf_attachment_link_mode": "linked_file",
+                    "validation_summary": {"schema_version": "9"},
+                    "validation_errors": [],
+                },
+            ],
+        }
+
+    def _run_auto_sync_preference_scenario(
+        self,
+        *,
+        status,
+        apply,
+        require_auto_sync_enabled,
+        sync_values,
+        expected_mutation_count,
+        expected_mutation_keys,
+        collection_path_tail="PRIVATE_ZOTERO_TARGET",
+    ):
+        manifest = self._build_auto_sync_manifest(
+            status=status,
+            collection_path_tail=collection_path_tail,
+        )
+        manifest_text = json.dumps(manifest, ensure_ascii=False)
+        function_source = extract_js_function(
+            "async function runMigration",
+            "\nawait assertFreshReportPath",
+        )
+        sync_values_text = json.dumps(sync_values)
+
+        script = textwrap.dedent(
+            """
+                const manifestText = PLACEHOLDER_MANIFEST_TEXT;
+                function assertion(condition, message, details) {
+                  if (!condition) {
+                    const error = new Error(message);
+                    error.details = details;
+                    throw error;
+                  }
+                }
+                function exactArrayEqual(left, right) {
+                  return Array.isArray(left)
+                    && Array.isArray(right)
+                    && left.length === right.length
+                    && left.every((value, index) => value === right[index]);
+                }
+                function validatedKeyInventory(value, label, options) {
+                  options = options || {};
+                  assertion(Array.isArray(value), `${label} is not an array`);
+                  assertion(
+                    !options.nonempty || value.length > 0,
+                    `${label} is empty`,
+                  );
+                  const keys = value.map(key => String(key || ""));
+                  assertion(
+                    keys.every(key => /^[A-Z0-9]{8}$/.test(key)),
+                    `${label} contains an invalid item key`,
+                  );
+                  assertion(
+                    exactArrayEqual(keys, [...keys].sort())
+                      && new Set(keys).size === keys.length,
+                    `${label} must be sorted and duplicate-free`,
+                  );
+                  return keys;
+                }
+                function validateManifestContract(manifest) {
+                  const collectionItemInventory = validatedKeyInventory(
+                    manifest.collection_item_inventory,
+                    "collection_item_inventory",
+                    { nonempty: true },
+                  );
+                  assertion(Array.isArray(manifest.entries), "manifest entries are missing");
+                  assertion(
+                    manifest.entries.every(
+                      entry => entry && typeof entry === "object",
+                    ),
+                    "manifest contains a non-object entry",
+                  );
+                  const parentKeys = manifest.entries.map(entry =>
+                    String(entry.parent_key || ""),
+                  );
+                  assertion(
+                    parentKeys.length === collectionItemInventory.length
+                      && new Set(parentKeys).size === collectionItemInventory.length,
+                    "manifest entries do not exactly cover collection_item_inventory",
+                  );
+                  const allowedStatuses = new Set([
+                    "staged_verified",
+                    "unchanged_verified",
+                    "staged_invalid",
+                    "no_existing_note",
+                    "blocked_multiple_notes",
+                    "blocked_multiple_pdfs",
+                  ]);
+                  for (const entry of manifest.entries) {
+                    const parentKey = String(entry.parent_key || "");
+                    assertion(
+                      allowedStatuses.has(entry.status),
+                      `${parentKey}: unsupported migration status`,
+                    );
+                    const childNoteInventory = validatedKeyInventory(
+                      entry.child_note_inventory,
+                      `${parentKey}: child_note_inventory`,
+                    );
+                    const childAttachmentInventory = validatedKeyInventory(
+                      entry.child_attachment_inventory,
+                      `${parentKey}: child_attachment_inventory`,
+                    );
+                    if (
+                      entry.status === "staged_verified"
+                      || entry.status === "unchanged_verified"
+                    ) {
+                      const noteKey = String(entry.note_key || "");
+                      assertion(
+                        entry.expected_parent_key === parentKey,
+                        `${noteKey}: parent_key and expected_parent_key differ`,
+                      );
+                      assertion(
+                        exactArrayEqual(childNoteInventory, [noteKey]),
+                        `${noteKey}: staged parent must have exactly the approved child note`,
+                      );
+                      assertion(
+                        childAttachmentInventory.includes(entry.pdf_attachment_key),
+                        `${noteKey}: approved PDF attachment is absent from child inventory`,
+                      );
+                    }
+                  }
+                  const blocking = manifest.entries.filter(entry =>
+                    ["staged_invalid", "blocked_multiple_notes", "blocked_multiple_pdfs"]
+                      .includes(entry.status)
+                  );
+                  assertion(
+                    blocking.length === 0,
+                    "manifest contains invalid or ambiguous entries",
+                    blocking.map(entry => ({
+                      parentKey: entry.parent_key,
+                      status: entry.status,
+                    })),
+                  );
+                  return {
+                    collectionItemInventory,
+                    entries: manifest.entries,
+                  };
+                }
+                function sha256Text() {
+                  return "MANIFEST_SHA256";
+                }
+                function plainError(error) {
+                  return {
+                    name: error && error.name ? error.name : "Error",
+                    message: error && error.message ? error.message : String(error),
+                    details: error && error.details,
+                  };
+                }
+                const CONFIG = {
+                  apply: PLACEHOLDER_APPLY,
+                  reportPath: "/tmp/report.json",
+                  manifestPath: "/tmp/manifest.json",
+                  manifestSHA256: "MANIFEST_SHA256",
+                  requireAutoSyncEnabled: PLACEHOLDER_REQUIRE_AUTO_SYNC,
+                  expectedInventoryNoteCount: 1,
+                  expectedMutationCount: PLACEHOLDER_EXPECTED_MUTATION_COUNT,
+                  expectedMutationKeys: PLACEHOLDER_EXPECTED_MUTATION_KEYS,
+                };
+                const migrationText = manifestText;
+                let syncReads = 0;
+                const syncValues = PLACEHOLDER_SYNC_VALUES;
+                const syncFallback = syncValues.length ? syncValues[syncValues.length - 1] : null;
+                const Zotero = {
+                  File: {
+                    getContentsAsync: async () => migrationText,
+                  },
+                  Prefs: {
+                    get: (key) => {
+                      if (key !== "sync.autoSync") {
+                        return null;
+                      }
+                      syncReads += 1;
+                      const nextValue = syncValues.shift();
+                      return nextValue === undefined ? syncFallback : nextValue;
+                    },
+                  },
+                };
+                let resolveAndVerifyTargetCalled = false;
+                let verifyLiveManifestInventoryCalled = false;
+                let verifyLiveStateAgainCalled = false;
+                let applyTransactionCalled = false;
+                let acquireSyncBarrierCalled = false;
+                let readBackCalled = false;
+                function normalizedNoteHTML(value) {
+                  return value;
+                }
+                async function resolveAndVerifyTarget() {
+                  resolveAndVerifyTargetCalled = true;
+                  return {
+                    collection: { id: 27 },
+                    library: { libraryID: 1234567 },
+                    publicTarget: {
+                      group_id: 1234567,
+                      collection_key: "TEST0001",
+                    },
+                  };
+                }
+                async function verifyLiveManifestInventory() {
+                  verifyLiveManifestInventoryCalled = true;
+                  return { collectionItemCount: 1 };
+                }
+                async function verifyLiveStateAgain(verified) {
+                  verifyLiveStateAgainCalled = true;
+                }
+                async function verifyEntry(entry) {
+                  return {
+                    status: entry.status,
+                    noteKey: entry.note_key,
+                    parentKey: entry.parent_key,
+                    oldVersion: 1,
+                    oldSHA256: "old",
+                    sourceSHA256: "new",
+                    expectedStoredSHA256: "new",
+                    storageNormalization: "none",
+                  };
+                }
+                async function acquireSyncBarrier() {
+                  acquireSyncBarrierCalled = true;
+                  return {
+                    state: {
+                      leaseExpired: false,
+                      released: false,
+                      leaseMS: 120000,
+                    },
+                    waitedMS: 1,
+                    release() {},
+                  };
+                }
+                async function applyTransaction() {
+                  applyTransactionCalled = true;
+                }
+                async function inspectTransactionOutcome() {
+                  return { outcome: "committed" };
+                }
+                async function readBack() {
+                  readBackCalled = true;
+                  return [];
+                }
+                PLACEHOLDER_FUNCTION_SOURCE
+                (async () => {
+                  const result = await runMigration();
+                  process.stdout.write(
+                    JSON.stringify({
+                      status: result.status,
+                      phase: result.phase || null,
+                      mode: result.mode,
+                      writePerformed: result.writePerformed,
+                      mutationCount: result.mutationCount,
+                      mutationKeys: result.mutationKeys,
+                      autoSyncObserved: result.syncState && result.syncState.autoSyncObserved,
+                      autoSyncAfter: result.syncState && result.syncState.autoSyncAfter,
+                      preferenceChanged: result.syncState && result.syncState.preferenceChanged,
+                      preferencePreserved: result.syncState && result.syncState.preferencePreserved,
+                      syncWritePerformed: result.syncState && result.syncState.writePerformed,
+                      errorMessage: result.error && result.error.message,
+                      resolveAndVerifyTargetCalled,
+                      verifyLiveManifestInventoryCalled,
+                      verifyLiveStateAgainCalled,
+                      applyTransactionCalled,
+                      acquireSyncBarrierCalled,
+                      readBackCalled,
+                      syncReads,
+                    }),
+                  );
+                })().catch(error => {
+                  console.error(error);
+                  process.exit(1);
+                });
+            """
+            .replace("PLACEHOLDER_MANIFEST_TEXT", repr(manifest_text))
+            .replace("PLACEHOLDER_FUNCTION_SOURCE", function_source)
+            .replace("PLACEHOLDER_APPLY", json.dumps(apply))
+            .replace("PLACEHOLDER_REQUIRE_AUTO_SYNC", json.dumps(require_auto_sync_enabled))
+            .replace("PLACEHOLDER_EXPECTED_MUTATION_COUNT", str(expected_mutation_count))
+            .replace(
+                "PLACEHOLDER_EXPECTED_MUTATION_KEYS",
+                json.dumps(expected_mutation_keys),
+            )
+            .replace("PLACEHOLDER_SYNC_VALUES", sync_values_text)
+        )
+        return run_node_json(script)
+
+    @unittest.skipUnless(NODE, "Node.js is required for runner execution tests")
+    def test_run_migration_rejects_unsupported_entry_status(self) -> None:
         function_source = extract_js_function(
             "async function runMigration",
             "\nawait assertFreshReportPath",
@@ -978,20 +1501,20 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
                 "collection_item_inventory": ["HGFEDCBA"],
                 "entries": [
                     {
-                        "status": "unchanged_verified",
-                        "note_key": "NOOP0001",
+                        "status": "weird_status",
+                        "note_key": "STAGE001",
                         "parent_key": "HGFEDCBA",
                         "expected_parent_key": "HGFEDCBA",
-                        "child_note_inventory": ["NOOP0001"],
-                        "child_attachment_inventory": ["PDFATTB1"],
+                        "child_note_inventory": ["STAGE001"],
+                        "child_attachment_inventory": ["PDFATTA1"],
                         "note_version": 1,
-                        "old_path": "/tmp/unchanged.old.html",
-                        "new_path": "/tmp/unchanged.new.html",
-                        "old_sha256": "d" * 64,
-                        "new_sha256": "d" * 64,
-                        "pdf_path": "/tmp/unchanged.pdf",
-                        "pdf_sha256": "f" * 64,
-                        "pdf_attachment_key": "PDFATTB1",
+                        "old_path": "/tmp/stage.old.html",
+                        "new_path": "/tmp/stage.new.html",
+                        "old_sha256": "a" * 64,
+                        "new_sha256": "b" * 64,
+                        "pdf_path": "/tmp/stage.pdf",
+                        "pdf_sha256": "c" * 64,
+                        "pdf_attachment_key": "PDFATTA1",
                         "pdf_attachment_link_mode": "linked_file",
                         "validation_summary": {"schema_version": "9"},
                         "validation_errors": [],
@@ -1118,6 +1641,13 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
                 function sha256Text() {{
                   return "MANIFEST_SHA256";
                 }}
+                function plainError(error) {{
+                  return {{
+                    name: error && error.name ? error.name : "Error",
+                    message: error && error.message ? error.message : String(error),
+                    details: error && error.details,
+                  }};
+                }}
                 const CONFIG = {{
                   apply: true,
                   reportPath: "/tmp/report.json",
@@ -1134,14 +1664,13 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
                     getContentsAsync: async () => migrationText,
                   }},
                   Prefs: {{
-                    get: () => true,
+                    get: (key) => key === "sync.autoSync" ? true : null,
                   }},
                 }};
-                let applyMutationKeys = null;
-                let acquireSyncBarrierCalled = false;
-                let readBackCalled = false;
-                let applyTransactionCalled = false;
+                let resolveAndVerifyTargetCalled = false;
+                let verifyLiveManifestInventoryCalled = false;
                 async function resolveAndVerifyTarget() {{
+                  resolveAndVerifyTargetCalled = true;
                   return {{
                     collection: {{ id: 27 }},
                     library: {{ libraryID: 1234567 }},
@@ -1152,6 +1681,7 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
                   }};
                 }}
                 async function verifyLiveManifestInventory() {{
+                  verifyLiveManifestInventoryCalled = true;
                   return {{ collectionItemCount: 1 }};
                 }}
                 async function verifyEntry(entry) {{
@@ -1166,26 +1696,11 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
                     storageNormalization: "none",
                   }};
                 }}
-                async function acquireSyncBarrier() {{
-                  acquireSyncBarrierCalled = true;
-                  return {{
-                    state: {{
-                      leaseExpired: false,
-                      released: false,
-                      leaseMS: 120000,
-                    }},
-                    waitedMS: 1,
-                    release() {{}},
-                  }};
-                }}
-                async function applyTransaction(mutationVerified) {{
-                  applyTransactionCalled = true;
-                }}
+                async function applyTransaction() {{}}
                 async function inspectTransactionOutcome() {{
                   return {{ outcome: "committed" }};
                 }}
                 async function readBack() {{
-                  readBackCalled = true;
                   return [];
                 }}
                 {function_source}
@@ -1194,192 +1709,12 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
                   process.stdout.write(
                     JSON.stringify({{
                       status: result.status,
+                      mode: result.mode,
+                      phase: result.phase || null,
+                      errorMessage: result.error && result.error.message,
+                      writePerformed: result.writePerformed,
                       mutationCount: result.mutationCount,
                       mutationKeys: result.mutationKeys,
-                      applyTransactionCalled,
-                      acquireSyncBarrierCalled,
-                      readBackCalled,
-                    }}),
-                  );
-                }})().catch(error => {{
-                  console.error(error);
-                  process.exit(1);
-                }});
-                """
-            )
-        )
-
-        self.assertEqual(
-            result,
-            {
-                "status": "no_changes",
-                "mutationCount": 0,
-                "mutationKeys": [],
-                "applyTransactionCalled": False,
-                "acquireSyncBarrierCalled": False,
-                "readBackCalled": False,
-            },
-        )
-
-    @unittest.skipUnless(NODE, "Node.js is required for runner execution tests")
-    def test_run_migration_rejects_unsupported_entry_status(self) -> None:
-        function_source = extract_js_function(
-            "async function runMigration",
-            "\nawait assertFreshReportPath",
-        )
-        manifest = json.dumps(
-            {
-                "manifest_version": "2",
-                "write_performed": False,
-                "target": {
-                    "group_id": 1234567,
-                    "library_id": 1234567,
-                    "library_name": "PRIVATE_ZOTERO_TARGET",
-                    "local_collection_id": 27,
-                    "collection_key": "TEST0001",
-                    "collection_name": "PRIVATE_ZOTERO_TARGET",
-                    "collection_path": [
-                        "PRIVATE_ZOTERO_TARGET",
-                        "PRIVATE_ZOTERO_TARGET",
-                        "PRIVATE_ZOTERO_TARGET",
-                    ],
-                },
-                "collection_item_inventory": ["HGFEDCBA"],
-                "entries": [
-                    {
-                        "status": "weird_status",
-                        "note_key": "STAGE001",
-                        "parent_key": "HGFEDCBA",
-                        "expected_parent_key": "HGFEDCBA",
-                        "child_note_inventory": ["STAGE001"],
-                        "child_attachment_inventory": ["PDFATTA1"],
-                        "note_version": 1,
-                        "old_path": "/tmp/stage.old.html",
-                        "new_path": "/tmp/stage.new.html",
-                        "old_sha256": "a" * 64,
-                        "new_sha256": "b" * 64,
-                        "pdf_path": "/tmp/stage.pdf",
-                        "pdf_sha256": "c" * 64,
-                        "pdf_attachment_key": "PDFATTA1",
-                        "pdf_attachment_link_mode": "linked_file",
-                        "validation_summary": {"schema_version": "9"},
-                        "validation_errors": [],
-                    },
-                ],
-            },
-            ensure_ascii=False,
-        )
-        result = run_node_json(
-            textwrap.dedent(
-                f"""
-                const manifestText = {manifest!r};
-                function assertion(condition, message, details) {{
-                  if (!condition) {{
-                    throw new Error(JSON.stringify({{ message, details }}));
-                  }}
-                }}
-                function plainError(error) {{
-                  return {{
-                    message: String(error && error.message || error),
-                    details: error && error.details,
-                  }};
-                }}
-                const CONFIG = {{
-                  apply: true,
-                  reportPath: "/tmp/report.json",
-                  manifestPath: "/tmp/manifest.json",
-                  manifestSHA256: "MANIFEST_SHA256",
-                  requireAutoSyncEnabled: false,
-                  expectedInventoryNoteCount: 1,
-                  expectedMutationCount: 0,
-                  expectedMutationKeys: [],
-                }};
-                function sha256Text() {{
-                  return "MANIFEST_SHA256";
-                }}
-                const migrationText = manifestText;
-                const Zotero = {{
-                  File: {{
-                    getContentsAsync: async () => migrationText,
-                  }},
-                  Prefs: {{
-                    get: () => true,
-                  }},
-                }};
-                function exactArrayEqual(left, right) {{
-                  return Array.isArray(left)
-                    && Array.isArray(right)
-                    && left.length === right.length
-                    && left.every((value, index) => value === right[index]);
-                }}
-                function validatedKeyInventory(value, label, options) {{
-                  options = options || {{}};
-                  assertion(Array.isArray(value), `${{label}} is not an array`);
-                  assertion(
-                    !options.nonempty || value.length > 0,
-                    `${{label}} is empty`,
-                  );
-                  const keys = value.map(key => String(key || ""));
-                  assertion(
-                    keys.every(key => /^[A-Z0-9]{{8}}$/.test(key)),
-                    `${{label}} contains an invalid item key`,
-                  );
-                  assertion(
-                    exactArrayEqual(keys, [...keys].sort())
-                      && new Set(keys).size === keys.length,
-                    `${{label}} must be sorted and duplicate-free`,
-                  );
-                  return keys;
-                }}
-                function validateManifestContract(manifest) {{
-                  const collectionItemInventory = validatedKeyInventory(
-                    manifest.collection_item_inventory,
-                    "collection_item_inventory",
-                    {{ nonempty: true }},
-                  );
-                  assertion(Array.isArray(manifest.entries), "manifest entries are missing");
-                  assertion(
-                    manifest.entries.every(
-                      entry => entry && typeof entry === "object",
-                    ),
-                    "manifest contains a non-object entry",
-                  );
-                  const parentKeys = manifest.entries.map(entry =>
-                    String(entry.parent_key || ""),
-                  );
-                  assertion(
-                    parentKeys.length === collectionItemInventory.length
-                      && new Set(parentKeys).size === collectionItemInventory.length,
-                    "manifest entries do not exactly cover collection_item_inventory",
-                  );
-                  const allowedStatuses = new Set([
-                    "staged_verified",
-                    "unchanged_verified",
-                    "staged_invalid",
-                    "no_existing_note",
-                    "blocked_multiple_notes",
-                    "blocked_multiple_pdfs",
-                  ]);
-                  for (const entry of manifest.entries) {{
-                    const parentKey = String(entry.parent_key || "");
-                    assertion(
-                      allowedStatuses.has(entry.status),
-                      `${{parentKey}}: unsupported migration status`,
-                    );
-                  }}
-                  return {{
-                    collectionItemInventory,
-                    entries: manifest.entries,
-                  }};
-                }}
-                {function_source}
-                (async () => {{
-                  const result = await runMigration();
-                  process.stdout.write(
-                    JSON.stringify({{
-                      status: result.status,
-                      phase: result.phase,
-                      errorMessage: result.error && result.error.message,
                     }}),
                   );
                 }})().catch(error => {{
@@ -1391,6 +1726,10 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
         )
 
         self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["mode"], "apply")
+        self.assertEqual(result["phase"], "load_manifest")
+        self.assertFalse(result["writePerformed"])
+        self.assertIsNotNone(result["errorMessage"])
         self.assertIn("unsupported migration status", str(result["errorMessage"]))
 
     @unittest.skipUnless(NODE, "Node.js is required for runner execution tests")

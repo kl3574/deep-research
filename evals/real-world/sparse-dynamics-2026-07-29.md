@@ -186,7 +186,7 @@ generated and syntax-checked but was not applied a second time; its new
 inventory guards were executed with mutation fixtures, while the DOM
 projection, sync watchdog, and transaction-outcome classifier were executed in
 browser/Node harnesses. After the completion-audit iteration, the current tree
-passes 133 curation-helper tests plus 30 read-only reproducibility-audit tests;
+passes 139 curation-helper tests plus 30 read-only reproducibility-audit tests;
 these fixture/mock tests are not evidence of a live Zotero write.
 
 ## Skill defects observed and changes made

@@ -46,7 +46,9 @@ and saved inside one Zotero database transaction:
 4. generate a manifest-hash-bound dry-run script:
 
    ```bash
-   python scripts/render_zotero_desktop_runner.py /absolute/migration_manifest.json
+   python scripts/render_zotero_desktop_runner.py \
+     /absolute/migration_manifest.json \
+     --require-auto-sync-enabled
    ```
 
 5. keep the approved collection selected, paste the generated code into Run
@@ -56,11 +58,18 @@ and saved inside one Zotero database transaction:
    ```bash
    python scripts/render_zotero_desktop_runner.py \
      /absolute/migration_manifest.json \
-     --apply
+     --apply \
+     --require-auto-sync-enabled
    ```
 
-   Add `--require-auto-sync-enabled` when the user's approved invariant is that
-   automatic sync must remain on.
+   These examples use `--require-auto-sync-enabled` because the approved
+   invariant is that automatic sync must remain on. The option is embedded
+   independently into each generated runner, so pass it when rendering both
+   dry-run and apply scripts; omit it from both only when that invariant was
+   not approved.
+   With this flag set, both dry-run and apply paths fail before manifest/live
+   preflight when `sync.autoSync` is false, and the dry-run report includes
+   `syncState.autoSyncObserved`.
 
 7. apply only after the dry-run verifies every inventory note, parent, complete child
    inventory, approved attachment/PDF, old backup, staged schema-9 HTML,

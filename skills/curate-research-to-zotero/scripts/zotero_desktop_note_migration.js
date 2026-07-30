@@ -1061,9 +1061,21 @@ async function runMigration() {
   let verified = [];
   let mutationVerified = [];
   let publicTarget;
+  const autoSyncBefore = Zotero.Prefs.get("sync.autoSync");
   let syncState = {
     guardUsed: false,
-    autoSyncBefore: Zotero.Prefs.get("sync.autoSync"),
+    autoSyncBefore,
+    autoSyncObserved: autoSyncBefore === true,
+    preferenceChanged: false,
+    writePerformed: false,
+  };
+  const sampleSyncPreferenceState = () => {
+    syncState.autoSyncAfter = Zotero.Prefs.get("sync.autoSync");
+    syncState.preferenceChanged =
+      syncState.autoSyncAfter !== syncState.autoSyncBefore;
+    syncState.preferencePreserved =
+      syncState.autoSyncAfter === syncState.autoSyncBefore;
+    syncState.writePerformed = writePerformed;
   };
   try {
     assertion(CONFIG && typeof CONFIG === "object", "runner is not configured");
@@ -1074,9 +1086,8 @@ async function runMigration() {
       "runner configuration is incomplete",
     );
     assertion(
-      !CONFIG.apply
-        || !CONFIG.requireAutoSyncEnabled
-        || Zotero.Prefs.get("sync.autoSync") === true,
+      !CONFIG.requireAutoSyncEnabled
+        || syncState.autoSyncObserved,
       "automatic sync is not enabled; no notes were changed",
     );
     const manifestText = await Zotero.File.getContentsAsync(
@@ -1168,6 +1179,12 @@ async function runMigration() {
     }));
 
     if (!CONFIG.apply) {
+      sampleSyncPreferenceState();
+      assertion(
+        !CONFIG.requireAutoSyncEnabled
+          || syncState.autoSyncAfter === true,
+        "automatic sync was disabled during dry-run; no notes were changed",
+      );
       return {
         status: "preflight_ok",
         mode: "dry_run",
@@ -1179,11 +1196,18 @@ async function runMigration() {
         mutationCount: mutationVerified.length,
         mutationKeys: observedMutationKeys,
         notes: publicNotes,
+        syncState,
         writePerformed: false,
       };
     }
 
     if (mutationVerified.length === 0) {
+      sampleSyncPreferenceState();
+      assertion(
+        !CONFIG.requireAutoSyncEnabled
+          || syncState.autoSyncAfter === true,
+        "automatic sync is no longer enabled after the migration",
+      );
       return {
         status: "no_changes",
         mode: "apply",
@@ -1195,8 +1219,8 @@ async function runMigration() {
         mutationCount: mutationVerified.length,
         mutationKeys: observedMutationKeys,
         notes: publicNotes,
-        writePerformed: false,
         syncState,
+        writePerformed: false,
       };
     }
 
@@ -1238,7 +1262,7 @@ async function runMigration() {
         transactionOutcome = "committed";
       }
       catch (error) {
-          transactionInspection = await inspectTransactionOutcome(mutationVerified);
+        transactionInspection = await inspectTransactionOutcome(mutationVerified);
         transactionOutcome = transactionInspection.outcome;
         if (commitObserved || transactionOutcome === "committed") {
           writePerformed = true;
@@ -1258,6 +1282,7 @@ async function runMigration() {
       phase = "readback";
       const results = await readBack(mutationVerified, targetContext);
       await verifyLiveManifestInventory(manifestContract, targetContext, true);
+      syncState.writePerformed = writePerformed;
       return {
         status: "completed",
         mode: "apply",
@@ -1282,11 +1307,7 @@ async function runMigration() {
         syncState.barrierLeaseExpired = syncBarrier.state.leaseExpired;
         syncState.barrierReleased = syncBarrier.state.released;
       }
-      Object.assign(syncState, {
-        autoSyncAfter: Zotero.Prefs.get("sync.autoSync"),
-      });
-      syncState.preferencePreserved =
-        syncState.autoSyncAfter === syncState.autoSyncBefore;
+      sampleSyncPreferenceState();
       if (
         CONFIG.requireAutoSyncEnabled
         && syncState.autoSyncAfter !== true
@@ -1305,6 +1326,7 @@ async function runMigration() {
     }
   }
   catch (error) {
+    syncState.writePerformed = writePerformed;
     return {
       status:
         phase === "sync_barrier_lease"
