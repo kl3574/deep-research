@@ -66,14 +66,14 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
                     "target": {
                         "group_id": 1234567,
                         "library_id": 2,
-                        "library_name": "PRIVATE_ZOTERO_TARGET",
+                        "library_name": "Example Research Library",
                         "local_collection_id": 27,
                         "collection_key": "TESTCOL1",
-                        "collection_name": "PRIVATE_ZOTERO_TARGET",
+                        "collection_name": "示例研究主题",
                         "collection_path": [
-                            "PRIVATE_ZOTERO_TARGET",
-                            "PRIVATE_ZOTERO_TARGET",
-                            "PRIVATE_ZOTERO_TARGET",
+                            "示例研究域",
+                            "示例研究方向",
+                            "示例研究主题",
                         ],
                     },
                     "entries": [
@@ -100,6 +100,26 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
                 },
                 ensure_ascii=False,
             ),
+            encoding="utf-8",
+        )
+        return path
+
+    def creation_manifest(self, directory: Path) -> Path:
+        path = self.manifest(directory)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        entry = payload["entries"][0]
+        entry["status"] = "create_verified"
+        entry["parent_version"] = 4
+        entry["parent_data_snapshot_schema"] = (
+            "zotero-item-bibliographic-v1"
+        )
+        entry["parent_data_snapshot_sha256"] = "c" * 64
+        entry["child_item_inventory"] = ["PDFATT01"]
+        entry["child_note_inventory"] = []
+        for field in ("note_key", "note_version", "old_path", "old_sha256"):
+            entry.pop(field)
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False),
             encoding="utf-8",
         )
         return path
@@ -140,6 +160,302 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
         self.assertIn('"requireAutoSyncEnabled": false', rendered_disabled)
         self.assertIn('"requireAutoSyncEnabled": true', rendered_enabled)
 
+    @unittest.skipUnless(NODE, "Node.js is required for runner execution tests")
+    def test_parent_snapshot_hash_matches_python_canonical_json(self) -> None:
+        function_source = extract_js_function(
+            "function stableJSONStringify",
+            "\nconst fileVerificationCache",
+        )
+        parent_data = {
+            "key": "PARENT01",
+            "version": 3,
+            "itemType": "journalArticle",
+            "title": "中文标题",
+            "creators": [
+                {
+                    "firstName": "Ada",
+                    "lastName": "Lovelace",
+                    "creatorType": "author",
+                }
+            ],
+            "collections": ["COLL0002", "COLL0001"],
+            "relations": {},
+        }
+        snapshot = {
+            key: value
+            for key, value in parent_data.items()
+            if key
+            not in {
+                "accessDate",
+                "citationKey",
+                "collections",
+                "createdByUserID",
+                "dateAdded",
+                "dateModified",
+                "deleted",
+                "inPublications",
+                "key",
+                "lastModifiedByUserID",
+                "libraryCatalog",
+                "relations",
+                "synced",
+                "tags",
+                "version",
+            }
+        }
+        canonical = json.dumps(
+            {
+                "data": snapshot,
+                "schema": "zotero-item-bibliographic-v1",
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        expected = module.sha256_bytes(canonical.encode("utf-8"))
+        result = run_node_json(
+            textwrap.dedent(
+                f"""
+                const crypto = require("crypto");
+                function assertion(condition, message) {{
+                  if (!condition) throw new Error(message);
+                }}
+                const sha256Text = value => crypto
+                  .createHash("sha256")
+                  .update(value, "utf-8")
+                  .digest("hex");
+                {function_source}
+                process.stdout.write(JSON.stringify({{
+                  observed: parentDataSnapshotSHA256(
+                    {json.dumps(parent_data, ensure_ascii=False)}
+                  ),
+                }}));
+                """
+            )
+        )
+
+        self.assertEqual(result["observed"], expected)
+
+    @unittest.skipUnless(NODE, "Node.js is required for runner execution tests")
+    def test_semantic_html_projection_flatten_attribute_free_table_sections(self) -> None:
+        whitespace_source = extract_js_function(
+            "const isHTMLASCIIWhitespace = value =>",
+            "\n  const meaningfulBodyNodes",
+        )
+        helper_source = extract_js_function(
+            "function isCanonicalTableRow(",
+            "\nfunction semanticHTMLProjection(",
+        )
+        function_source = extract_js_function(
+            "const blockTags = new Set([",
+            "\n  const textChunks = [];",
+        )
+        script = textwrap.dedent(
+            """
+            const assertion = (_condition, message) => {
+              if (!_condition) {
+                throw new Error(message);
+              }
+            };
+            const makeText = value => {
+              return {
+                nodeType: 3,
+                nodeValue: value,
+                parentElement: null,
+              };
+            };
+            const makeElement = (tag, attributes = [], children = []) => {
+              const node = {
+                nodeType: 1,
+                tagName: tag,
+                attributes: attributes.map(item => ({
+                  name: item[0],
+                  value: item[1],
+                })),
+                childNodes: children,
+                getAttribute(name) {
+                  const entry = this.attributes.find(item => item.name === name);
+                  return entry ? entry.value : null;
+                },
+                style: {
+                  getPropertyValue: () => "",
+                },
+                closest() {
+                  return null;
+                },
+              };
+              let previousNode = null;
+              for (const child of children) {
+                if (child && typeof child === "object") {
+                  child.parentElement = node;
+                  child.previousSibling = previousNode;
+                  if (previousNode) {
+                    previousNode.nextSibling = child;
+                  }
+                  previousNode = child;
+                }
+              }
+              return node;
+            };
+            const makeRow = (...cells) => makeElement("tr", [], cells);
+            const makeCell = value => makeElement("td", [], [makeText(value)]);
+            const makeCellWithParagraph = value =>
+              makeElement("td", [], [makeElement("p", [], [makeText(value)])]);
+            const makeSection = (tag, rows, attributes = []) =>
+              makeElement(tag, attributes, rows);
+            __WHITESPACE_SOURCE__
+            __HELPER_SOURCE__
+            __FUNCTION_SOURCE__
+            const source = makeElement("table", [], [
+              makeRow(makeCell("row-1")),
+              makeRow(makeCell("row-2")),
+            ]);
+            const flattened = makeElement("table", [], [
+              makeSection("thead", [makeRow(makeCellWithParagraph("row-1"))]),
+              makeSection("tfoot", [makeRow(makeCellWithParagraph("row-2"))]),
+            ]);
+            const mixed = makeElement("table", [], [
+              makeRow(makeCell("row-1")),
+              makeSection("tbody", [makeRow(makeCellWithParagraph("row-2"))]),
+            ]);
+            const reordered = makeElement("table", [], [
+              makeSection("thead", [makeRow(makeCellWithParagraph("row-2"))]),
+              makeSection("tfoot", [makeRow(makeCellWithParagraph("row-1"))]),
+            ]);
+            const attributedSection = makeElement("table", [], [
+              makeSection(
+                "thead",
+                [makeRow(makeCellWithParagraph("row-1"))],
+                [["class", "zotero"]],
+              ),
+              makeSection("tfoot", [makeRow(makeCellWithParagraph("row-2"))]),
+            ]);
+            const nonTrChildSection = makeElement("table", [], [
+              makeSection("tbody", [
+                makeRow(makeCell("row-1")),
+                makeElement("span", [], [makeText("bad")]),
+              ]),
+              makeRow(makeCell("row-2")),
+            ]);
+            const changedCellTag = makeElement("table", [], [
+              makeSection("thead", [
+                makeElement("tr", [], [makeElement("th", [], [makeText("row-1")])]),
+              ]),
+              makeSection("tfoot", [
+                makeRow(makeCell("row-2")),
+              ]),
+            ]);
+            const brSource = makeElement("div", [], [
+              makeElement("p", [], [
+                makeText("alpha"),
+                makeElement("br"),
+                makeText("beta"),
+              ]),
+            ]);
+            const brWhitespaceSource = makeElement("div", [], [
+              makeElement("p", [], [
+               makeText("alpha"),
+               makeText("   "),
+               makeElement("br"),
+               makeText("\\n \\t"),
+               makeText("beta"),
+              ]),
+            ]);
+            const brNbspSource = makeElement("div", [], [
+              makeElement("p", [], [
+                makeText("alpha"),
+                makeText("\u00a0"),
+                makeElement("br"),
+                makeText("beta"),
+              ]),
+            ]);
+            const brAttributedSource = makeElement("div", [], [
+              makeElement("p", [], [
+                makeText("alpha"),
+                makeText(" "),
+                makeElement("br", [["class", "soft-break"]]),
+                makeText(" "),
+                makeText("beta"),
+              ]),
+            ]);
+            const equalProjection = (left, right) =>
+              JSON.stringify(canonicalNode(left)) === JSON.stringify(canonicalNode(right));
+            process.stdout.write(JSON.stringify({
+              flattened: equalProjection(source, flattened),
+              mixed: equalProjection(source, mixed),
+              reordered: equalProjection(source, reordered),
+              attributedSection: equalProjection(source, attributedSection),
+              nonTrChildSection: equalProjection(
+                source,
+                nonTrChildSection,
+              ),
+              changedCellTag: equalProjection(source, changedCellTag),
+              brWhitespaceIgnored: equalProjection(brSource, brWhitespaceSource),
+              brNbspPreserved: equalProjection(brSource, brNbspSource),
+              brAttributedPreserved: equalProjection(brSource, brAttributedSource),
+            }));
+            """
+        )
+        script = script.replace("__WHITESPACE_SOURCE__", whitespace_source)
+        script = script.replace("__HELPER_SOURCE__", helper_source)
+        script = script.replace("__FUNCTION_SOURCE__", function_source)
+        result = run_node_json(script)
+
+        self.assertTrue(result["flattened"])
+        self.assertTrue(result["mixed"])
+        self.assertFalse(result["reordered"])
+        self.assertFalse(result["attributedSection"])
+        self.assertFalse(result["nonTrChildSection"])
+        self.assertFalse(result["changedCellTag"])
+        self.assertTrue(result["brWhitespaceIgnored"])
+        self.assertFalse(result["brNbspPreserved"])
+        self.assertFalse(result["brAttributedPreserved"])
+
+    def test_render_runner_accepts_verified_creation_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manifest = self.creation_manifest(Path(temp_dir))
+            raw, payload, staged_count, mutation_count, mutation_keys = (
+                module.load_and_validate_manifest(manifest)
+            )
+            rendered = module.render_runner(manifest, apply=True)
+
+        self.assertTrue(raw)
+        self.assertEqual(payload["entries"][0]["parent_version"], 4)
+        self.assertEqual(staged_count, 1)
+        self.assertEqual(mutation_count, 0)
+        self.assertEqual(mutation_keys, [])
+        self.assertIn('"expectedCreateCount": 1', rendered)
+        self.assertIn('"expectedCreateParentKeys": ["HGFEDCBA"]', rendered)
+        self.assertIn('"expectedMutationCount": 0', rendered)
+
+    def test_rejects_creation_without_parent_data_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manifest = self.creation_manifest(Path(temp_dir))
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+            entry = payload["entries"][0]
+            entry.pop("parent_data_snapshot_sha256")
+            manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "parent data snapshot is invalid",
+            ):
+                module.load_and_validate_manifest(manifest)
+
+    def test_rejects_creation_when_zero_note_inventory_contract_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manifest = self.creation_manifest(Path(temp_dir))
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+            payload["entries"][0]["child_note_inventory"] = ["NOTE0001"]
+            payload["entries"][0]["child_item_inventory"] = [
+                "NOTE0001",
+                "PDFATT01",
+            ]
+            manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "requires zero existing notes"):
+                module.load_and_validate_manifest(manifest)
+
     def test_apply_uses_internal_sync_barrier(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             manifest = self.manifest(Path(temp_dir))
@@ -165,9 +481,131 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
         self.assertIn('"sync_barrier_lease_expired"', rendered)
         self.assertIn('"report_persistence_failed"', rendered)
         self.assertIn('closest("pre, textarea")', rendered)
+        self.assertIn("collapseHTMLASCIIWhitespace", rendered)
+        self.assertIn("isHTMLASCIIWhitespace", rendered)
+        self.assertIn('getPropertyValue("white-space")', rendered)
+        self.assertIn('style.includes("/*")', rendered)
+        self.assertIn("white-space[ \\t\\r\\n\\f]*:", rendered)
+        self.assertNotIn('replace(/\\\\s+/gu, " ")', rendered)
         self.assertIn('{ mode: "create" }', rendered)
         self.assertIn("approved PDF attachment file path changed", rendered)
-        self.assertIn("item.noteKey,\n      true,", rendered)
+        self.assertIn("item.noteKey,\n        true,", rendered)
+
+    @unittest.skipUnless(NODE, "Node.js is required for runner execution tests")
+    def test_apply_transaction_updates_and_creates_in_one_transaction(self) -> None:
+        function_source = extract_js_function(
+            "async function applyTransaction",
+            "\nasync function inspectTransactionOutcome",
+        )
+        result = run_node_json(
+            textwrap.dedent(
+                f"""
+                function assertion(condition, message) {{
+                  if (!condition) throw new Error(message);
+                }}
+                const sha256Text = value => value;
+                const CONFIG = {{ requireAutoSyncEnabled: true }};
+                let transactionCount = 0;
+                let updateSaveCount = 0;
+                let createSaveCount = 0;
+                class Item {{
+                  constructor(itemType) {{
+                    this.itemType = itemType;
+                    this.key = "";
+                    this.parentKey = "";
+                    this.parentItemKey = "";
+                    this.html = "";
+                  }}
+                  setNote(value) {{
+                    this.html = value;
+                  }}
+                  getNote() {{
+                    return this.html;
+                  }}
+                  async save() {{
+                    createSaveCount += 1;
+                    this.key = "CREATED1";
+                    this.parentItemKey = this.parentKey;
+                  }}
+                }}
+                const target = {{
+                  library: {{ libraryID: 2 }},
+                }};
+                const Zotero = {{
+                  Item,
+                  Prefs: {{ get: () => true }},
+                  DB: {{
+                    async executeTransaction(callback, options) {{
+                      transactionCount += 1;
+                      await callback();
+                      if (options && options.onCommit) options.onCommit();
+                    }},
+                  }},
+                }};
+                async function resolveAndVerifyTarget() {{
+                  return target;
+                }}
+                async function verifyLiveManifestInventory() {{}}
+                async function verifyLiveStateAgain() {{}}
+                {function_source}
+                (async () => {{
+                  const update = {{
+                    noteKey: "UPDATE01",
+                    expectedStoredHTML: "updated",
+                    expectedStoredSHA256: "updated",
+                    note: {{
+                      html: "old",
+                      setNote(value) {{ this.html = value; }},
+                      getNote() {{ return this.html; }},
+                      async save() {{ updateSaveCount += 1; }},
+                    }},
+                  }};
+                  const create = {{
+                    operation: "create",
+                    parentKey: "PARENT01",
+                    expectedStoredHTML: "created",
+                    expectedStoredSHA256: "created",
+                  }};
+                  let commitCount = 0;
+                  await applyTransaction(
+                    [update, create],
+                    [update],
+                    {{}},
+                    {{}},
+                    () => {{ commitCount += 1; }},
+                    [create],
+                  );
+                  process.stdout.write(JSON.stringify({{
+                    transactionCount,
+                    updateSaveCount,
+                    createSaveCount,
+                    commitCount,
+                    createdKey: create.noteKey,
+                    createdParent: create.note.parentItemKey,
+                    createdLibrary: create.note.libraryID,
+                    createdHTML: create.note.getNote(),
+                  }}));
+                }})().catch(error => {{
+                  console.error(error);
+                  process.exit(1);
+                }});
+                """
+            )
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "transactionCount": 1,
+                "updateSaveCount": 1,
+                "createSaveCount": 1,
+                "commitCount": 1,
+                "createdKey": "CREATED1",
+                "createdParent": "PARENT01",
+                "createdLibrary": 2,
+                "createdHTML": "created",
+            },
+        )
 
     def test_rejects_duplicate_note_keys(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -377,14 +815,14 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
                 "target": {
                     "group_id": 1234567,
                     "library_id": 1234567,
-                    "library_name": "PRIVATE_ZOTERO_TARGET",
+                    "library_name": "Example Research Library",
                     "local_collection_id": 27,
                     "collection_key": "TESTCOL1",
-                    "collection_name": "PRIVATE_ZOTERO_TARGET",
+                    "collection_name": "示例研究主题",
                     "collection_path": [
-                        "PRIVATE_ZOTERO_TARGET",
-                        "PRIVATE_ZOTERO_TARGET",
-                        "PRIVATE_ZOTERO_TARGET",
+                        "示例研究域",
+                        "示例研究方向",
+                        "示例研究主题",
                     ],
                 },
                 "collection_item_inventory": ["HGFEDCBA", "PARENT12"],
@@ -664,6 +1102,206 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
         )
 
     @unittest.skipUnless(NODE, "Node.js is required for runner execution tests")
+    def test_run_migration_reports_created_parent_and_new_note_key(self) -> None:
+        function_source = extract_js_function(
+            "async function runMigration",
+            "\nawait assertFreshReportPath",
+        )
+        manifest = json.dumps(
+            {
+                "manifest_version": "2",
+                "write_performed": False,
+                "target": {
+                    "group_id": 1234567,
+                    "library_id": 2,
+                    "library_name": "Example Research Library",
+                    "local_collection_id": 27,
+                    "collection_key": "TESTCOL1",
+                    "collection_name": "Collection",
+                    "collection_path": ["Collection"],
+                },
+                "collection_item_inventory": ["PARENT01"],
+                "entries": [
+                    {
+                        "status": "create_verified",
+                        "parent_key": "PARENT01",
+                        "expected_parent_key": "PARENT01",
+                        "parent_version": 4,
+                        "child_item_inventory": ["PDFATT01"],
+                        "child_note_inventory": [],
+                        "child_attachment_inventory": ["PDFATT01"],
+                        "new_path": "/tmp/create.html",
+                        "new_sha256": "a" * 64,
+                        "pdf_path": "/tmp/create.pdf",
+                        "pdf_sha256": "b" * 64,
+                        "pdf_attachment_key": "PDFATT01",
+                        "pdf_attachment_link_mode": "linked_file",
+                        "validation_summary": {"schema_version": "9"},
+                        "validation_errors": [],
+                    }
+                ],
+            }
+        )
+        result = run_node_json(
+            textwrap.dedent(
+                f"""
+                const manifestText = {manifest!r};
+                function assertion(condition, message, details) {{
+                  if (!condition) {{
+                    const error = new Error(message);
+                    error.details = details;
+                    throw error;
+                  }}
+                }}
+                function exactArrayEqual(left, right) {{
+                  return Array.isArray(left)
+                    && Array.isArray(right)
+                    && left.length === right.length
+                    && left.every((value, index) => value === right[index]);
+                }}
+                function plainError(error) {{
+                  return {{ message: String(error.message || error) }};
+                }}
+                function sha256Text() {{
+                  return "MANIFEST_SHA256";
+                }}
+                function validateManifestContract(value) {{
+                  return {{
+                    collectionItemInventory: value.collection_item_inventory,
+                    entries: value.entries,
+                  }};
+                }}
+                const CONFIG = {{
+                  apply: true,
+                  reportPath: "/tmp/report.json",
+                  manifestPath: "/tmp/manifest.json",
+                  manifestSHA256: "MANIFEST_SHA256",
+                  requireAutoSyncEnabled: false,
+                  expectedInventoryNoteCount: 1,
+                  expectedMutationCount: 0,
+                  expectedMutationKeys: [],
+                  expectedCreateCount: 1,
+                  expectedCreateParentKeys: ["PARENT01"],
+                }};
+                const Zotero = {{
+                  File: {{ getContentsAsync: async () => manifestText }},
+                  Prefs: {{ get: () => true }},
+                }};
+                let applyUpdateCount = null;
+                let applyCreateCount = null;
+                let readBackKeys = [];
+                const postCreateInventories = [];
+                async function resolveAndVerifyTarget() {{
+                  return {{
+                    collection: {{ id: 27 }},
+                    library: {{ libraryID: 2 }},
+                    publicTarget: {{
+                      group_id: 1234567,
+                      collection_key: "TESTCOL1",
+                    }},
+                  }};
+                }}
+                async function verifyLiveManifestInventory(
+                  _contract,
+                  _target,
+                  _force,
+                  createdKeys = new Map(),
+                ) {{
+                  postCreateInventories.push([...createdKeys.entries()]);
+                  return {{ collectionItemCount: 1 }};
+                }}
+                async function verifyEntry(entry) {{
+                  return {{
+                    status: entry.status,
+                    operation: "create",
+                    noteKey: null,
+                    parentKey: entry.parent_key,
+                    parentVersion: entry.parent_version,
+                    oldVersion: null,
+                    oldSHA256: null,
+                    sourceSHA256: "source",
+                    expectedStoredSHA256: "stored",
+                    expectedStoredHTML: "created",
+                    storageNormalization: "none",
+                  }};
+                }}
+                async function acquireSyncBarrier() {{
+                  const state = {{
+                    leaseExpired: false,
+                    released: false,
+                    leaseMS: 120000,
+                  }};
+                  return {{
+                    state,
+                    waitedMS: 0,
+                    release() {{ state.released = true; }},
+                  }};
+                }}
+                async function applyTransaction(
+                  _verified,
+                  updates,
+                  _target,
+                  _contract,
+                  onCommit,
+                  creates,
+                ) {{
+                  applyUpdateCount = updates.length;
+                  applyCreateCount = creates.length;
+                  creates[0].noteKey = "NEWNOTE1";
+                  onCommit();
+                }}
+                async function inspectTransactionOutcome() {{
+                  return {{ outcome: "committed" }};
+                }}
+                async function readBack(items) {{
+                  readBackKeys = items.map(item => item.noteKey);
+                  return items.map(item => ({{
+                    operation: item.operation,
+                    noteKey: item.noteKey,
+                    parentKey: item.parentKey,
+                    verified: true,
+                  }}));
+                }}
+                {function_source}
+                (async () => {{
+                  const result = await runMigration();
+                  process.stdout.write(JSON.stringify({{
+                    status: result.status,
+                    updateCount: result.updateCount,
+                    createCount: result.createCount,
+                    createParentKeys: result.createParentKeys,
+                    newNoteKeys: result.newNoteKeys,
+                    totalWriteCount: result.totalWriteCount,
+                    applyUpdateCount,
+                    applyCreateCount,
+                    readBackKeys,
+                    postCreateInventories,
+                  }}));
+                }})().catch(error => {{
+                  console.error(error);
+                  process.exit(1);
+                }});
+                """
+            )
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "status": "completed",
+                "updateCount": 0,
+                "createCount": 1,
+                "createParentKeys": ["PARENT01"],
+                "newNoteKeys": ["NEWNOTE1"],
+                "totalWriteCount": 1,
+                "applyUpdateCount": 0,
+                "applyCreateCount": 1,
+                "readBackKeys": ["NEWNOTE1"],
+                "postCreateInventories": [[], [["PARENT01", "NEWNOTE1"]]],
+            },
+        )
+
+    @unittest.skipUnless(NODE, "Node.js is required for runner execution tests")
     def test_run_migration_fails_when_verified_unchanged_entry_drifted(self) -> None:
         function_source = extract_js_function(
             "async function runMigration",
@@ -676,14 +1314,14 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
                 "target": {
                     "group_id": 1234567,
                     "library_id": 1234567,
-                    "library_name": "PRIVATE_ZOTERO_TARGET",
+                    "library_name": "Example Research Library",
                     "local_collection_id": 27,
                     "collection_key": "TESTCOL1",
-                    "collection_name": "PRIVATE_ZOTERO_TARGET",
+                    "collection_name": "示例研究主题",
                     "collection_path": [
-                        "PRIVATE_ZOTERO_TARGET",
-                        "PRIVATE_ZOTERO_TARGET",
-                        "PRIVATE_ZOTERO_TARGET",
+                        "示例研究域",
+                        "示例研究方向",
+                        "示例研究主题",
                     ],
                 },
                 "collection_item_inventory": ["HGFEDCBA", "PARENT12"],
@@ -1012,7 +1650,9 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
         self.assertEqual(result["phase"], "load_manifest")
         self.assertFalse(result["writePerformed"])
         self.assertFalse(result["autoSyncObserved"])
+        self.assertFalse(result["autoSyncAfter"])
         self.assertFalse(result["preferenceChanged"])
+        self.assertTrue(result["preferencePreserved"])
         self.assertFalse(result["syncWritePerformed"])
         self.assertFalse(result["resolveAndVerifyTargetCalled"])
         self.assertFalse(result["verifyLiveManifestInventoryCalled"])
@@ -1020,6 +1660,36 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
         self.assertFalse(result["applyTransactionCalled"])
         self.assertFalse(result["acquireSyncBarrierCalled"])
         self.assertIn("automatic sync is not enabled", result["errorMessage"])
+
+    @unittest.skipUnless(NODE, "Node.js is required for runner execution tests")
+    def test_run_migration_failure_reports_sync_resample_error(self) -> None:
+        result = self._run_auto_sync_preference_scenario(
+            status="staged_verified",
+            apply=False,
+            require_auto_sync_enabled=True,
+            sync_values=[False],
+            expected_mutation_count=1,
+            expected_mutation_keys=["STAGE001"],
+            sync_error_at_read=2,
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["mode"], "dry_run")
+        self.assertEqual(result["phase"], "load_manifest")
+        self.assertFalse(result["writePerformed"])
+        self.assertFalse(result["autoSyncObserved"])
+        self.assertIsNone(result["autoSyncAfter"])
+        self.assertIsNone(result["preferenceChanged"])
+        self.assertIsNone(result["preferencePreserved"])
+        self.assertIn(
+            "sync.autoSync read unavailable",
+            result["syncPreferenceSampleError"]["message"],
+        )
+        self.assertEqual(result["syncReads"], 2)
+        self.assertIn("automatic sync is not enabled", result["errorMessage"])
+        self.assertFalse(result["resolveAndVerifyTargetCalled"])
+        self.assertFalse(result["applyTransactionCalled"])
+        self.assertFalse(result["acquireSyncBarrierCalled"])
 
     @unittest.skipUnless(NODE, "Node.js is required for runner execution tests")
     def test_run_migration_no_changes_when_no_staged_mutations(self) -> None:
@@ -1067,7 +1737,7 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
         self.assertTrue(result["preferenceChanged"])
         self.assertFalse(result["preferencePreserved"])
         self.assertFalse(result["syncWritePerformed"])
-        self.assertEqual(result["syncReads"], 2)
+        self.assertEqual(result["syncReads"], 3)
         self.assertIn("no longer enabled", result["errorMessage"])
         self.assertFalse(result["applyTransactionCalled"])
         self.assertFalse(result["acquireSyncBarrierCalled"])
@@ -1093,7 +1763,7 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
         self.assertTrue(result["preferenceChanged"])
         self.assertFalse(result["preferencePreserved"])
         self.assertFalse(result["syncWritePerformed"])
-        self.assertEqual(result["syncReads"], 2)
+        self.assertEqual(result["syncReads"], 3)
         self.assertIn("disabled during dry-run", result["errorMessage"])
         self.assertTrue(result["resolveAndVerifyTargetCalled"])
         self.assertTrue(result["verifyLiveManifestInventoryCalled"])
@@ -1130,7 +1800,7 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
         self,
         *,
         status,
-        collection_path_tail="PRIVATE_ZOTERO_TARGET",
+        collection_path_tail="示例研究主题",
     ):
         if status == "unchanged_verified":
             note_key = "NOOP0001"
@@ -1161,13 +1831,13 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
             "target": {
                 "group_id": 1234567,
                 "library_id": 1234567,
-                "library_name": "PRIVATE_ZOTERO_TARGET",
+                "library_name": "Example Research Library",
                 "local_collection_id": 27,
                 "collection_key": "TESTCOL1",
-                "collection_name": "PRIVATE_ZOTERO_TARGET",
+                "collection_name": "示例研究主题",
                 "collection_path": [
-                    "PRIVATE_ZOTERO_TARGET",
-                    "PRIVATE_ZOTERO_TARGET",
+                    "示例研究域",
+                    "示例研究方向",
                     collection_path_tail,
                 ],
             },
@@ -1204,7 +1874,8 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
         sync_values,
         expected_mutation_count,
         expected_mutation_keys,
-        collection_path_tail="PRIVATE_ZOTERO_TARGET",
+        collection_path_tail="示例研究主题",
+        sync_error_at_read=None,
     ):
         manifest = self._build_auto_sync_manifest(
             status=status,
@@ -1216,6 +1887,7 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
             "\nawait assertFreshReportPath",
         )
         sync_values_text = json.dumps(sync_values)
+        sync_error_at_read_text = json.dumps(sync_error_at_read)
 
         script = textwrap.dedent(
             """
@@ -1354,6 +2026,7 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
                 const migrationText = manifestText;
                 let syncReads = 0;
                 const syncValues = PLACEHOLDER_SYNC_VALUES;
+                const syncErrorAtRead = PLACEHOLDER_SYNC_ERROR_AT_READ;
                 const syncFallback = syncValues.length ? syncValues[syncValues.length - 1] : null;
                 const Zotero = {
                   File: {
@@ -1365,6 +2038,9 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
                         return null;
                       }
                       syncReads += 1;
+                      if (syncReads === syncErrorAtRead) {
+                        throw new Error("sync.autoSync read unavailable");
+                      }
                       const nextValue = syncValues.shift();
                       return nextValue === undefined ? syncFallback : nextValue;
                     },
@@ -1446,6 +2122,9 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
                       autoSyncAfter: result.syncState && result.syncState.autoSyncAfter,
                       preferenceChanged: result.syncState && result.syncState.preferenceChanged,
                       preferencePreserved: result.syncState && result.syncState.preferencePreserved,
+                      syncPreferenceSampleError:
+                        result.syncState
+                          && result.syncState.syncPreferenceSampleError,
                       syncWritePerformed: result.syncState && result.syncState.writePerformed,
                       errorMessage: result.error && result.error.message,
                       resolveAndVerifyTargetCalled,
@@ -1472,6 +2151,10 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
                 json.dumps(expected_mutation_keys),
             )
             .replace("PLACEHOLDER_SYNC_VALUES", sync_values_text)
+            .replace(
+                "PLACEHOLDER_SYNC_ERROR_AT_READ",
+                sync_error_at_read_text,
+            )
         )
         return run_node_json(script)
 
@@ -1488,14 +2171,14 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
                 "target": {
                     "group_id": 1234567,
                     "library_id": 1234567,
-                    "library_name": "PRIVATE_ZOTERO_TARGET",
+                    "library_name": "Example Research Library",
                     "local_collection_id": 27,
                     "collection_key": "TESTCOL1",
-                    "collection_name": "PRIVATE_ZOTERO_TARGET",
+                    "collection_name": "示例研究主题",
                     "collection_path": [
-                        "PRIVATE_ZOTERO_TARGET",
-                        "PRIVATE_ZOTERO_TARGET",
-                        "PRIVATE_ZOTERO_TARGET",
+                        "示例研究域",
+                        "示例研究方向",
+                        "示例研究主题",
                     ],
                 },
                 "collection_item_inventory": ["HGFEDCBA"],
@@ -1811,6 +2494,328 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
         self.assertIn(
             "unchanged note hashes are inconsistent",
             result["errorMessage"],
+        )
+
+    @unittest.skipUnless(NODE, "Node.js is required for runner execution tests")
+    def test_create_entry_preflight_checks_parent_version_zero_notes_and_pdf(
+        self,
+    ) -> None:
+        function_source = extract_js_function(
+            "async function verifyEntry",
+            "\nasync function verifyLiveStateAgain",
+        )
+        result = run_node_json(
+            textwrap.dedent(
+                f"""
+                function assertion(condition, message, details) {{
+                  if (!condition) {{
+                    const error = new Error(message);
+                    error.details = details;
+                    throw error;
+                  }}
+                }}
+                function exactArrayEqual(left, right) {{
+                  return Array.isArray(left)
+                    && Array.isArray(right)
+                    && left.length === right.length
+                    && left.every((value, index) => value === right[index]);
+                }}
+                const requiredSections = [
+                  "资料与阅读状态",
+                  "为什么重要",
+                  "一句话结论",
+                  "心智模型",
+                  "关键主张与证据",
+                  "方法或推导",
+                  "结果",
+                  "假设、失败边界与竞争解释",
+                  "知识图谱关系",
+                  "复用",
+                  "溯源",
+                ];
+                const stagedHTML = "<div>pdfhash</div>";
+                const sha256Text = value => `hash:${{value}}`;
+                const normalizedNoteHTML = value => value;
+                function semanticHTMLProjection() {{
+                  return {{
+                    root: {{ tag: "div", schemaVersion: "9" }},
+                    headings: [
+                      {{ tag: "h1", text: "Created note" }},
+                      ...requiredSections.map(text => ({{ tag: "h2", text }})),
+                    ],
+                  }};
+                }}
+                let pdfVerified = false;
+                async function verifyPDFFile(path, hash, label) {{
+                  pdfVerified = path === "/tmp/paper.pdf"
+                    && hash === "pdfhash"
+                    && label === "create:PARENT01";
+                }}
+                const expectedAttachmentLinkMode = () => 0;
+                const parentDataSnapshotSHA256 = data =>
+                  `snapshot:${{data.title}}`;
+                let attachmentBindingVerified = false;
+                async function verifyAttachmentFileBinding(
+                  _attachment,
+                  path,
+                  label,
+                ) {{
+                  attachmentBindingVerified = path === "/tmp/paper.pdf"
+                    && label === "create:PARENT01";
+                }}
+                let liveChildren = {{
+                  notes: [],
+                  attachments: ["PDFATT01"],
+                  items: ["PDFATT01"],
+                }};
+                async function liveChildInventory() {{
+                  return liveChildren;
+                }}
+                const parent = {{
+                  key: "PARENT01",
+                  version: 4,
+                  title: "Approved title",
+                  libraryID: 2,
+                  deleted: false,
+                  isRegularItem: () => true,
+                  isEditable: () => true,
+                  getCollections: () => [27],
+                  toJSON() {{
+                    return {{
+                      key: this.key,
+                      version: this.version,
+                      title: this.title,
+                    }};
+                  }},
+                  async loadAllData() {{}},
+                }};
+                const attachment = {{
+                  key: "PDFATT01",
+                  parentItemKey: "PARENT01",
+                  attachmentContentType: "application/pdf",
+                  attachmentLinkMode: 0,
+                  deleted: false,
+                  isAttachment: () => true,
+                  async loadAllData() {{}},
+                }};
+                const Zotero = {{
+                  File: {{
+                    getContentsAsync: async () => stagedHTML,
+                  }},
+                  Items: {{
+                    getByLibraryAndKeyAsync: async (_libraryID, key) =>
+                      key === "PARENT01" ? parent : attachment,
+                  }},
+                }};
+                const entry = {{
+                  status: "create_verified",
+                  parent_key: "PARENT01",
+                  expected_parent_key: "PARENT01",
+                  parent_version: 4,
+                  parent_data_snapshot_schema:
+                    "zotero-item-bibliographic-v1",
+                  parent_data_snapshot_sha256: "snapshot:Approved title",
+                  child_item_inventory: ["PDFATT01"],
+                  child_note_inventory: [],
+                  child_attachment_inventory: ["PDFATT01"],
+                  new_path: "/tmp/create.html",
+                  new_sha256: sha256Text(stagedHTML),
+                  pdf_path: "/tmp/paper.pdf",
+                  pdf_sha256: "pdfhash",
+                  pdf_attachment_key: "PDFATT01",
+                  pdf_attachment_link_mode: "imported_file",
+                  validation_errors: [],
+                  validation_summary: {{ schema_version: "9" }},
+                }};
+                const target = {{
+                  library: {{ libraryID: 2 }},
+                  collection: {{ id: 27, hasItem: () => true }},
+                }};
+                {function_source}
+                (async () => {{
+                  const verified = await verifyEntry(entry, target);
+                  parent.title = "Changed title";
+                  let snapshotRejected = false;
+                  try {{
+                    await verifyEntry(entry, target);
+                  }}
+                  catch (error) {{
+                    snapshotRejected = error.message.includes(
+                      "parent item data changed"
+                    );
+                  }}
+                  parent.title = "Approved title";
+                  parent.version = 5;
+                  let versionRejected = false;
+                  try {{
+                    await verifyEntry(entry, target);
+                  }}
+                  catch (error) {{
+                    versionRejected = error.message.includes(
+                      "parent version changed"
+                    );
+                  }}
+                  parent.version = 4;
+                  liveChildren = {{
+                    notes: ["OTHER001"],
+                    attachments: ["PDFATT01"],
+                    items: ["OTHER001", "PDFATT01"],
+                  }};
+                  let newNoteRejected = false;
+                  try {{
+                    await verifyEntry(entry, target);
+                  }}
+                  catch (error) {{
+                    newNoteRejected = error.message.includes(
+                      "live child inventory changed"
+                    );
+                  }}
+                  process.stdout.write(JSON.stringify({{
+                    operation: verified.operation,
+                    noteKey: verified.noteKey,
+                    parentVersion: verified.parentVersion,
+                    pdfVerified,
+                    attachmentBindingVerified,
+                    snapshotRejected,
+                    versionRejected,
+                    newNoteRejected,
+                  }}));
+                }})().catch(error => {{
+                  console.error(error);
+                  process.exit(1);
+                }});
+                """
+            )
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "operation": "create",
+                "noteKey": None,
+                "parentVersion": 4,
+                "pdfVerified": True,
+                "attachmentBindingVerified": True,
+                "snapshotRejected": True,
+                "versionRejected": True,
+                "newNoteRejected": True,
+            },
+        )
+
+    @unittest.skipUnless(NODE, "Node.js is required for runner execution tests")
+    def test_create_transaction_recheck_rejects_parent_metadata_drift(
+        self,
+    ) -> None:
+        function_source = extract_js_function(
+            "async function verifyLiveStateAgain",
+            "\nasync function applyTransaction",
+        )
+        result = run_node_json(
+            textwrap.dedent(
+                f"""
+                function assertion(condition, message, details) {{
+                  if (!condition) {{
+                    const error = new Error(message);
+                    error.details = details;
+                    throw error;
+                  }}
+                }}
+                function exactArrayEqual(left, right) {{
+                  return Array.isArray(left)
+                    && Array.isArray(right)
+                    && left.length === right.length
+                    && left.every((value, index) => value === right[index]);
+                }}
+                const parentDataSnapshotSHA256 = data =>
+                  `snapshot:${{data.title}}`;
+                async function verifyPDFFile() {{}}
+                async function verifyAttachmentFileBinding() {{}}
+                const expectedAttachmentLinkMode = () => 0;
+                async function liveChildInventory() {{
+                  return {{
+                    notes: [],
+                    attachments: ["PDFATT01"],
+                    items: ["PDFATT01"],
+                  }};
+                }}
+                let loadedWithReload = false;
+                const parent = {{
+                  key: "PARENT01",
+                  title: "Approved title",
+                  version: 4,
+                  libraryID: 2,
+                  deleted: false,
+                  isRegularItem: () => true,
+                  getCollections: () => [27],
+                  async reload() {{}},
+                  async loadAllData(reload) {{
+                    loadedWithReload = reload === true;
+                  }},
+                  toJSON() {{
+                    return {{
+                      key: this.key,
+                      version: this.version,
+                      title: this.title,
+                    }};
+                  }},
+                }};
+                const attachment = {{
+                  parentItemKey: "PARENT01",
+                  attachmentContentType: "application/pdf",
+                  attachmentLinkMode: 0,
+                  deleted: false,
+                  isAttachment: () => true,
+                  async reload() {{}},
+                  async loadAllData() {{}},
+                }};
+                const item = {{
+                  operation: "create",
+                  parent,
+                  attachment,
+                  parentKey: "PARENT01",
+                  parentVersion: 4,
+                  parentDataSnapshotSHA256: "snapshot:Approved title",
+                  pdfPath: "/tmp/paper.pdf",
+                  pdfSHA256: "a".repeat(64),
+                  pdfAttachmentLinkMode: "imported_file",
+                  entryChildAttachmentInventory: ["PDFATT01"],
+                  entryChildItemInventory: ["PDFATT01"],
+                }};
+                const target = {{
+                  library: {{ libraryID: 2 }},
+                  collection: {{ id: 27, hasItem: () => true }},
+                }};
+                {function_source}
+                (async () => {{
+                  await verifyLiveStateAgain([item], target);
+                  parent.title = "Changed title";
+                  let rejected = false;
+                  try {{
+                    await verifyLiveStateAgain([item], target);
+                  }}
+                  catch (error) {{
+                    rejected = error.message.includes(
+                      "parent item data changed after preflight"
+                    );
+                  }}
+                  process.stdout.write(JSON.stringify({{
+                    loadedWithReload,
+                    rejected,
+                  }}));
+                }})().catch(error => {{
+                  console.error(error);
+                  process.exit(1);
+                }});
+                """
+            )
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "loadedWithReload": True,
+                "rejected": True,
+            },
         )
 
     @unittest.skipUnless(NODE, "Node.js is required for runner execution tests")
@@ -2351,6 +3356,12 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
                     true,
                   );
                   noteIDs = [11, 12];
+                  const postCreate = await verifyLiveManifestInventory(
+                    contract,
+                    target,
+                    true,
+                    new Map([["PARENT01", "NOTE0002"]]),
+                  );
                   let changedRejected = false;
                   try {{
                     await verifyLiveManifestInventory(contract, target, true);
@@ -2362,6 +3373,7 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
                   }}
                   process.stdout.write(JSON.stringify({{
                     matchingCount: matching.collectionItemCount,
+                    postCreateCount: postCreate.collectionItemCount,
                     changedRejected,
                   }}));
                 }})().catch(error => {{
@@ -2376,6 +3388,7 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
             result,
             {
                 "matchingCount": 1,
+                "postCreateCount": 1,
                 "changedRejected": True,
             },
         )
@@ -2451,6 +3464,82 @@ class RenderZoteroDesktopRunnerTests(unittest.TestCase):
                 "releaseCount": 2,
             },
         )
+
+    @unittest.skipUnless(NODE, "Node.js is required for runner execution tests")
+    def test_created_note_readback_verifies_key_parent_content_and_collection(
+        self,
+    ) -> None:
+        function_source = extract_js_function(
+            "async function readBack",
+            "\nasync function runMigration",
+        )
+        result = run_node_json(
+            textwrap.dedent(
+                f"""
+                function assertion(condition, message) {{
+                  if (!condition) throw new Error(message);
+                }}
+                const sha256Text = value => value;
+                const semanticHTMLSHA256 = value => value;
+                const note = {{
+                  key: "NEWNOTE1",
+                  version: 0,
+                  itemType: "note",
+                  deleted: false,
+                  parentItemKey: "PARENT01",
+                  isNote: () => true,
+                  async reload() {{}},
+                  getNote: () => "created",
+                }};
+                const parent = {{
+                  key: "PARENT01",
+                  deleted: false,
+                  isRegularItem: () => true,
+                  async reload() {{}},
+                  getCollections: () => [27],
+                }};
+                const Zotero = {{
+                  Items: {{
+                    getByLibraryAndKeyAsync: async (_libraryID, key) =>
+                      key === "NEWNOTE1" ? note : parent,
+                  }},
+                }};
+                {function_source}
+                (async () => {{
+                  const results = await readBack(
+                    [{{
+                      operation: "create",
+                      noteKey: "NEWNOTE1",
+                      parentKey: "PARENT01",
+                      parentVersion: 4,
+                      expectedStoredHTML: "created",
+                      expectedStoredSHA256: "created",
+                      sourceSHA256: "source",
+                      storageNormalization: "none",
+                    }}],
+                    {{
+                      library: {{ libraryID: 2 }},
+                      collection: {{ id: 27 }},
+                    }},
+                  );
+                  process.stdout.write(JSON.stringify(results[0]));
+                }})().catch(error => {{
+                  console.error(error);
+                  process.exit(1);
+                }});
+                """
+            )
+        )
+
+        self.assertEqual(result["operation"], "create")
+        self.assertEqual(result["noteKey"], "NEWNOTE1")
+        self.assertEqual(result["createdNoteKey"], "NEWNOTE1")
+        self.assertEqual(result["parentKey"], "PARENT01")
+        self.assertEqual(result["parentVersion"], 4)
+        self.assertEqual(result["readbackVersion"], 0)
+        self.assertFalse(result["serverVersionAdvanced"])
+        self.assertEqual(result["readbackSHA256"], "created")
+        self.assertTrue(result["verified"])
 
     @unittest.skipUnless(NODE, "Node.js is required for runner execution tests")
     def test_committed_readback_accepts_same_version_new_content(self) -> None:

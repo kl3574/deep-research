@@ -97,17 +97,19 @@ evals/
   可生成绑定 manifest 哈希的 Zotero App 预检/事务写入脚本；
   `update_existing_note.py` 是版本保护的 HTTP/Web 备用路线。
 
-已有笔记优先使用 Zotero Desktop 官方 `工具 → 开发者 → 运行
-JavaScript`：无需 API key，manifest v2 干运行先核验完整目标路径、父条目/
-子笔记/附件清单、明确 PDF、版本和文件哈希，应用时在一个 Zotero 数据库
-事务中重枚举并写入；可用短期内存
+已有父条目的一笔记更新或零笔记创建优先使用 Zotero Desktop 官方
+`工具 → 开发者 → 运行 JavaScript`：无需 API key。零笔记创建需向
+`prepare_note_migration.py` 提供绝对路径的 `--parent-note-map`；一笔记时
+同一映射按幂等覆盖处理，多笔记继续阻断。manifest v2 干运行先核验完整目标
+路径、父条目/子项/子笔记/附件清单、明确 PDF、版本和文件哈希；创建笔记还核验
+父条目稳定书目快照哈希。应用时在一个 Zotero 数据库事务中重枚举并更新或创建；可用短期内存
 屏障保持“自动同步”设置开启，并在写后区分字节一致与严格语义一致。若无法由用户
 操作 App，再运行时探测 `Zotero-Server-ID`，或回退到通过本机环境变量
 提供的专用 Web API key。Web 干运行会核验 key 对目标 group 的读写权限
 并预检全部远端对象；由于 Connector 不暴露 local collection ID 到
 group/key 的可靠绑定，HTTP/Web 实写还要求用户单独确认预览中的
-`group_id` 与 `collection_key`。任何路线都不记录 key，也不直接编辑
-SQLite。
+`group_id` 与 `collection_key`。任何路线都不记录 API 凭据，也不直接编辑
+SQLite；本地私有审计清单可以记录目标 ID/key，但不得提交到公开仓库。
 
 真实前向测试见
 [稀疏动力学识别与参数校准](evals/real-world/sparse-dynamics-2026-07-29.md)。

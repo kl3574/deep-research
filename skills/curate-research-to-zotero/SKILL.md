@@ -1,34 +1,32 @@
 ---
 name: curate-research-to-zotero
-description: Legally download and preserve research PDFs, verify provenance and hashes, deduplicate, import approved records into an exact Zotero library and collection, and audit synchronization by readback. Use when asked to download papers or manuals, preserve a research corpus, import citations, PDFs, or notes, or audit Zotero ingestion.
+description: Acquire and verify research documents, deduplicate sources, import approved records, PDFs, or notes into an exact Zotero target, and audit by readback. Use when preserving a corpus, ingesting into Zotero, or auditing prior ingestion.
 ---
 
 # Curate Research to Zotero
 
-Keep acquisition and Zotero writes as separate authorization stages. Import success is not synchronization.
+Separate acquisition from authorized Zotero writes.
 
 ## Stage and verify
 
-1. Accept reviewed sources from `$deep-research` or a paper card from `$learn-from-papers`.
-2. Resolve identity/version and acquire only from lawful publisher, repository, or official upstream routes; never bypass controls. If full text is unavailable, keep verified metadata only.
-3. Stage outside public repositories and never publish copyrighted files. Record canonical/final URLs, license/access basis, retrieval time, and version.
-4. Verify PDF signature, size, SHA-256, extraction/rendering, and identity. Keep source and Zotero-stored hashes distinct.
-5. Build one-ID manifests per [ingestion-contract.md](references/ingestion-contract.md) and run [verify_manifest.py](scripts/verify_manifest.py).
-6. Deduplicate by DOI/identifier, URL/version, then title/year/authors. Classify `add`, `skip_duplicate`, `conflict`, or `metadata_only`. Never delete, merge, move, relink, overwrite, or clean records without separate approval.
+1. Accept vetted `$deep-research` or `$learn-from-papers` sources.
+2. Resolve identity/version; use lawful primary routes and retain metadata if needed.
+3. Stage privately; record provenance, access basis, time, and version.
+4. Verify signature, hash, rendering, and identity; distinguish source/stored hashes.
+5. Deduplicate by identifier, URL/version, and title/year/authors.
+6. Build manifests with [ingestion-contract.md](references/ingestion-contract.md) and [verify_manifest.py](scripts/verify_manifest.py).
 
 ## Gate and write
 
-Preview the exact library name/ID, collection path/key, batch decisions/counts, validated files, conflicts, and intended effects. Obtain approval for that target and batch. Immediately before writing, probe read-only and require target equality and editability; abort on mismatch. Create collections only through an authorized supported route and read back the key.
+Load [zotero-workflow.md](references/zotero-workflow.md). Approve the exact target, batch, files, conflicts, and effects; immediately probe and dry-run.
 
-Load [zotero-workflow.md](references/zotero-workflow.md), capability-probe, and dry-run:
+- New records/PDFs: use a documented route and supported [import_zotero_bundle.py](scripts/import_zotero_bundle.py).
+- Existing/missing child notes: use [prepare_note_migration.py](scripts/prepare_note_migration.py) and its manifest-bound Desktop transaction. [update_existing_note.py](scripts/update_existing_note.py) is a gated fallback.
 
-- New parents/PDFs/notes: use a documented Connector/local route; use [import_zotero_bundle.py](scripts/import_zotero_bundle.py) only when supported.
-- Existing notes: stage manifest v2 with [prepare_note_migration.py](scripts/prepare_note_migration.py). When the user can operate Zotero Desktop, prefer the manifest-bound [Run JavaScript workflow](references/zotero-workflow.md) for a no-key dry-run and one-transaction batch; otherwise dry-run [update_existing_note.py](scripts/update_existing_note.py) and use only its capability-probed local or Web route after the user explicitly confirms the displayed API group/key target. Require exact target/path, complete parent/child inventories, one approved PDF attachment and file hash, parent/note keys, old/new hashes, verified backups, and version guards; stop on concurrent change.
-
-Never expose credentials, edit Zotero SQLite, create duplicate parents as an update workaround, or assume parent success means child success. Bound retries.
+Stop on ambiguity or drift. Never expose credentials, edit SQLite, publish private artifacts, duplicate parents, or destructively alter records without separate approval.
 
 ## Read back
 
-After every attempted write, verify the parent key, exact collection membership and metadata; attachment/note child keys, parent, files, tags, and content; and stored hash versus staged hash. Record observed keys, hashes, differences, and status in manifests. Report staged/imported/readback/failed counts. A `201` or visible citation is insufficient.
+Verify target, children, files, content, and hashes. Record differences/counts and rerun staging for idempotence.
 
-For Chinese notes, preserve Chinese prose, original terms, and LaTeX. Validate schema-9 HTML with [zotero-note-html.md](references/zotero-note-html.md) and [verify_note_html.py](scripts/verify_note_html.py); keep Markdown and HTML hashes separate.
+For Chinese notes, preserve Chinese prose, terms, and LaTeX. Validate schema-9 HTML with [zotero-note-html.md](references/zotero-note-html.md) and [verify_note_html.py](scripts/verify_note_html.py).

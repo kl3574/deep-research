@@ -33,6 +33,68 @@ function sha256Text(text) {
   return sha256Bytes(new TextEncoder().encode(text));
 }
 
+function stableJSONStringify(value) {
+  if (value === null || typeof value !== "object") {
+    assertion(
+      value !== undefined
+        && (
+          typeof value === "string"
+          || typeof value === "number"
+          || typeof value === "boolean"
+          || value === null
+        ),
+      "parent item snapshot contains a non-JSON value",
+    );
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(stableJSONStringify).join(",")}]`;
+  }
+  return `{${
+    Object.keys(value)
+      .sort()
+      .map(key =>
+        `${JSON.stringify(key)}:${stableJSONStringify(value[key])}`
+      )
+      .join(",")
+  }}`;
+}
+
+function parentDataSnapshotSHA256(parentData) {
+  assertion(
+    parentData
+      && typeof parentData === "object"
+      && !Array.isArray(parentData),
+    "parent item data is unavailable for snapshot verification",
+  );
+  const excludedFields = new Set([
+    "accessDate",
+    "citationKey",
+    "collections",
+    "createdByUserID",
+    "dateAdded",
+    "dateModified",
+    "deleted",
+    "inPublications",
+    "key",
+    "lastModifiedByUserID",
+    "libraryCatalog",
+    "relations",
+    "synced",
+    "tags",
+    "version",
+  ]);
+  const snapshot = Object.fromEntries(
+    Object.entries(parentData).filter(
+      ([key]) => !excludedFields.has(key),
+    ),
+  );
+  return sha256Text(stableJSONStringify({
+    data: snapshot,
+    schema: "zotero-item-bibliographic-v1",
+  }));
+}
+
 const fileVerificationCache = new Map();
 
 async function verifyPDFFile(
@@ -109,11 +171,72 @@ function normalizedNoteHTML(text) {
   return text.trim();
 }
 
+function isCanonicalTableRow(node) {
+  return node && node.tag === "tr";
+}
+
+function isCanonicalTableSection(node) {
+  return (
+    node
+    && node.tag
+    && ["thead", "tbody", "tfoot"].includes(node.tag)
+    && node.attributes.length === 0
+    && node.children.every(isCanonicalTableRow)
+  );
+}
+
+function isAttributeFreeBR(node) {
+  if (!node || node.nodeType !== 1) {
+    return false;
+  }
+  const tag = node.tagName ? node.tagName.toLowerCase() : "";
+  return tag === "br" && node.attributes.length === 0;
+}
+
+function canonicalizeTableChildren(children) {
+  const normalizedTableChildren = [];
+  const directRows = [];
+  const flushDirectRows = () => {
+    if (!directRows.length) {
+      return;
+    }
+    normalizedTableChildren.push({
+      tag: "tbody",
+      attributes: [],
+      children: [...directRows],
+    });
+    directRows.length = 0;
+  };
+  for (const child of children) {
+    if (isCanonicalTableRow(child) || isCanonicalTableSection(child)) {
+      directRows.push(...(
+        isCanonicalTableRow(child)
+        ? [child]
+        : child.children
+      ));
+      continue;
+    }
+    flushDirectRows();
+    normalizedTableChildren.push(child);
+  }
+  flushDirectRows();
+  return normalizedTableChildren;
+}
+
 function semanticHTMLProjection(html) {
   const document = new DOMParser().parseFromString(html, "text/html");
+  const isHTMLASCIIWhitespace = value =>
+    !/[^ \t\r\n\f]/u.test(value);
+  const collapseHTMLASCIIWhitespace = value =>
+    value.replace(/[ \t\r\n\f]+/gu, " ");
+  const trimHTMLASCIIWhitespace = value =>
+    value.replace(/^[ \t\r\n\f]+|[ \t\r\n\f]+$/gu, "");
   const meaningfulBodyNodes = [...document.body.childNodes].filter(node =>
     node.nodeType === 1
-      || (node.nodeType === 3 && /\S/u.test(node.nodeValue || ""))
+      || (
+        node.nodeType === 3
+        && !isHTMLASCIIWhitespace(node.nodeValue || "")
+      )
   );
   assertion(
     meaningfulBodyNodes.length === 1
@@ -121,7 +244,8 @@ function semanticHTMLProjection(html) {
     "note HTML must contain exactly one semantic root",
   );
   const root = meaningfulBodyNodes[0];
-  const normalizeText = value => value.replace(/\s+/gu, " ").trim();
+  const normalizeText = value =>
+    trimHTMLASCIIWhitespace(collapseHTMLASCIIWhitespace(value));
   const blockTags = new Set([
     "address", "article", "aside", "blockquote", "div", "dl", "fieldset",
     "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5",
@@ -137,25 +261,50 @@ function semanticHTMLProjection(html) {
     while (
       current
       && current.nodeType === 3
-      && !/\S/u.test(current.nodeValue || "")
+      && isHTMLASCIIWhitespace(current.nodeValue || "")
     ) {
       current = current[direction];
     }
     return current;
+  };
+  const elementPreservesWhitespace = element => {
+    if (element.closest("pre, textarea")) {
+      return true;
+    }
+    let current = element;
+    while (current) {
+      const style = current.getAttribute("style") || "";
+      if (
+        (
+          current.style
+          && current.style.getPropertyValue("white-space") !== ""
+        )
+        || style.includes("/*")
+        || style.includes("\\")
+        || /(?:^|;)[ \t\r\n\f]*white-space[ \t\r\n\f]*:/iu.test(style)
+      ) {
+        return true;
+      }
+      current = current.parentElement;
+    }
+    return false;
   };
   const canonicalNode = node => {
     if (node.nodeType === 3) {
       const raw = node.nodeValue || "";
       if (
         node.parentElement
-        && node.parentElement.closest("pre, textarea")
+        && elementPreservesWhitespace(node.parentElement)
       ) {
         return raw ? { text: raw } : null;
       }
-      let value = raw.replace(/\s+/gu, " ");
-      if (!value.trim()) {
+      let value = collapseHTMLASCIIWhitespace(raw);
+      if (isHTMLASCIIWhitespace(value)) {
         const previous = neighboringSemanticNode(node, "previousSibling");
         const next = neighboringSemanticNode(node, "nextSibling");
+        if (isAttributeFreeBR(previous) || isAttributeFreeBR(next)) {
+          return null;
+        }
         if (
           !previous
           || !next
@@ -169,10 +318,10 @@ function semanticHTMLProjection(html) {
       const previous = neighboringSemanticNode(node, "previousSibling");
       const next = neighboringSemanticNode(node, "nextSibling");
       if (!previous || isBlockNode(previous)) {
-        value = value.trimStart();
+        value = value.replace(/^[ \t\r\n\f]+/u, "");
       }
       if (!next || isBlockNode(next)) {
-        value = value.trimEnd();
+        value = value.replace(/[ \t\r\n\f]+$/u, "");
       }
       return { text: value };
     }
@@ -198,6 +347,9 @@ function semanticHTMLProjection(html) {
       && children[0].attributes.length === 0
     ) {
       children = children[0].children;
+    }
+    if (tag === "table") {
+      children = canonicalizeTableChildren(children);
     }
     return { tag, attributes, children };
   };
@@ -339,6 +491,7 @@ function validateManifestContract(manifest) {
   const allowedStatuses = new Set([
     "staged_verified",
     "unchanged_verified",
+    "create_verified",
     "staged_invalid",
     "no_existing_note",
     "blocked_multiple_notes",
@@ -359,6 +512,21 @@ function validateManifestContract(manifest) {
       entry.child_attachment_inventory,
       `${parentKey}: child_attachment_inventory`,
     );
+    const childItemInventory = entry.child_item_inventory === undefined
+      ? null
+      : validatedKeyInventory(
+        entry.child_item_inventory,
+        `${parentKey}: child_item_inventory`,
+      );
+    if (childItemInventory !== null) {
+      assertion(
+        exactArrayEqual(
+          childItemInventory,
+          [...childNoteInventory, ...childAttachmentInventory].sort(),
+        ),
+        `${parentKey}: child_item_inventory is inconsistent`,
+      );
+    }
     if (entry.status === "no_existing_note") {
       assertion(
         childNoteInventory.length === 0,
@@ -396,6 +564,34 @@ function validateManifestContract(manifest) {
       assertion(
         childAttachmentInventory.includes(entry.pdf_attachment_key),
         `${noteKey}: approved PDF attachment is absent from child inventory`,
+      );
+    }
+    if (entry.status === "create_verified") {
+      assertion(
+        entry.expected_parent_key === parentKey,
+        `${parentKey}: create expected_parent_key differs`,
+      );
+      assertion(
+        childNoteInventory.length === 0,
+        `${parentKey}: create_verified requires zero existing notes`,
+      );
+      assertion(
+        childItemInventory !== null,
+        `${parentKey}: create_verified requires a complete child inventory`,
+      );
+      assertion(
+        Number.isInteger(entry.parent_version) && entry.parent_version > 0,
+        `${parentKey}: create parent_version is invalid`,
+      );
+      assertion(
+        entry.parent_data_snapshot_schema === "zotero-item-bibliographic-v1"
+          && typeof entry.parent_data_snapshot_sha256 === "string"
+          && /^[0-9a-f]{64}$/.test(entry.parent_data_snapshot_sha256),
+        `${parentKey}: create parent data snapshot is invalid`,
+      );
+      assertion(
+        childAttachmentInventory.includes(entry.pdf_attachment_key),
+        `${parentKey}: approved PDF attachment is absent from child inventory`,
       );
     }
   }
@@ -452,9 +648,12 @@ async function liveChildInventory(parent, forceReload = false) {
       return item.key;
     })
     .sort();
+  const notes = validChildren(noteItems, "note");
+  const attachments = validChildren(attachmentItems, "attachment");
   return {
-    notes: validChildren(noteItems, "note"),
-    attachments: validChildren(attachmentItems, "attachment"),
+    notes,
+    attachments,
+    items: [...notes, ...attachments].sort(),
   };
 }
 
@@ -462,6 +661,7 @@ async function verifyLiveManifestInventory(
   manifestContract,
   targetContext,
   forceReload = false,
+  createdNoteKeysByParent = new Map(),
 ) {
   const observedCollectionInventory = await liveCollectionItemInventory(
     targetContext.collection,
@@ -498,18 +698,34 @@ async function verifyLiveManifestInventory(
       `${parentKey}: live collection parent identity or membership changed`,
     );
     const observed = await liveChildInventory(parent, false);
+    const createdNoteKey = createdNoteKeysByParent.get(parentKey);
+    const expectedNotes = createdNoteKey
+      ? [...entry.child_note_inventory, createdNoteKey].sort()
+      : entry.child_note_inventory;
+    const expectedItems = entry.child_item_inventory === undefined
+      ? null
+      : (
+        createdNoteKey
+          ? [...entry.child_item_inventory, createdNoteKey].sort()
+          : entry.child_item_inventory
+      );
     assertion(
-      exactArrayEqual(observed.notes, entry.child_note_inventory)
+      exactArrayEqual(observed.notes, expectedNotes)
         && exactArrayEqual(
           observed.attachments,
           entry.child_attachment_inventory,
+        )
+        && (
+          expectedItems === null
+          || exactArrayEqual(observed.items, expectedItems)
         ),
       `${parentKey}: live child-note or attachment inventory changed`,
       {
         observed,
         expected: {
-          notes: entry.child_note_inventory,
+          notes: expectedNotes,
           attachments: entry.child_attachment_inventory,
+          items: expectedItems,
         },
       },
     );
@@ -520,7 +736,12 @@ async function verifyLiveManifestInventory(
       collection: manifestContract.collectionItemInventory,
       children: manifestContract.entries.map(entry => ({
         parentKey: entry.parent_key,
-        notes: entry.child_note_inventory,
+        notes: createdNoteKeysByParent.get(String(entry.parent_key))
+          ? [
+            ...entry.child_note_inventory,
+            createdNoteKeysByParent.get(String(entry.parent_key)),
+          ].sort()
+          : entry.child_note_inventory,
         attachments: entry.child_attachment_inventory,
       })),
     })),
@@ -629,44 +850,65 @@ async function resolveAndVerifyTarget(target) {
 }
 
 async function verifyEntry(entry, targetContext) {
-  const noteKey = String(entry.note_key || "");
+  const isCreate = entry.status === "create_verified";
   const parentKey = String(entry.expected_parent_key || "");
-  assertion(/^[A-Z0-9]{8}$/.test(noteKey), "invalid note key", { noteKey });
+  const noteKey = isCreate ? null : String(entry.note_key || "");
+  const label = noteKey || `create:${parentKey}`;
+  if (!isCreate) {
+    assertion(/^[A-Z0-9]{8}$/.test(noteKey), "invalid note key", { noteKey });
+  }
   assertion(/^[A-Z0-9]{8}$/.test(parentKey), "invalid parent key", {
     noteKey,
     parentKey,
   });
-  assertion(
-    Number.isInteger(entry.note_version) && entry.note_version > 0,
-    `${noteKey}: manifest note version is invalid`,
-  );
+  if (isCreate) {
+    assertion(
+      Number.isInteger(entry.parent_version) && entry.parent_version > 0,
+      `${label}: manifest parent version is invalid`,
+    );
+    assertion(
+      Array.isArray(entry.child_note_inventory)
+        && entry.child_note_inventory.length === 0,
+      `${label}: create preflight requires zero existing notes`,
+    );
+  }
+  else {
+    assertion(
+      Number.isInteger(entry.note_version) && entry.note_version > 0,
+      `${noteKey}: manifest note version is invalid`,
+    );
+  }
   assertion(
     Array.isArray(entry.validation_errors) && entry.validation_errors.length === 0,
-    `${noteKey}: staged note has validation errors`,
+    `${label}: staged note has validation errors`,
     entry.validation_errors,
   );
   assertion(
     entry.validation_summary
       && String(entry.validation_summary.schema_version) === "9",
-    `${noteKey}: staged note is not schema version 9`,
+    `${label}: staged note is not schema version 9`,
   );
 
-  const oldHTML = await Zotero.File.getContentsAsync(entry.old_path, "UTF-8");
   const stagedHTML = await Zotero.File.getContentsAsync(entry.new_path, "UTF-8");
-  assertion(
-    sha256Text(oldHTML) === entry.old_sha256,
-    `${noteKey}: original backup hash changed`,
-  );
+  const oldHTML = isCreate
+    ? null
+    : await Zotero.File.getContentsAsync(entry.old_path, "UTF-8");
+  if (!isCreate) {
+    assertion(
+      sha256Text(oldHTML) === entry.old_sha256,
+      `${noteKey}: original backup hash changed`,
+    );
+  }
   assertion(
     sha256Text(stagedHTML) === entry.new_sha256,
-    `${noteKey}: staged HTML hash changed`,
+    `${label}: staged HTML hash changed`,
   );
-  await verifyPDFFile(entry.pdf_path, entry.pdf_sha256, noteKey);
+  await verifyPDFFile(entry.pdf_path, entry.pdf_sha256, label);
   const stagedProjection = semanticHTMLProjection(stagedHTML);
   assertion(
     stagedProjection.root.tag === "div"
       && stagedProjection.root.schemaVersion === "9",
-    `${noteKey}: staged HTML has no schema-9 root`,
+    `${label}: staged HTML has no schema-9 root`,
   );
   const requiredSections = [
     "资料与阅读状态",
@@ -690,18 +932,18 @@ async function verifyEntry(entry, targetContext) {
     const sectionIndex = h2.indexOf(section);
     assertion(
       sectionIndex > priorSectionIndex,
-      `${noteKey}: staged schema-9 sections are missing or out of order`,
+      `${label}: staged schema-9 sections are missing or out of order`,
       { section, headings: h2 },
     );
     priorSectionIndex = sectionIndex;
   }
   assertion(
     h1.length === 1 && h1[0].text,
-    `${noteKey}: staged schema-9 note must contain one non-empty h1`,
+    `${label}: staged schema-9 note must contain one non-empty h1`,
   );
   assertion(
     stagedHTML.includes(entry.pdf_sha256),
-    `${noteKey}: staged note does not cite the verified PDF SHA-256`,
+    `${label}: staged note does not cite the verified PDF SHA-256`,
   );
   const expectedStoredHTML = normalizedNoteHTML(stagedHTML);
   const expectedStoredSHA256 = sha256Text(expectedStoredHTML);
@@ -722,51 +964,109 @@ async function verifyEntry(entry, targetContext) {
     );
   }
 
-  const note = await Zotero.Items.getByLibraryAndKeyAsync(
-    targetContext.library.libraryID,
-    noteKey,
-  );
-  assertion(note, `${noteKey}: note does not exist`);
-  await note.loadAllData();
-  assertion(note.isNote(), `${noteKey}: target item is not a note`);
-  assertion(!note.deleted, `${noteKey}: note is in the trash`);
-  assertion(note.isEditable(), `${noteKey}: note is not editable`);
-  assertion(
-    note.libraryID === targetContext.library.libraryID,
-    `${noteKey}: note is in the wrong library`,
-  );
-  assertion(
-    note.parentItemKey === parentKey,
-    `${noteKey}: parent key changed`,
-    { observed: note.parentItemKey, expected: parentKey },
-  );
-  assertion(
-    note.version === entry.note_version,
-    `${noteKey}: note version changed`,
-    { observed: note.version, expected: entry.note_version },
-  );
-  assertion(
-    sha256Text(note.getNote()) === entry.old_sha256,
-    `${noteKey}: live note content conflicts with the approved backup`,
-  );
-
   const parent = await Zotero.Items.getByLibraryAndKeyAsync(
     targetContext.library.libraryID,
     parentKey,
   );
-  assertion(parent, `${noteKey}: parent ${parentKey} does not exist`);
-  await parent.loadAllData();
-  assertion(parent.isRegularItem(), `${noteKey}: parent is not a regular item`);
-  assertion(!parent.deleted, `${noteKey}: parent is in the trash`);
+  assertion(parent, `${label}: parent ${parentKey} does not exist`);
+  await parent.loadAllData(true);
+  assertion(parent.isRegularItem(), `${label}: parent is not a regular item`);
+  assertion(!parent.deleted, `${label}: parent is in the trash`);
   assertion(
     parent.libraryID === targetContext.library.libraryID,
-    `${noteKey}: parent is in the wrong library`,
+    `${label}: parent is in the wrong library`,
   );
   assertion(
     parent.getCollections().includes(targetContext.collection.id)
       && targetContext.collection.hasItem(parent),
-    `${noteKey}: parent is outside the approved collection`,
+    `${label}: parent is outside the approved collection`,
   );
+  let note = null;
+  if (isCreate) {
+    assertion(
+      typeof parent.isEditable === "function" && parent.isEditable(),
+      `${label}: parent is not editable for child-note creation`,
+    );
+    assertion(
+      parent.version === entry.parent_version,
+      `${label}: parent version changed`,
+      { observed: parent.version, expected: entry.parent_version },
+    );
+    const parentData = parent.toJSON();
+    assertion(
+      parentData.key === parent.key
+        && parentData.version === parent.version,
+      `${label}: parent item data identity differs`,
+      {
+        dataKey: parentData.key,
+        itemKey: parent.key,
+        dataVersion: parentData.version,
+        itemVersion: parent.version,
+      },
+    );
+    const observedParentDataSnapshotSHA256 = parentDataSnapshotSHA256(
+      parentData,
+    );
+    assertion(
+      observedParentDataSnapshotSHA256
+        === entry.parent_data_snapshot_sha256,
+      `${label}: parent item data changed`,
+      {
+        observed: observedParentDataSnapshotSHA256,
+        expected: entry.parent_data_snapshot_sha256,
+      },
+    );
+    const liveChildren = await liveChildInventory(parent, false);
+    assertion(
+      liveChildren.notes.length === 0
+        && exactArrayEqual(
+          liveChildren.attachments,
+          entry.child_attachment_inventory,
+        )
+        && exactArrayEqual(
+          liveChildren.items,
+          entry.child_item_inventory,
+        ),
+      `${label}: live child inventory changed before creation`,
+      {
+        observed: liveChildren,
+        expected: {
+          notes: entry.child_note_inventory,
+          attachments: entry.child_attachment_inventory,
+          items: entry.child_item_inventory,
+        },
+      },
+    );
+  }
+  else {
+    note = await Zotero.Items.getByLibraryAndKeyAsync(
+      targetContext.library.libraryID,
+      noteKey,
+    );
+    assertion(note, `${noteKey}: note does not exist`);
+    await note.loadAllData();
+    assertion(note.isNote(), `${noteKey}: target item is not a note`);
+    assertion(!note.deleted, `${noteKey}: note is in the trash`);
+    assertion(note.isEditable(), `${noteKey}: note is not editable`);
+    assertion(
+      note.libraryID === targetContext.library.libraryID,
+      `${noteKey}: note is in the wrong library`,
+    );
+    assertion(
+      note.parentItemKey === parentKey,
+      `${noteKey}: parent key changed`,
+      { observed: note.parentItemKey, expected: parentKey },
+    );
+    assertion(
+      note.version === entry.note_version,
+      `${noteKey}: note version changed`,
+      { observed: note.version, expected: entry.note_version },
+    );
+    assertion(
+      sha256Text(note.getNote()) === entry.old_sha256,
+      `${noteKey}: live note content conflicts with the approved backup`,
+    );
+  }
   const attachment = await Zotero.Items.getByLibraryAndKeyAsync(
     targetContext.library.libraryID,
     entry.pdf_attachment_key,
@@ -780,14 +1080,14 @@ async function verifyEntry(entry, targetContext) {
       && !attachment.deleted
       && attachment.parentItemKey === parentKey
       && attachment.attachmentContentType === "application/pdf",
-    `${noteKey}: approved PDF attachment identity changed`,
+    `${label}: approved PDF attachment identity changed`,
   );
   assertion(
     attachment.attachmentLinkMode
       === expectedAttachmentLinkMode(entry.pdf_attachment_link_mode),
-    `${noteKey}: approved PDF attachment link mode changed`,
+    `${label}: approved PDF attachment link mode changed`,
   );
-  await verifyAttachmentFileBinding(attachment, entry.pdf_path, noteKey);
+  await verifyAttachmentFileBinding(attachment, entry.pdf_path, label);
 
   return {
     note,
@@ -796,55 +1096,128 @@ async function verifyEntry(entry, targetContext) {
     status: entry.status,
     noteKey,
     parentKey,
+    operation: isCreate
+      ? "create"
+      : entry.status === "staged_verified"
+        ? "update"
+        : "unchanged",
     oldHTML,
-    oldSHA256: entry.old_sha256,
+    oldSHA256: isCreate ? null : entry.old_sha256,
     sourceSHA256: entry.new_sha256,
     pdfPath: entry.pdf_path,
     pdfSHA256: entry.pdf_sha256,
     pdfAttachmentLinkMode: entry.pdf_attachment_link_mode,
+    entryChildAttachmentInventory: entry.child_attachment_inventory,
+    entryChildItemInventory: entry.child_item_inventory,
     expectedStoredHTML,
     expectedStoredSHA256,
     storageNormalization:
       stagedHTML === expectedStoredHTML ? "none" : "zotero_trim",
-    oldVersion: note.version,
+    oldVersion: note ? note.version : null,
+    parentVersion: parent.version,
+    parentDataSnapshotSHA256: isCreate
+      ? entry.parent_data_snapshot_sha256
+      : null,
+    createdNoteKey: null,
   };
 }
 
 async function verifyLiveStateAgain(verified, targetContext) {
   for (const item of verified) {
-    await verifyPDFFile(
-      item.pdfPath,
-      item.pdfSHA256,
-      item.noteKey,
+    const label = item.noteKey || `create:${item.parentKey}`;
+    if (item.operation === "create") {
+      await verifyPDFFile(
+        item.pdfPath,
+        item.pdfSHA256,
+        label,
+        true,
+      );
+    } else {
+      await verifyPDFFile(
+        item.pdfPath,
+        item.pdfSHA256,
+        item.noteKey,
+        true,
+      );
+    }
+    if (item.operation !== "create") {
+      await item.note.reload(["primaryData", "note"], true);
+      assertion(!item.note.deleted, `${item.noteKey}: note was deleted after preflight`);
+      assertion(
+        item.note.version === item.oldVersion,
+        `${item.noteKey}: note version changed after preflight`,
+        { observed: item.note.version, expected: item.oldVersion },
+      );
+      assertion(
+        item.note.parentItemKey === item.parentKey,
+        `${item.noteKey}: parent changed after preflight`,
+      );
+      assertion(
+        sha256Text(item.note.getNote()) === item.oldSHA256,
+        `${item.noteKey}: note content changed after preflight`,
+      );
+    }
+    await item.parent.reload(
+      ["primaryData", "collections", "childItems"],
       true,
     );
-    await item.note.reload(["primaryData", "note"], true);
-    assertion(!item.note.deleted, `${item.noteKey}: note was deleted after preflight`);
-    assertion(
-      item.note.version === item.oldVersion,
-      `${item.noteKey}: note version changed after preflight`,
-      { observed: item.note.version, expected: item.oldVersion },
-    );
-    assertion(
-      item.note.parentItemKey === item.parentKey,
-      `${item.noteKey}: parent changed after preflight`,
-    );
-    assertion(
-      sha256Text(item.note.getNote()) === item.oldSHA256,
-      `${item.noteKey}: note content changed after preflight`,
-    );
-    await item.parent.reload(["primaryData", "collections"], true);
     assertion(
       item.parent.isRegularItem()
         && !item.parent.deleted
         && item.parent.libraryID === targetContext.library.libraryID,
-      `${item.noteKey}: parent changed or became invalid after preflight`,
+      `${label}: parent changed or became invalid after preflight`,
     );
     assertion(
       item.parent.getCollections().includes(targetContext.collection.id)
         && targetContext.collection.hasItem(item.parent),
-      `${item.noteKey}: parent left the approved collection after preflight`,
+      `${label}: parent left the approved collection after preflight`,
     );
+    if (item.operation === "create") {
+      await item.parent.loadAllData(true);
+      assertion(
+        item.parent.version === item.parentVersion,
+        `${label}: parent version changed after preflight`,
+        { observed: item.parent.version, expected: item.parentVersion },
+      );
+      const parentData = item.parent.toJSON();
+      assertion(
+        parentData.key === item.parent.key
+          && parentData.version === item.parent.version,
+        `${label}: parent item data identity differs after preflight`,
+        {
+          dataKey: parentData.key,
+          itemKey: item.parent.key,
+          dataVersion: parentData.version,
+          itemVersion: item.parent.version,
+        },
+      );
+      const observedParentDataSnapshotSHA256 = parentDataSnapshotSHA256(
+        parentData,
+      );
+      assertion(
+        observedParentDataSnapshotSHA256
+          === item.parentDataSnapshotSHA256,
+        `${label}: parent item data changed after preflight`,
+        {
+          observed: observedParentDataSnapshotSHA256,
+          expected: item.parentDataSnapshotSHA256,
+        },
+      );
+      const observedChildren = await liveChildInventory(item.parent, false);
+      assertion(
+        observedChildren.notes.length === 0
+          && exactArrayEqual(
+            observedChildren.attachments,
+            item.entryChildAttachmentInventory,
+          )
+          && exactArrayEqual(
+            observedChildren.items,
+            item.entryChildItemInventory,
+          ),
+        `${label}: a child appeared after create preflight`,
+        { observed: observedChildren },
+      );
+    }
     await item.attachment.reload(["primaryData"], true);
     await item.attachment.loadAllData();
     assertion(
@@ -854,12 +1227,12 @@ async function verifyLiveStateAgain(verified, targetContext) {
         && item.attachment.attachmentContentType === "application/pdf"
         && item.attachment.attachmentLinkMode
           === expectedAttachmentLinkMode(item.pdfAttachmentLinkMode),
-      `${item.noteKey}: approved PDF attachment changed after preflight`,
+      `${label}: approved PDF attachment changed after preflight`,
     );
     await verifyAttachmentFileBinding(
       item.attachment,
       item.pdfPath,
-      item.noteKey,
+      label,
     );
   }
 }
@@ -870,6 +1243,7 @@ async function applyTransaction(
   manifestTarget,
   manifestContract,
   onCommit,
+  createVerified = [],
 ) {
   await Zotero.DB.executeTransaction(async function () {
     assertion(
@@ -892,6 +1266,26 @@ async function applyTransaction(
         `${item.noteKey}: in-transaction note hash mismatch`,
       );
     }
+    for (const item of createVerified) {
+      const note = new Zotero.Item("note");
+      note.libraryID = transactionTargetContext.library.libraryID;
+      note.parentKey = item.parentKey;
+      note.setNote(item.expectedStoredHTML);
+      await note.save();
+      assertion(
+        /^[A-Z0-9]{8}$/.test(String(note.key || "")),
+        `create:${item.parentKey}: Zotero did not assign a valid note key`,
+      );
+      assertion(
+        note.libraryID === transactionTargetContext.library.libraryID
+          && note.parentItemKey === item.parentKey
+          && sha256Text(note.getNote()) === item.expectedStoredSHA256,
+        `create:${item.parentKey}: in-transaction created note verification failed`,
+      );
+      item.note = note;
+      item.noteKey = note.key;
+      item.createdNoteKey = note.key;
+    }
   }, { onCommit });
 }
 
@@ -901,6 +1295,42 @@ async function inspectTransactionOutcome(verified) {
   const observations = [];
   for (const item of verified) {
     try {
+      if (item.operation === "create") {
+        await item.parent.reload(["primaryData", "childItems"], true);
+        await item.parent.loadDataType("childItems");
+        const notes = (await Zotero.Items.getAsync(item.parent.getNotes(false)))
+          .filter(note =>
+            note
+              && !note.deleted
+              && note.isNote()
+              && note.parentItemKey === item.parentKey
+          );
+        const matches = notes.filter(note => {
+          const html = note.getNote();
+          return sha256Text(html) === item.expectedStoredSHA256
+            || semanticHTMLSHA256(html)
+              === semanticHTMLSHA256(item.expectedStoredHTML);
+        });
+        const isOld = notes.length === 0;
+        const isNew = notes.length === 1 && matches.length === 1;
+        if (isOld) {
+          oldStateCount += 1;
+        }
+        if (isNew) {
+          newStateCount += 1;
+          item.note = matches[0];
+          item.noteKey = matches[0].key;
+          item.createdNoteKey = matches[0].key;
+        }
+        observations.push({
+          operation: "create",
+          parentKey: item.parentKey,
+          noteKeys: notes.map(note => note.key).sort(),
+          matchingNoteKeys: matches.map(note => note.key).sort(),
+          state: isOld ? "old" : isNew ? "new" : "neither",
+        });
+        continue;
+      }
       await item.note.reload(["primaryData", "note"], true);
       const html = item.note.getNote();
       const sha256 = sha256Text(html);
@@ -924,6 +1354,7 @@ async function inspectTransactionOutcome(verified) {
         newStateCount += 1;
       }
       observations.push({
+        operation: "update",
         noteKey: item.noteKey,
         version: item.note.version,
         sha256,
@@ -933,7 +1364,9 @@ async function inspectTransactionOutcome(verified) {
     }
     catch (error) {
       observations.push({
+        operation: item.operation,
         noteKey: item.noteKey,
+        parentKey: item.parentKey,
         state: "unreadable",
         error: plainError(error),
       });
@@ -1019,6 +1452,10 @@ async function readBack(verified, targetContext) {
   };
   const results = [];
   for (const item of verified) {
+    assertion(
+      /^[A-Z0-9]{8}$/.test(String(item.noteKey || "")),
+      `create:${item.parentKey}: committed note key is missing or invalid`,
+    );
     const note = await refreshItemFromKey(
       item.noteKey,
       `${item.noteKey}: failed to refresh committed note`,
@@ -1038,12 +1475,19 @@ async function readBack(verified, targetContext) {
     const noteTypeMatches = typeof note.isNote === "function"
       ? note.isNote()
       : note.itemType === "note";
-    const serverVersionAdvanced = note.version > item.oldVersion;
+    const localVersionValid =
+      Number.isInteger(note.version) && note.version >= 0;
+    const serverVersionAdvanced = item.operation === "create"
+      ? note.version > 0
+      : note.version > item.oldVersion;
+    const versionMatches = item.operation === "create"
+      ? localVersionValid
+      : note.version >= item.oldVersion;
     assertion(
       noteTypeMatches
         && !note.deleted
         && note.parentItemKey === item.parentKey
-        && note.version >= item.oldVersion
+        && versionMatches
         && (byteExact || semanticEquivalent),
       `${item.noteKey}: committed readback verification failed`,
       {
@@ -1051,6 +1495,7 @@ async function readBack(verified, targetContext) {
         deleted: note.deleted,
         parentItemKey: note.parentItemKey,
         oldVersion: item.oldVersion,
+        localVersionValid,
         serverVersionAdvanced,
         readbackVersion: note.version,
         observedSHA256,
@@ -1066,8 +1511,11 @@ async function readBack(verified, targetContext) {
       `${item.noteKey}: parent collection membership changed after commit`,
     );
     results.push({
+      operation: item.operation,
       noteKey: item.noteKey,
       parentKey: item.parentKey,
+      createdNoteKey: item.operation === "create" ? item.noteKey : null,
+      parentVersion: item.parentVersion,
       oldVersion: item.oldVersion,
       readbackVersion: note.version,
       serverVersionAdvanced,
@@ -1095,6 +1543,7 @@ async function runMigration() {
   let transactionInspection;
   let verified = [];
   let mutationVerified = [];
+  let createVerified = [];
   let publicTarget;
   const autoSyncBefore = Zotero.Prefs.get("sync.autoSync");
   let syncState = {
@@ -1159,10 +1608,14 @@ async function runMigration() {
       entry => entry && (
         entry.status === "staged_verified"
         || entry.status === "unchanged_verified"
+        || entry.status === "create_verified"
       ),
     );
     const mutationEntries = (manifest.entries || []).filter(
       entry => entry && entry.status === "staged_verified",
+    );
+    const createEntries = (manifest.entries || []).filter(
+      entry => entry && entry.status === "create_verified",
     );
     assertion(entries.length > 0, "manifest contains no staged notes");
     assertion(
@@ -1176,6 +1629,14 @@ async function runMigration() {
       {
         observed: mutationEntries.length,
         expected: CONFIG.expectedMutationCount,
+      },
+    );
+    assertion(
+      createEntries.length === (CONFIG.expectedCreateCount || 0),
+      "create note count differs from the generated runner",
+      {
+        observed: createEntries.length,
+        expected: CONFIG.expectedCreateCount || 0,
       },
     );
     const observedMutationKeys = mutationEntries
@@ -1192,7 +1653,23 @@ async function runMigration() {
         expected: CONFIG.expectedMutationKeys,
       },
     );
-    const noteKeys = entries.map(entry => String(entry.note_key || ""));
+    const observedCreateParentKeys = createEntries
+      .map(entry => String(entry.parent_key || ""))
+      .sort();
+    assertion(
+      exactArrayEqual(
+        observedCreateParentKeys,
+        (CONFIG.expectedCreateParentKeys || []).slice().sort(),
+      ),
+      "create parent keys differ from the generated runner",
+      {
+        observed: observedCreateParentKeys,
+        expected: CONFIG.expectedCreateParentKeys || [],
+      },
+    );
+    const noteKeys = entries
+      .filter(entry => entry.status !== "create_verified")
+      .map(entry => String(entry.note_key || ""));
     assertion(
       new Set(noteKeys).size === noteKeys.length,
       "manifest contains duplicate note keys",
@@ -1201,16 +1678,21 @@ async function runMigration() {
       verified.push(await verifyEntry(entry, targetContext));
     }
     mutationVerified = verified.filter(item => item.status === "staged_verified");
+    createVerified = verified.filter(item => item.status === "create_verified");
 
     const publicNotes = verified.map(item => ({
+      operation: item.operation,
       noteKey: item.noteKey,
       parentKey: item.parentKey,
+      parentVersion: item.parentVersion,
+      parentDataSnapshotSHA256: item.parentDataSnapshotSHA256,
       oldVersion: item.oldVersion,
       oldSHA256: item.oldSHA256,
       stagedSourceSHA256: item.sourceSHA256,
       expectedStoredSHA256: item.expectedStoredSHA256,
       storageNormalization: item.storageNormalization,
-      backupVerified: true,
+      backupVerified: item.operation !== "create",
+      sourceVerified: true,
     }));
 
     if (!CONFIG.apply) {
@@ -1230,13 +1712,19 @@ async function runMigration() {
         noteCount: verified.length,
         mutationCount: mutationVerified.length,
         mutationKeys: observedMutationKeys,
+        updateCount: mutationVerified.length,
+        updateNoteKeys: observedMutationKeys,
+        createCount: createVerified.length,
+        createParentKeys: observedCreateParentKeys,
+        newNoteKeys: [],
+        totalWriteCount: mutationVerified.length + createVerified.length,
         notes: publicNotes,
         syncState,
         writePerformed: false,
       };
     }
 
-    if (mutationVerified.length === 0) {
+    if (mutationVerified.length === 0 && createVerified.length === 0) {
       sampleSyncPreferenceState();
       assertion(
         !CONFIG.requireAutoSyncEnabled
@@ -1253,6 +1741,12 @@ async function runMigration() {
         noteCount: verified.length,
         mutationCount: mutationVerified.length,
         mutationKeys: observedMutationKeys,
+        updateCount: 0,
+        updateNoteKeys: [],
+        createCount: 0,
+        createParentKeys: [],
+        newNoteKeys: [],
+        totalWriteCount: 0,
         notes: publicNotes,
         syncState,
         writePerformed: false,
@@ -1292,12 +1786,16 @@ async function runMigration() {
           () => {
             commitObserved = true;
           },
+          createVerified,
         );
         writePerformed = true;
         transactionOutcome = "committed";
       }
       catch (error) {
-        transactionInspection = await inspectTransactionOutcome(mutationVerified);
+        transactionInspection = await inspectTransactionOutcome([
+          ...mutationVerified,
+          ...createVerified,
+        ]);
         transactionOutcome = transactionInspection.outcome;
         if (commitObserved || transactionOutcome === "committed") {
           writePerformed = true;
@@ -1315,8 +1813,18 @@ async function runMigration() {
       }
 
       phase = "readback";
-      const results = await readBack(mutationVerified, targetContext);
-      await verifyLiveManifestInventory(manifestContract, targetContext, true);
+      const writeVerified = [...mutationVerified, ...createVerified];
+      const results = await readBack(writeVerified, targetContext);
+      const createdNoteKeysByParent = new Map(
+        createVerified.map(item => [item.parentKey, item.noteKey]),
+      );
+      await verifyLiveManifestInventory(
+        manifestContract,
+        targetContext,
+        true,
+        createdNoteKeysByParent,
+      );
+      const newNoteKeys = createVerified.map(item => item.noteKey).sort();
       syncState.writePerformed = writePerformed;
       return {
         status: "completed",
@@ -1328,6 +1836,12 @@ async function runMigration() {
         noteCount: verified.length,
         mutationCount: mutationVerified.length,
         mutationKeys: observedMutationKeys,
+        updateCount: mutationVerified.length,
+        updateNoteKeys: observedMutationKeys,
+        createCount: createVerified.length,
+        createParentKeys: observedCreateParentKeys,
+        newNoteKeys,
+        totalWriteCount: mutationVerified.length + createVerified.length,
         notes: publicNotes,
         results,
         syncState,
@@ -1361,7 +1875,16 @@ async function runMigration() {
     }
   }
   catch (error) {
-    syncState.writePerformed = writePerformed;
+    try {
+      sampleSyncPreferenceState();
+    }
+    catch (sampleError) {
+      syncState.syncPreferenceSampleError = plainError(sampleError);
+      syncState.autoSyncAfter = null;
+      syncState.preferenceChanged = null;
+      syncState.preferencePreserved = null;
+      syncState.writePerformed = writePerformed;
+    }
     return {
       status:
         phase === "sync_barrier_lease"
@@ -1377,6 +1900,18 @@ async function runMigration() {
       completedAt: new Date().toISOString(),
       target: publicTarget,
       noteCount: verified.length,
+      updateCount: mutationVerified.length,
+      updateNoteKeys: mutationVerified
+        .map(item => item.noteKey)
+        .filter(Boolean)
+        .sort(),
+      createCount: createVerified.length,
+      createParentKeys: createVerified.map(item => item.parentKey).sort(),
+      newNoteKeys: createVerified
+        .map(item => item.noteKey)
+        .filter(Boolean)
+        .sort(),
+      totalWriteCount: mutationVerified.length + createVerified.length,
       syncState,
       writePerformed,
       rolledBack,

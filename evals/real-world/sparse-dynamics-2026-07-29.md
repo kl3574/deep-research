@@ -143,8 +143,8 @@ separate version facts.
 ## Zotero acceptance evidence
 
 Three new parent/PDF/note bundles were imported one at a time into the confirmed
-group collection
-`PRIVATE_ZOTERO_TARGET -> PRIVATE_ZOTERO_TARGET -> PRIVATE_ZOTERO_TARGET -> PRIVATE_ZOTERO_TARGET`
+private group collection. This public report uses synthetic aliases:
+`Example Research Library -> 示例研究域 -> 示例研究方向 -> 示例研究主题`
 (the internal collection key is intentionally omitted from the public report).
 Readback verified:
 
@@ -173,9 +173,8 @@ seven notes were byte-exact. Zotero normalized the SINDy table DOM and
 whitespace, changing its stored hash, but all 217 text chunks, 13 headings, 15
 table rows/cells, four LaTeX blocks, links, images, and schema validation were
 equal. The original byte-only app report therefore remains as a transparent
-false-positive failure record, paired with
-`post_write_audit.json` under
-`~/.local/share/deep-research/zotero-private-staging`.
+false-positive failure record, paired with a private
+`post_write_audit.json` artifact outside the public repository.
 
 After those writes, the hardened manifest-v2 `v3` stager and dry-run approved
 an exact inventory of 33 parents: 28 unchanged notes, four staged note updates,

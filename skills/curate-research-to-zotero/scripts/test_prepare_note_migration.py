@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 import unittest
 from argparse import Namespace
 from contextlib import redirect_stdout
@@ -15,6 +17,110 @@ from test_verify_note_html import valid_note
 
 
 class PrepareNoteMigrationTests(unittest.TestCase):
+    def prepare_parent_note_case(
+        self,
+        directory: Path,
+        *,
+        note_count: int,
+        parent_version: int = 3,
+        parent_data_key: str = "PARENT01",
+        parent_data_version: int | None = None,
+        pdf_count: int = 1,
+        zotero_normalized_note: bool = False,
+    ) -> tuple[dict[str, object], str, str]:
+        pdf_path = directory / "paper.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\nfixture\n%%EOF\n")
+        pdf_sha256 = module.sha256_file(pdf_path)
+        requested_html = valid_note().replace("a" * 64, pdf_sha256)
+        html_path = directory / "requested-note.html"
+        html_path.write_text(requested_html, encoding="utf-8")
+        parent_note_map = directory / "parent-note-map.json"
+        parent_note_map.write_text(
+            '{"PARENT01": ' + json.dumps(str(html_path)) + "}",
+            encoding="utf-8",
+        )
+        args = Namespace(
+            group_id=1234567,
+            collection_key="COLL",
+            expected_collection_name="Collection",
+            output_dir=directory,
+            override_map=None,
+            parent_note_map=parent_note_map,
+            pdf_attachment_map=None,
+        )
+        target = {
+            "group_id": 1234567,
+            "library_id": 2,
+            "library_name": "Example Research Library",
+            "local_collection_id": 27,
+            "collection_key": "COLL",
+            "collection_name": "Collection",
+            "collection_path": ["Collection"],
+        }
+        parents = [
+            {
+                "key": "PARENT01",
+                "version": parent_version,
+                "data": {
+                    "key": parent_data_key,
+                    "version": (
+                        parent_version
+                        if parent_data_version is None
+                        else parent_data_version
+                    ),
+                    "title": "单元测试标题",
+                    "itemType": "journalArticle",
+                },
+            }
+        ]
+        live_note_html = requested_html
+        if zotero_normalized_note:
+            live_note_html = re.sub(
+                r"<(th|td)>(.*?)</\1>",
+                r"<\1><p>\2</p></\1>",
+                live_note_html,
+                flags=re.S,
+            )
+            live_note_html = live_note_html.replace(
+                "<table><tr>",
+                "<table><tbody><tr>",
+            ).replace(
+                "</tr></table>",
+                "</tr></tbody></table>",
+            )
+        children = [
+            {
+                "key": f"NOTE{index:04d}",
+                "version": 7,
+                "data": {
+                    "itemType": "note",
+                    "parentItem": "PARENT01",
+                    "note": live_note_html,
+                },
+            }
+            for index in range(1, note_count + 1)
+        ]
+        children.extend(
+            {
+                "key": f"PDFATT{index:02d}",
+                "version": 5,
+                "data": {
+                    "itemType": "attachment",
+                    "parentItem": "PARENT01",
+                    "contentType": "application/pdf",
+                    "linkMode": "imported_file",
+                },
+            }
+            for index in range(1, pdf_count + 1)
+        )
+        with (
+            patch.object(module, "resolve_target_contract", return_value=target),
+            patch.object(module, "get_all_json", side_effect=[parents, children]),
+            patch.object(module, "get_text", return_value=pdf_path.as_uri()),
+        ):
+            manifest = module.prepare(args)
+        return manifest, requested_html, pdf_sha256
+
     def test_get_all_json_paginates_without_truncation(self) -> None:
         first_page = [
             {"key": f"{index:08d}"}
@@ -105,7 +211,7 @@ class PrepareNoteMigrationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "contains a cycle"):
             module.resolve_selected_path(
                 [
-                    {"level": 0, "id": "L2", "name": "PRIVATE_ZOTERO_TARGET"},
+                    {"level": 0, "id": "L2", "name": "Example Research Library"},
                     {"level": 1, "id": "C1", "name": "A"},
                     {"level": 2, "id": "C1", "name": "A"},
                     {"level": 3, "id": "C2", "name": "B"},
@@ -120,7 +226,7 @@ class PrepareNoteMigrationTests(unittest.TestCase):
         self.assertEqual(
             module.resolve_selected_path(
                 [
-                    {"level": 0, "id": "L2", "name": "PRIVATE_ZOTERO_TARGET"},
+                    {"level": 0, "id": "L2", "name": "Example Research Library"},
                     {"level": 1, "id": "C2", "name": "Collection 2"},
                 ],
                 "C2",
@@ -133,7 +239,7 @@ class PrepareNoteMigrationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "ambiguous"):
             module.resolve_selected_path(
                 [
-                    {"level": 0, "id": "L2", "name": "PRIVATE_ZOTERO_TARGET"},
+                    {"level": 0, "id": "L2", "name": "Example Research Library"},
                     {"level": 1, "id": "C1", "name": "A"},
                     {"level": 2, "id": "C8", "name": "B"},
                     {"level": 1, "id": "C3", "name": "A-alt"},
@@ -147,7 +253,7 @@ class PrepareNoteMigrationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "missing"):
             module.resolve_selected_path(
                 [
-                    {"level": 0, "id": "L2", "name": "PRIVATE_ZOTERO_TARGET"},
+                    {"level": 0, "id": "L2", "name": "Example Research Library"},
                     {"level": 1, "id": "C1", "name": "A"},
                 ],
                 "C999",
@@ -161,7 +267,7 @@ class PrepareNoteMigrationTests(unittest.TestCase):
                 "library": {
                     "type": "group",
                     "id": 1234567,
-                    "name": "PRIVATE_ZOTERO_TARGET",
+                    "name": "Example Research Library",
                 },
                 "data": {
                     "name": "Leaf",
@@ -173,7 +279,7 @@ class PrepareNoteMigrationTests(unittest.TestCase):
                 "library": {
                     "type": "group",
                     "id": 1234567,
-                    "name": "PRIVATE_ZOTERO_TARGET",
+                    "name": "Example Research Library",
                 },
                 "data": {
                     "name": "Root",
@@ -196,7 +302,7 @@ class PrepareNoteMigrationTests(unittest.TestCase):
                 "library": {
                     "type": "group",
                     "id": 1234567,
-                    "name": "PRIVATE_ZOTERO_TARGET",
+                    "name": "Example Research Library",
                 },
                 "data": {
                     "name": "Leaf",
@@ -226,7 +332,7 @@ class PrepareNoteMigrationTests(unittest.TestCase):
                 "library": {
                     "type": "group",
                     "id": 1234567,
-                    "name": "PRIVATE_ZOTERO_TARGET",
+                    "name": "Example Research Library",
                 },
                 "data": {
                     "name": "Collection",
@@ -245,16 +351,16 @@ class PrepareNoteMigrationTests(unittest.TestCase):
     def test_selected_target_requires_editable_and_collects_path(self) -> None:
         payload = {
             "libraryID": 2,
-            "libraryName": "PRIVATE_ZOTERO_TARGET",
+            "libraryName": "Example Research Library",
             "id": "C27",
-            "name": "PRIVATE_ZOTERO_TARGET",
+            "name": "示例研究主题",
             "editable": True,
             "filesEditable": True,
             "targets": [
-                {"id": "L2", "name": "PRIVATE_ZOTERO_TARGET", "level": 0},
-                {"id": "C10", "name": "PRIVATE_ZOTERO_TARGET", "level": 1},
-                {"id": "C20", "name": "PRIVATE_ZOTERO_TARGET", "level": 2},
-                {"id": "C27", "name": "PRIVATE_ZOTERO_TARGET", "level": 3},
+                {"id": "L2", "name": "Example Research Library", "level": 0},
+                {"id": "C10", "name": "示例研究域", "level": 1},
+                {"id": "C20", "name": "示例研究方向", "level": 2},
+                {"id": "C27", "name": "示例研究主题", "level": 3},
             ],
         }
         with patch.object(module, "get_json", return_value=payload):
@@ -264,13 +370,13 @@ class PrepareNoteMigrationTests(unittest.TestCase):
         self.assertEqual(selected["local_collection_id"], 27)
         self.assertEqual(
             selected["collection_path"],
-            ["PRIVATE_ZOTERO_TARGET", "PRIVATE_ZOTERO_TARGET", "PRIVATE_ZOTERO_TARGET"],
+            ["示例研究域", "示例研究方向", "示例研究主题"],
         )
 
     def test_resolve_target_contract_rejects_path_mismatch(self) -> None:
         selected = {
             "library_id": 2,
-            "library_name": "PRIVATE_ZOTERO_TARGET",
+            "library_name": "Example Research Library",
             "local_collection_id": 27,
             "collection_path": ["A", "B"],
             "collection_name": "C",
@@ -288,7 +394,7 @@ class PrepareNoteMigrationTests(unittest.TestCase):
                         "library": {
                             "type": "group",
                             "id": 1234567,
-                            "name": "PRIVATE_ZOTERO_TARGET",
+                            "name": "Example Research Library",
                         },
                         "data": {
                             "name": "X",
@@ -300,7 +406,7 @@ class PrepareNoteMigrationTests(unittest.TestCase):
                         "library": {
                             "type": "group",
                             "id": 1234567,
-                            "name": "PRIVATE_ZOTERO_TARGET",
+                            "name": "Example Research Library",
                         },
                         "data": {
                             "name": "Root",
@@ -315,14 +421,14 @@ class PrepareNoteMigrationTests(unittest.TestCase):
     def test_resolve_target_contract_outputs_full_manifest_fields(self) -> None:
         selected = {
             "library_id": 2,
-            "library_name": "PRIVATE_ZOTERO_TARGET",
+            "library_name": "Example Research Library",
             "local_collection_id": 27,
             "collection_path": [
-                "PRIVATE_ZOTERO_TARGET",
-                "PRIVATE_ZOTERO_TARGET",
-                "PRIVATE_ZOTERO_TARGET",
+                "示例研究域",
+                "示例研究方向",
+                "示例研究主题",
             ],
-            "collection_name": "PRIVATE_ZOTERO_TARGET",
+            "collection_name": "示例研究主题",
             "collection_key": "TESTCOL1",
         }
 
@@ -337,10 +443,10 @@ class PrepareNoteMigrationTests(unittest.TestCase):
                         "library": {
                             "type": "group",
                             "id": 1234567,
-                            "name": "PRIVATE_ZOTERO_TARGET",
+                            "name": "Example Research Library",
                         },
                         "data": {
-                            "name": "PRIVATE_ZOTERO_TARGET",
+                            "name": "示例研究主题",
                             "parentCollection": "C20",
                         },
                     },
@@ -349,10 +455,10 @@ class PrepareNoteMigrationTests(unittest.TestCase):
                         "library": {
                             "type": "group",
                             "id": 1234567,
-                            "name": "PRIVATE_ZOTERO_TARGET",
+                            "name": "Example Research Library",
                         },
                         "data": {
-                            "name": "PRIVATE_ZOTERO_TARGET",
+                            "name": "示例研究方向",
                             "parentCollection": "C10",
                         },
                     },
@@ -361,10 +467,10 @@ class PrepareNoteMigrationTests(unittest.TestCase):
                         "library": {
                             "type": "group",
                             "id": 1234567,
-                            "name": "PRIVATE_ZOTERO_TARGET",
+                            "name": "Example Research Library",
                         },
                         "data": {
-                            "name": "PRIVATE_ZOTERO_TARGET",
+                            "name": "示例研究域",
                             "parentCollection": False,
                         },
                     },
@@ -374,21 +480,21 @@ class PrepareNoteMigrationTests(unittest.TestCase):
             target = module.resolve_target_contract(
                 1234567,
                 "TESTCOL1",
-                expected_collection_name="PRIVATE_ZOTERO_TARGET",
+                expected_collection_name="示例研究主题",
             )
 
         self.assertEqual(target["group_id"], 1234567)
         self.assertEqual(target["library_id"], 2)
-        self.assertEqual(target["library_name"], "PRIVATE_ZOTERO_TARGET")
+        self.assertEqual(target["library_name"], "Example Research Library")
         self.assertEqual(target["local_collection_id"], 27)
         self.assertEqual(target["collection_key"], "TESTCOL1")
         self.assertEqual(target["collection_version"], 2209)
         self.assertEqual(
             target["collection_path"],
             [
-                "PRIVATE_ZOTERO_TARGET",
-                "PRIVATE_ZOTERO_TARGET",
-                "PRIVATE_ZOTERO_TARGET",
+                "示例研究域",
+                "示例研究方向",
+                "示例研究主题",
             ],
         )
 
@@ -410,7 +516,7 @@ class PrepareNoteMigrationTests(unittest.TestCase):
                     "library": {
                         "type": "group",
                         "id": 1234567,
-                        "name": "PRIVATE_ZOTERO_TARGET",
+                        "name": "Example Research Library",
                     },
                     "data": {
                         "name": "Collection",
@@ -425,7 +531,7 @@ class PrepareNoteMigrationTests(unittest.TestCase):
     def test_prepare_generates_manifest_with_target_contract(self) -> None:
         selected = {
             "library_id": 2,
-            "library_name": "PRIVATE_ZOTERO_TARGET",
+            "library_name": "Example Research Library",
             "local_collection_id": 27,
             "collection_path": ["Collection"],
             "collection_name": "Collection",
@@ -464,7 +570,7 @@ class PrepareNoteMigrationTests(unittest.TestCase):
                             "library": {
                                 "type": "group",
                                 "id": 1234567,
-                                "name": "PRIVATE_ZOTERO_TARGET",
+                                "name": "Example Research Library",
                             },
                             "data": {
                                 "name": "Collection",
@@ -510,7 +616,7 @@ class PrepareNoteMigrationTests(unittest.TestCase):
 
         self.assertEqual(manifest["target"]["group_id"], 1234567)
         self.assertEqual(manifest["target"]["local_collection_id"], 27)
-        self.assertEqual(manifest["target"]["library_name"], "PRIVATE_ZOTERO_TARGET")
+        self.assertEqual(manifest["target"]["library_name"], "Example Research Library")
         self.assertEqual(manifest["target"]["collection_version"], 5)
         self.assertEqual(manifest["manifest_version"], "2")
         self.assertEqual(manifest["collection_item_inventory"], ["PARENT01"])
@@ -521,10 +627,469 @@ class PrepareNoteMigrationTests(unittest.TestCase):
             ["NOTE0001"],
         )
 
+    def test_prepare_stages_verified_creation_for_parent_without_note(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            manifest, requested_html, pdf_sha256 = self.prepare_parent_note_case(
+                Path(temp_dir),
+                note_count=0,
+            )
+            entry = manifest["entries"][0]
+
+            self.assertEqual(entry["status"], "create_verified")
+            self.assertEqual(entry["migration_kind"], "parent_note_create")
+            self.assertEqual(entry["parent_key"], "PARENT01")
+            self.assertEqual(entry["expected_parent_key"], "PARENT01")
+            self.assertEqual(entry["parent_version"], 3)
+            self.assertEqual(
+                entry["parent_data_snapshot_schema"],
+                module.PARENT_DATA_SNAPSHOT_SCHEMA,
+            )
+            self.assertEqual(
+                entry["parent_data_snapshot_sha256"],
+                module.parent_data_snapshot_sha256(
+                    {
+                        "title": "单元测试标题",
+                        "itemType": "journalArticle",
+                    }
+                ),
+            )
+            self.assertEqual(entry["child_item_inventory"], ["PDFATT01"])
+            self.assertEqual(entry["child_note_inventory"], [])
+            self.assertEqual(entry["child_attachment_inventory"], ["PDFATT01"])
+            self.assertEqual(entry["pdf_attachment_key"], "PDFATT01")
+            self.assertEqual(entry["pdf_attachment_link_mode"], "imported_file")
+            self.assertEqual(entry["pdf_sha256"], pdf_sha256)
+            self.assertEqual(entry["validation_errors"], [])
+            self.assertEqual(
+                str(entry["validation_summary"]["schema_version"]),
+                "9",
+            )
+            new_path = Path(str(entry["new_path"]))
+            self.assertTrue(new_path.is_absolute())
+            self.assertEqual(new_path.read_text(encoding="utf-8"), requested_html)
+            self.assertEqual(entry["new_sha256"], module.sha256_file(new_path))
+
+    def test_creation_rejects_parent_wrapper_data_identity_mismatch(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "wrapper and item data identity differ",
+            ):
+                self.prepare_parent_note_case(
+                    Path(temp_dir),
+                    note_count=0,
+                    parent_data_key="OTHER001",
+                )
+
+        with TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "wrapper and item data identity differ",
+            ):
+                self.prepare_parent_note_case(
+                    Path(temp_dir),
+                    note_count=0,
+                    parent_data_version=2,
+                )
+
+    def test_parent_data_snapshot_hash_covers_local_metadata_but_not_identity(
+        self,
+    ) -> None:
+        base = {
+            "key": "PARENT01",
+            "version": 3,
+            "itemType": "journalArticle",
+            "title": "A",
+            "creators": [
+                {
+                    "firstName": "Ada",
+                    "lastName": "Lovelace",
+                    "creatorType": "author",
+                },
+                {
+                    "firstName": "Grace",
+                    "lastName": "Hopper",
+                    "creatorType": "author",
+                }
+            ],
+            "DOI": "10.1234/example",
+            "dateModified": "2026-07-30T00:00:00Z",
+        }
+        same_bibliography_new_operational_metadata = {
+            **base,
+            "key": "OTHER001",
+            "version": 4,
+            "accessDate": "2026-07-31T00:00:00Z",
+            "citationKey": "lovelaceChanged",
+            "collections": ["OTHER001"],
+            "createdByUserID": 1,
+            "dateAdded": "2026-07-29T00:00:00Z",
+            "dateModified": "2026-07-31T00:00:00Z",
+            "deleted": False,
+            "inPublications": False,
+            "lastModifiedByUserID": 2,
+            "libraryCatalog": "Changed catalog",
+            "relations": {"dc:relation": ["https://example.org/related"]},
+            "synced": False,
+            "tags": [{"tag": "new"}],
+        }
+        changed_title = {**base, "title": "B"}
+        changed_creator = {
+            **base,
+            "creators": [
+                {
+                    "firstName": "Grace",
+                    "lastName": "Hopper",
+                    "creatorType": "author",
+                }
+            ],
+        }
+        reordered_creators = {
+            **base,
+            "creators": list(reversed(base["creators"])),
+        }
+        changed_doi = {**base, "DOI": "10.1234/changed"}
+
+        self.assertEqual(
+            module.parent_data_snapshot_sha256(base),
+            module.parent_data_snapshot_sha256(
+                same_bibliography_new_operational_metadata
+            ),
+        )
+        self.assertNotEqual(
+            module.parent_data_snapshot_sha256(base),
+            module.parent_data_snapshot_sha256(changed_title),
+        )
+        self.assertNotEqual(
+            module.parent_data_snapshot_sha256(base),
+            module.parent_data_snapshot_sha256(changed_creator),
+        )
+        self.assertNotEqual(
+            module.parent_data_snapshot_sha256(base),
+            module.parent_data_snapshot_sha256(reordered_creators),
+        )
+        self.assertNotEqual(
+            module.parent_data_snapshot_sha256(base),
+            module.parent_data_snapshot_sha256(changed_doi),
+        )
+
+    def test_parent_note_map_is_idempotent_after_created_note_exists(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            manifest, requested_html, _pdf_sha256 = self.prepare_parent_note_case(
+                Path(temp_dir),
+                note_count=1,
+            )
+            entry = manifest["entries"][0]
+
+            self.assertEqual(entry["status"], "unchanged_verified")
+            self.assertEqual(entry["migration_kind"], "curated_parent_override")
+            self.assertEqual(entry["note_key"], "NOTE0001")
+            self.assertEqual(entry["child_note_inventory"], ["NOTE0001"])
+            self.assertEqual(
+                Path(str(entry["new_path"])).read_text(encoding="utf-8"),
+                requested_html,
+            )
+            self.assertEqual(entry["old_sha256"], entry["new_sha256"])
+
+    def test_parent_note_map_idempotence_accepts_zotero_table_normalization(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            manifest, requested_html, _pdf_sha256 = self.prepare_parent_note_case(
+                Path(temp_dir),
+                note_count=1,
+                zotero_normalized_note=True,
+            )
+            entry = manifest["entries"][0]
+            live_html = Path(str(entry["old_path"])).read_text(encoding="utf-8")
+
+        self.assertNotEqual(live_html, requested_html)
+        self.assertEqual(entry["status"], "unchanged_verified")
+        self.assertEqual(entry["migration_kind"], "curated_parent_override")
+        self.assertEqual(entry["old_sha256"], entry["new_sha256"])
+        self.assertEqual(
+            module.semantic_note_html_for_comparison(live_html),
+            module.semantic_note_html_for_comparison(requested_html),
+        )
+
+    def test_storage_semantic_comparison_preserves_meaningful_table_wrappers(
+        self,
+    ) -> None:
+        bare = '<div data-schema-version="9"><table><tr><td>x</td></tr></table></div>'
+        zotero_normalized = (
+            '<div data-schema-version="9"><table><tbody><tr>'
+            "<td><p>x</p></td></tr></tbody></table></div>"
+        )
+        attributed_wrapper = (
+            '<div data-schema-version="9"><table><tbody><tr>'
+            '<td><p class="meaningful">x</p></td></tr></tbody></table></div>'
+        )
+
+        self.assertTrue(
+            module.note_html_matches_storage_semantics(
+                bare,
+                zotero_normalized,
+            )
+        )
+        self.assertFalse(
+            module.note_html_matches_storage_semantics(
+                bare,
+                attributed_wrapper,
+            )
+        )
+
+    def test_storage_semantic_comparison_flatten_sections_and_preserve_rejections(
+        self,
+    ) -> None:
+        source = (
+            "<div data-schema-version=\"9\"><table>"
+            "<tr><td>row-1</td></tr><tr><td>row-2</td></tr>"
+            "</table></div>"
+        )
+        flattened = (
+            "<div data-schema-version=\"9\"><table>"
+            "<thead><tr><td><p>row-1</p></td></tr></thead>"
+            "<tfoot><tr><td><p>row-2</p></td></tr></tfoot>"
+            "</table></div>"
+        )
+        mixed = (
+            "<div data-schema-version=\"9\"><table>"
+            "<tr><td><p>row-1</p></td></tr>"
+            "<tbody><tr><td><p>row-2</p></td></tr></tbody>"
+            "</table></div>"
+        )
+        reorder = (
+            "<div data-schema-version=\"9\"><table>"
+            "<tbody><tr><td><p>row-2</p></td></tr></tbody>"
+            "<thead><tr><td><p>row-1</p></td></tr></thead>"
+            "</table></div>"
+        )
+        attributed_section = (
+            "<div data-schema-version=\"9\"><table>"
+            "<thead class=\"zotero\"><tr><td><p>row-1</p></td></tr></thead>"
+            "<tfoot><tr><td><p>row-2</p></td></tr></tfoot>"
+            "</table></div>"
+        )
+        nontr_child_section = (
+            "<div data-schema-version=\"9\"><table>"
+            "<tbody><tr><td>row-1</td></tr><span>bad</span></tbody>"
+            "<tr><td>row-2</td></tr>"
+            "</table></div>"
+        )
+        changed_cell_tag = (
+            "<div data-schema-version=\"9\"><table>"
+            "<thead><tr><th><p>row-1</p></th></tr></thead>"
+            "<tfoot><tr><td><p>row-2</p></td></tr></tfoot>"
+            "</table></div>"
+        )
+
+        self.assertTrue(
+            module.note_html_matches_storage_semantics(source, flattened)
+        )
+        self.assertTrue(
+            module.note_html_matches_storage_semantics(source, mixed)
+        )
+        self.assertFalse(
+            module.note_html_matches_storage_semantics(source, reorder)
+        )
+        self.assertFalse(
+            module.note_html_matches_storage_semantics(source, attributed_section)
+        )
+        self.assertFalse(
+            module.note_html_matches_storage_semantics(source, nontr_child_section)
+        )
+        self.assertFalse(
+            module.note_html_matches_storage_semantics(source, changed_cell_tag)
+        )
+
+    def test_storage_semantic_comparison_ignores_ascii_whitespace_around_attribute_free_br(
+        self,
+    ) -> None:
+        source = (
+            '<div data-schema-version="9"><p>alpha<br/><span>beta</span></p></div>'
+        )
+        with_ascii_ws = (
+            '<div data-schema-version="9"><p>alpha<br>   <span>beta</span></p></div>'
+        )
+        with_newlines = (
+            '<div data-schema-version="9"><p>alpha<br/>\n\t <span>beta</span></p></div>'
+        )
+        with_nbsp = (
+            '<div data-schema-version="9"><p>alpha<br/>&nbsp;<span>beta</span></p></div>'
+        )
+        with_attributed_br = (
+            '<div data-schema-version="9"><p>alpha<br class="soft-break"> '
+            "<span>beta</span></p></div>"
+        )
+
+        self.assertTrue(
+            module.note_html_matches_storage_semantics(source, with_ascii_ws)
+        )
+        self.assertTrue(
+            module.note_html_matches_storage_semantics(source, with_newlines)
+        )
+        self.assertFalse(
+            module.note_html_matches_storage_semantics(source, with_nbsp)
+        )
+        self.assertFalse(
+            module.note_html_matches_storage_semantics(
+                source,
+                with_attributed_br,
+            )
+        )
+
+    def test_storage_semantic_comparison_preserves_nonbreaking_spaces(
+        self,
+    ) -> None:
+        regular_space = '<div data-schema-version="9"><p>a b</p></div>'
+        nonbreaking_space = (
+            '<div data-schema-version="9"><p>a&nbsp;b</p></div>'
+        )
+
+        self.assertFalse(
+            module.note_html_matches_storage_semantics(
+                regular_space,
+                nonbreaking_space,
+            )
+        )
+
+    def test_storage_semantic_comparison_respects_inline_white_space_style(
+        self,
+    ) -> None:
+        one_space = (
+            '<div data-schema-version="9">'
+            '<span style="white-space: pre">a b</span></div>'
+        )
+        two_spaces = (
+            '<div data-schema-version="9">'
+            '<span style="white-space: pre">a  b</span></div>'
+        )
+        ordinary_one_space = '<div data-schema-version="9"><span>a b</span></div>'
+        ordinary_two_spaces = (
+            '<div data-schema-version="9"><span>a  b</span></div>'
+        )
+        commented_declaration_one_space = (
+            '<div data-schema-version="9">'
+            '<span style="color:red;/*keep*/white-space:pre">a b</span></div>'
+        )
+        commented_declaration_two_spaces = (
+            '<div data-schema-version="9">'
+            '<span style="color:red;/*keep*/white-space:pre">a  b</span></div>'
+        )
+        comment_inside_property_one_space = (
+            '<div data-schema-version="9">'
+            '<span style="white-space/**/:pre">a b</span></div>'
+        )
+        comment_inside_property_two_spaces = (
+            '<div data-schema-version="9">'
+            '<span style="white-space/**/:pre">a  b</span></div>'
+        )
+
+        self.assertFalse(
+            module.note_html_matches_storage_semantics(one_space, two_spaces)
+        )
+        self.assertTrue(
+            module.note_html_matches_storage_semantics(
+                ordinary_one_space,
+                ordinary_two_spaces,
+            )
+        )
+        self.assertFalse(
+            module.note_html_matches_storage_semantics(
+                commented_declaration_one_space,
+                commented_declaration_two_spaces,
+            )
+        )
+        self.assertFalse(
+            module.note_html_matches_storage_semantics(
+                comment_inside_property_one_space,
+                comment_inside_property_two_spaces,
+            )
+        )
+
+    def test_parent_note_map_does_not_bypass_multiple_note_block(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            manifest, _requested_html, _pdf_sha256 = self.prepare_parent_note_case(
+                Path(temp_dir),
+                note_count=2,
+            )
+            entry = manifest["entries"][0]
+
+        self.assertEqual(entry["status"], "blocked_multiple_notes")
+        self.assertEqual(entry["note_count"], 2)
+        self.assertEqual(
+            entry["child_item_inventory"],
+            ["NOTE0001", "NOTE0002", "PDFATT01"],
+        )
+        self.assertEqual(entry["pdf_attachment_key"], "PDFATT01")
+
+    def test_parent_note_creation_binds_pdf_before_zero_note_branch(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            manifest, _requested_html, _pdf_sha256 = self.prepare_parent_note_case(
+                Path(temp_dir),
+                note_count=0,
+                pdf_count=2,
+            )
+            entry = manifest["entries"][0]
+
+        self.assertEqual(entry["status"], "blocked_multiple_pdfs")
+        self.assertEqual(
+            entry["pdf_attachment_candidates"],
+            ["PDFATT01", "PDFATT02"],
+        )
+        self.assertNotIn("new_path", entry)
+
+    def test_parent_note_map_rejects_relative_html_path(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            parent_note_map = directory / "parent-note-map.json"
+            parent_note_map.write_text(
+                '{"PARENT01": "relative-note.html"}',
+                encoding="utf-8",
+            )
+            args = Namespace(
+                group_id=1234567,
+                collection_key="COLL",
+                expected_collection_name="Collection",
+                output_dir=directory,
+                override_map=None,
+                parent_note_map=parent_note_map,
+                pdf_attachment_map=None,
+            )
+            target = {
+                "group_id": 1234567,
+                "library_id": 2,
+                "library_name": "Example Research Library",
+                "local_collection_id": 27,
+                "collection_key": "COLL",
+                "collection_name": "Collection",
+                "collection_path": ["Collection"],
+            }
+            parents = [
+                {
+                    "key": "PARENT01",
+                    "version": 3,
+                    "data": {
+                        "title": "单元测试标题",
+                        "itemType": "journalArticle",
+                    },
+                }
+            ]
+            with (
+                patch.object(
+                    module,
+                    "resolve_target_contract",
+                    return_value=target,
+                ),
+                patch.object(module, "get_all_json", return_value=parents),
+                self.assertRaisesRegex(ValueError, "must be absolute"),
+            ):
+                module.prepare(args)
+
     def test_prepare_marks_schema9_note_as_unchanged(self) -> None:
         selected = {
             "library_id": 2,
-            "library_name": "PRIVATE_ZOTERO_TARGET",
+            "library_name": "Example Research Library",
             "local_collection_id": 27,
             "collection_path": ["Collection"],
             "collection_name": "Collection",
@@ -553,7 +1118,7 @@ class PrepareNoteMigrationTests(unittest.TestCase):
                             "library": {
                                 "type": "group",
                                 "id": 1234567,
-                                "name": "PRIVATE_ZOTERO_TARGET",
+                                "name": "Example Research Library",
                             },
                             "data": {
                                 "name": "Collection",
@@ -609,7 +1174,7 @@ class PrepareNoteMigrationTests(unittest.TestCase):
     def test_prepare_marks_matching_override_as_unchanged(self) -> None:
         selected = {
             "library_id": 2,
-            "library_name": "PRIVATE_ZOTERO_TARGET",
+            "library_name": "Example Research Library",
             "local_collection_id": 27,
             "collection_path": ["Collection"],
             "collection_name": "Collection",
@@ -645,7 +1210,7 @@ class PrepareNoteMigrationTests(unittest.TestCase):
                             "library": {
                                 "type": "group",
                                 "id": 1234567,
-                                "name": "PRIVATE_ZOTERO_TARGET",
+                                "name": "Example Research Library",
                             },
                             "data": {
                                 "name": "Collection",
@@ -700,7 +1265,7 @@ class PrepareNoteMigrationTests(unittest.TestCase):
     def test_prepare_marks_trimmed_override_as_unchanged(self) -> None:
         selected = {
             "library_id": 2,
-            "library_name": "PRIVATE_ZOTERO_TARGET",
+            "library_name": "Example Research Library",
             "local_collection_id": 27,
             "collection_path": ["Collection"],
             "collection_name": "Collection",
@@ -736,7 +1301,7 @@ class PrepareNoteMigrationTests(unittest.TestCase):
                             "library": {
                                 "type": "group",
                                 "id": 1234567,
-                                "name": "PRIVATE_ZOTERO_TARGET",
+                                "name": "Example Research Library",
                             },
                             "data": {
                                 "name": "Collection",
@@ -791,7 +1356,7 @@ class PrepareNoteMigrationTests(unittest.TestCase):
     def test_prepare_marks_real_change_override_as_staged(self) -> None:
         selected = {
             "library_id": 2,
-            "library_name": "PRIVATE_ZOTERO_TARGET",
+            "library_name": "Example Research Library",
             "local_collection_id": 27,
             "collection_path": ["Collection"],
             "collection_name": "Collection",
@@ -830,7 +1395,7 @@ class PrepareNoteMigrationTests(unittest.TestCase):
                             "library": {
                                 "type": "group",
                                 "id": 1234567,
-                                "name": "PRIVATE_ZOTERO_TARGET",
+                                "name": "Example Research Library",
                             },
                             "data": {
                                 "name": "Collection",
@@ -904,7 +1469,7 @@ class PrepareNoteMigrationTests(unittest.TestCase):
             target = {
                 "group_id": 1234567,
                 "library_id": 2,
-                "library_name": "PRIVATE_ZOTERO_TARGET",
+                "library_name": "Example Research Library",
                 "local_collection_id": 27,
                 "collection_key": "COLL",
                 "collection_name": "Collection",
@@ -964,7 +1529,7 @@ class PrepareNoteMigrationTests(unittest.TestCase):
         target = {
             "group_id": 1234567,
             "library_id": 2,
-            "library_name": "PRIVATE_ZOTERO_TARGET",
+            "library_name": "Example Research Library",
             "local_collection_id": 27,
             "collection_key": "COLL",
             "collection_name": "Collection",

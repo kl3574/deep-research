@@ -2288,22 +2288,6 @@ def _resolve_sindy_note_path(
         if explicit_path is not None and explicit_path.exists():
             return explicit_path
 
-    fallback = (
-        Path("~/.local/share/deep-research").expanduser()
-        / "zotero-private-staging"
-        / "overrides"
-        / "TEST0001.html"
-    )
-    if fallback.exists():
-        return fallback
-
-    migration_candidates = sorted(
-        Path("~/.local/share/deep-research").expanduser().glob("zotero-note-migration-*")
-    )
-    for candidate in migration_candidates:
-        maybe = candidate / "overrides" / "TEST0001.html"
-        if maybe.exists():
-            return maybe
     return None
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage non-destructive schema-9 migrations for existing Zotero child notes.
+"""Stage non-destructive schema-9 migrations and approved child-note creation.
 
 The script reads Zotero's local API, writes original and migrated HTML files to
 an external staging directory, and records hashes and validation results. It
@@ -20,6 +20,7 @@ import sys
 import urllib.parse
 import urllib.request
 from datetime import datetime
+from html.parser import HTMLParser
 from pathlib import Path
 
 from verify_note_html import validate_note
@@ -31,6 +32,78 @@ SUPPORTED_PDF_LINK_MODES = {
     "imported_file",
     "imported_url",
     "linked_file",
+}
+PARENT_DATA_SNAPSHOT_SCHEMA = "zotero-item-bibliographic-v1"
+PARENT_DATA_SNAPSHOT_EXCLUDED_FIELDS = frozenset(
+    {
+        "accessDate",
+        "citationKey",
+        "collections",
+        "createdByUserID",
+        "dateAdded",
+        "dateModified",
+        "deleted",
+        "inPublications",
+        "key",
+        "lastModifiedByUserID",
+        "libraryCatalog",
+        "relations",
+        "synced",
+        "tags",
+        "version",
+    }
+)
+HTML_VOID_ELEMENTS = {
+    "area",
+    "base",
+    "br",
+    "col",
+    "embed",
+    "hr",
+    "img",
+    "input",
+    "link",
+    "meta",
+    "param",
+    "source",
+    "track",
+    "wbr",
+}
+HTML_BLOCK_ELEMENTS = {
+    "address",
+    "article",
+    "aside",
+    "blockquote",
+    "div",
+    "dl",
+    "fieldset",
+    "figcaption",
+    "figure",
+    "footer",
+    "form",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "header",
+    "hr",
+    "li",
+    "main",
+    "nav",
+    "ol",
+    "p",
+    "pre",
+    "section",
+    "table",
+    "tbody",
+    "td",
+    "tfoot",
+    "th",
+    "thead",
+    "tr",
+    "ul",
 }
 
 
@@ -357,6 +430,32 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def parent_data_snapshot_sha256(parent_data: dict[str, object]) -> str:
+    """Hash stable bibliographic fields while excluding operational metadata."""
+    snapshot = {
+        key: value
+        for key, value in parent_data.items()
+        if key not in PARENT_DATA_SNAPSHOT_EXCLUDED_FIELDS
+    }
+    bound_snapshot = {
+        "data": snapshot,
+        "schema": PARENT_DATA_SNAPSHOT_SCHEMA,
+    }
+    try:
+        canonical = json.dumps(
+            bound_snapshot,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "parent item data is not canonical JSON"
+        ) from exc
+    return sha256_bytes(canonical.encode("utf-8"))
+
+
 def ensure_staging_destination(output_dir: Path) -> None:
     if output_dir.is_symlink():
         raise RuntimeError("staging destination must not be a symbolic link")
@@ -412,12 +511,267 @@ def strip_tags(fragment: str) -> str:
 _ZOTERO_NOTE_CONTROL_CHARACTERS = re.compile(
     r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]"
 )
+_HTML_ASCII_WHITESPACE = " \t\r\n\f"
+_HTML_ASCII_WHITESPACE_RUN = re.compile(r"[ \t\r\n\f]+")
+_INLINE_WHITE_SPACE_DECLARATION = re.compile(
+    r"(?:^|;)[ \t\r\n\f]*white-space[ \t\r\n\f]*:",
+    flags=re.I,
+)
 
 
 def trim_note_html_for_comparison(html_text: str) -> str:
     """Normalize note HTML using the Zotero trim behavior used before persistence."""
     without_control = _ZOTERO_NOTE_CONTROL_CHARACTERS.sub("", html_text)
     return without_control.strip()
+
+
+def _is_html_ascii_whitespace(value: str) -> bool:
+    return not value or not re.search(r"[^ \t\r\n\f]", value)
+
+
+class _ComparisonElement:
+    def __init__(
+        self,
+        tag: str,
+        attributes: tuple[tuple[str, str], ...] = (),
+    ) -> None:
+        self.tag = tag
+        self.attributes = attributes
+        self.children: list[_ComparisonElement | str] = []
+
+
+class _ComparisonHTMLParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.document = _ComparisonElement("#document")
+        self.stack = [self.document]
+        self.valid = True
+
+    def _append_element(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+        *,
+        self_closing: bool,
+    ) -> None:
+        clean_attributes = tuple(
+            sorted((key, value or "") for key, value in attrs)
+        )
+        element = _ComparisonElement(tag, clean_attributes)
+        self.stack[-1].children.append(element)
+        if not self_closing and tag not in HTML_VOID_ELEMENTS:
+            self.stack.append(element)
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> None:
+        self._append_element(tag, attrs, self_closing=False)
+
+    def handle_startendtag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> None:
+        self._append_element(tag, attrs, self_closing=True)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in HTML_VOID_ELEMENTS:
+            return
+        if len(self.stack) == 1 or self.stack[-1].tag != tag:
+            self.valid = False
+            return
+        self.stack.pop()
+
+    def handle_data(self, data: str) -> None:
+        if data:
+            self.stack[-1].children.append(data)
+
+    def close(self) -> None:
+        super().close()
+        if len(self.stack) != 1:
+            self.valid = False
+
+
+def _semantic_neighbor(
+    children: list[_ComparisonElement | str],
+    index: int,
+    direction: int,
+) -> _ComparisonElement | str | None:
+    index += direction
+    while 0 <= index < len(children):
+        candidate = children[index]
+        if (
+            not isinstance(candidate, str)
+            or not _is_html_ascii_whitespace(candidate)
+        ):
+            return candidate
+        index += direction
+    return None
+
+
+def _is_block_comparison_node(node: _ComparisonElement | str | None) -> bool:
+    return isinstance(node, _ComparisonElement) and node.tag in HTML_BLOCK_ELEMENTS
+
+
+def _is_table_row_element(node: tuple[object, ...]) -> bool:
+    return len(node) == 4 and node[0] == "element" and node[1] == "tr"
+
+
+def _is_attribute_free_table_section(node: tuple[object, ...]) -> bool:
+    return (
+        len(node) == 4
+        and node[0] == "element"
+        and node[1] in {"thead", "tbody", "tfoot"}
+        and node[2] == ()
+        and all(_is_table_row_element(child) for child in node[3])
+    )
+
+
+def _is_attribute_free_br_element(
+    node: _ComparisonElement | str | None,
+) -> bool:
+    return (
+        isinstance(node, _ComparisonElement)
+        and node.tag == "br"
+        and node.attributes == ()
+        and node.children == []
+    )
+
+
+def _has_inline_white_space_declaration(element: _ComparisonElement) -> bool:
+    return any(
+        key.lower() == "style"
+        and (
+            "/*" in value
+            or "\\" in value
+            or _INLINE_WHITE_SPACE_DECLARATION.search(value) is not None
+        )
+        for key, value in element.attributes
+    )
+
+
+def _canonical_comparison_element(
+    element: _ComparisonElement,
+    *,
+    preserve_whitespace: bool = False,
+) -> tuple[object, ...]:
+    canonical_children: list[tuple[object, ...]] = []
+    preserve_children = (
+        preserve_whitespace
+        or element.tag in {"pre", "textarea"}
+        or _has_inline_white_space_declaration(element)
+    )
+    for index, child in enumerate(element.children):
+        if isinstance(child, _ComparisonElement):
+            canonical_children.append(
+                _canonical_comparison_element(
+                    child,
+                    preserve_whitespace=preserve_children,
+                )
+            )
+            continue
+        if preserve_children:
+            if child:
+                canonical_children.append(("text", child))
+            continue
+        value = _HTML_ASCII_WHITESPACE_RUN.sub(" ", child)
+        previous = _semantic_neighbor(element.children, index, -1)
+        following = _semantic_neighbor(element.children, index, 1)
+        if _is_html_ascii_whitespace(value):
+            if _is_attribute_free_br_element(previous) or _is_attribute_free_br_element(
+                following
+            ):
+                continue
+            if (
+                previous is None
+                or following is None
+                or _is_block_comparison_node(previous)
+                or _is_block_comparison_node(following)
+            ):
+                continue
+            canonical_children.append(("text", " "))
+            continue
+        if previous is None or _is_block_comparison_node(previous):
+            value = value.lstrip(_HTML_ASCII_WHITESPACE)
+        if following is None or _is_block_comparison_node(following):
+            value = value.rstrip(_HTML_ASCII_WHITESPACE)
+        canonical_children.append(("text", value))
+
+    if element.tag == "table":
+        normalized_table_children: list[tuple[object, ...]] = []
+        direct_rows: list[tuple[object, ...]] = []
+
+        def flush_direct_rows() -> None:
+            if not direct_rows:
+                return
+            normalized_table_children.append(
+                ("element", "tbody", (), tuple(direct_rows))
+            )
+            direct_rows.clear()
+
+        for child in canonical_children:
+            if _is_table_row_element(child):
+                direct_rows.append(child)
+            elif _is_attribute_free_table_section(child):
+                direct_rows.extend(child[3])
+            else:
+                flush_direct_rows()
+                normalized_table_children.append(child)
+        flush_direct_rows()
+        canonical_children = normalized_table_children
+    if (
+        element.tag in {"th", "td"}
+        and len(canonical_children) == 1
+        and len(canonical_children[0]) == 4
+        and canonical_children[0][0] == "element"
+        and canonical_children[0][1] == "p"
+        and canonical_children[0][2] == ()
+    ):
+        canonical_children = list(canonical_children[0][3])
+    return (
+        "element",
+        element.tag,
+        element.attributes,
+        tuple(canonical_children),
+    )
+
+
+def semantic_note_html_for_comparison(
+    html_text: str,
+) -> tuple[object, ...] | None:
+    parser = _ComparisonHTMLParser()
+    try:
+        parser.feed(trim_note_html_for_comparison(html_text))
+        parser.close()
+    except Exception:
+        return None
+    meaningful_children = [
+        child
+        for child in parser.document.children
+        if (
+            not isinstance(child, str)
+            or not _is_html_ascii_whitespace(child)
+        )
+    ]
+    if (
+        not parser.valid
+        or len(meaningful_children) != 1
+        or not isinstance(meaningful_children[0], _ComparisonElement)
+    ):
+        return None
+    return _canonical_comparison_element(meaningful_children[0])
+
+
+def note_html_matches_storage_semantics(left: str, right: str) -> bool:
+    if trim_note_html_for_comparison(left) == trim_note_html_for_comparison(right):
+        return True
+    left_projection = semantic_note_html_for_comparison(left)
+    return (
+        left_projection is not None
+        and left_projection == semantic_note_html_for_comparison(right)
+    )
 
 
 def first_matching_section(raw: str, names: tuple[str, ...]) -> str:
@@ -600,7 +954,7 @@ def build_migrated_note(
     boundary = first_sentence(boundary_fragment or raw, "既有笔记未单列失败边界，需继续核验。")
     relation = first_sentence(
         relation_fragment or raw,
-        "位于PRIVATE_ZOTERO_TARGET知识图中；具体依赖和冲突需在跨文献证据矩阵中维护。",
+        "知识图归属待确认；具体依赖和冲突需在跨文献证据矩阵中维护。",
     )
     locator = locate_source(raw)
 
@@ -820,6 +1174,45 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
                 )
             overrides[note_key] = raw_html_path
 
+    parent_note_paths: dict[str, Path] = {}
+    parent_note_map = getattr(args, "parent_note_map", None)
+    if parent_note_map:
+        data = json.loads(parent_note_map.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError(
+                "parent note map must be a JSON object of parent_key -> schema-9 HTML path"
+            )
+        for raw_parent_key, raw_html_path in data.items():
+            parent_key = str(raw_parent_key)
+            if not ITEM_KEY_PATTERN.fullmatch(parent_key):
+                raise ValueError("parent note map contains an invalid parent key")
+            if not isinstance(raw_html_path, str) or not raw_html_path.strip():
+                raise ValueError(
+                    f"{parent_key}: parent note HTML path must be a nonempty string"
+                )
+            html_path = Path(raw_html_path).expanduser()
+            if not html_path.is_absolute():
+                raise ValueError(
+                    f"{parent_key}: parent note HTML path must be absolute"
+                )
+            try:
+                html_path = html_path.resolve(strict=True)
+            except OSError as exc:
+                raise ValueError(
+                    f"{parent_key}: parent note HTML path is unavailable: {exc}"
+                ) from exc
+            if not html_path.is_file():
+                raise ValueError(
+                    f"{parent_key}: parent note HTML path is not a regular file"
+                )
+            parent_note_paths[parent_key] = html_path
+    unknown_parent_note_keys = set(parent_note_paths) - set(parent_keys)
+    if unknown_parent_note_keys:
+        raise ValueError(
+            "parent note map contains parents outside the collection: "
+            f"{sorted(unknown_parent_note_keys)}"
+        )
+
     pdf_selectors: dict[str, str] = {}
     pdf_attachment_map = getattr(args, "pdf_attachment_map", None)
     if pdf_attachment_map:
@@ -847,6 +1240,7 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
     entries: list[dict[str, object]] = []
     used_pdf_selectors: set[str] = set()
     used_overrides: set[str] = set()
+    used_parent_notes: set[str] = set()
     verified_at = datetime.now().astimezone().isoformat(timespec="seconds")
     for parent in parents:
         parent_key = str(parent.get("key"))
@@ -888,34 +1282,10 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
         common_entry = {
             "parent_key": parent_key,
             "title": parent_data.get("title"),
+            "child_item_inventory": sorted(child_keys),
             "child_note_inventory": child_note_inventory,
             "child_attachment_inventory": child_attachment_inventory,
         }
-        if not notes:
-            entries.append(
-                {
-                    **common_entry,
-                    "status": "no_existing_note",
-                }
-            )
-            continue
-        if len(notes) != 1:
-            entries.append(
-                {
-                    **common_entry,
-                    "status": "blocked_multiple_notes",
-                    "note_count": len(notes),
-                }
-            )
-            continue
-        note = notes[0]
-        note_key = str(note.get("key"))
-        note_data = note["data"]
-        raw = str(note_data.get("note") or "")
-        old_bytes = raw.encode("utf-8")
-        old_sha = sha256_bytes(old_bytes)
-        old_path = originals_dir / f"{note_key}.html"
-        write_bytes_exclusive(old_path, old_bytes)
         selected_attachment_key = pdf_selectors.get(parent_key)
         if selected_attachment_key:
             used_pdf_selectors.add(parent_key)
@@ -934,17 +1304,106 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
                     "pdf_attachment_candidates": exc.keys,
                 }
             )
+            if parent_key in parent_note_paths:
+                used_parent_notes.add(parent_key)
             continue
 
-        if note_key in overrides:
+        pdf_binding = {
+            "pdf_attachment_key": attachment_key,
+            "pdf_attachment_link_mode": attachment_link_mode,
+            "pdf_path": pdf_path,
+            "pdf_sha256": pdf_sha,
+        }
+        if not notes:
+            if parent_key not in parent_note_paths:
+                entries.append(
+                    {
+                        **common_entry,
+                        **pdf_binding,
+                        "status": "no_existing_note",
+                    }
+                )
+                continue
+            used_parent_notes.add(parent_key)
+            parent_version = parent.get("version")
+            if type(parent_version) is not int or parent_version <= 0:
+                raise RuntimeError(
+                    f"{parent_key}: parent version is invalid for note creation"
+                )
+            if (
+                parent_data.get("key") != parent_key
+                or parent_data.get("version") != parent_version
+            ):
+                raise RuntimeError(
+                    f"{parent_key}: parent wrapper and item data identity differ"
+                )
+            requested_html = parent_note_paths[parent_key].read_text(encoding="utf-8")
+            new_path = updated_dir / f"{parent_key}.create.html"
+            write_text_exclusive(new_path, requested_html)
+            new_sha = sha256_file(new_path)
+            errors, warnings, validation_summary = validate_note(requested_html)
+            entries.append(
+                {
+                    **common_entry,
+                    **pdf_binding,
+                    "doi": parent_data.get("DOI"),
+                    "expected_parent_key": parent_key,
+                    "parent_version": parent_version,
+                    "parent_data_snapshot_schema": PARENT_DATA_SNAPSHOT_SCHEMA,
+                    "parent_data_snapshot_sha256": (
+                        parent_data_snapshot_sha256(parent_data)
+                    ),
+                    "new_path": str(new_path),
+                    "new_sha256": new_sha,
+                    "migration_kind": "parent_note_create",
+                    "status": "create_verified" if not errors else "staged_invalid",
+                    "validation_errors": errors,
+                    "validation_warnings": warnings,
+                    "validation_summary": validation_summary,
+                }
+            )
+            continue
+        if len(notes) != 1:
+            if parent_key in parent_note_paths:
+                used_parent_notes.add(parent_key)
+            entries.append(
+                {
+                    **common_entry,
+                    **pdf_binding,
+                    "status": "blocked_multiple_notes",
+                    "note_count": len(notes),
+                }
+            )
+            continue
+        note = notes[0]
+        note_key = str(note.get("key"))
+        note_data = note["data"]
+        raw = str(note_data.get("note") or "")
+        old_bytes = raw.encode("utf-8")
+        old_sha = sha256_bytes(old_bytes)
+        old_path = originals_dir / f"{note_key}.html"
+        write_bytes_exclusive(old_path, old_bytes)
+
+        if parent_key in parent_note_paths and note_key in overrides:
+            raise ValueError(
+                f"{parent_key}: parent note map and override map both target {note_key}"
+            )
+        if parent_key in parent_note_paths:
+            used_parent_notes.add(parent_key)
+            override_html = parent_note_paths[parent_key].read_text(encoding="utf-8")
+            migration_kind = "curated_parent_override"
+            if note_html_matches_storage_semantics(override_html, raw):
+                migrated = raw
+                staged_status = "unchanged_verified"
+            else:
+                migrated = override_html
+                staged_status = "staged_verified"
+        elif note_key in overrides:
             used_overrides.add(note_key)
             override_path = Path(overrides[note_key]).expanduser().resolve()
             override_html = override_path.read_text(encoding="utf-8")
             migration_kind = "curated_override"
-            if (
-                trim_note_html_for_comparison(override_html)
-                == trim_note_html_for_comparison(raw)
-            ):
+            if note_html_matches_storage_semantics(override_html, raw):
                 migrated = raw
                 staged_status = "unchanged_verified"
             else:
@@ -994,10 +1453,7 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
                 "old_sha256": old_sha,
                 "new_path": str(new_path),
                 "new_sha256": new_sha,
-                "pdf_attachment_key": attachment_key,
-                "pdf_attachment_link_mode": attachment_link_mode,
-                "pdf_path": pdf_path,
-                "pdf_sha256": pdf_sha,
+                **pdf_binding,
                 "migration_kind": migration_kind,
                 "status": status,
                 "validation_errors": errors,
@@ -1009,7 +1465,7 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
     unused_pdf_selectors = set(pdf_selectors) - used_pdf_selectors
     if unused_pdf_selectors:
         raise ValueError(
-            "PDF attachment map entries were not used by a single-note parent: "
+            "PDF attachment map entries were not used by a live collection parent: "
             f"{sorted(unused_pdf_selectors)}"
         )
     unused_overrides = set(overrides) - used_overrides
@@ -1017,6 +1473,12 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
         raise ValueError(
             "override map entries were not used by an eligible single-note target: "
             f"{sorted(unused_overrides)}"
+        )
+    unused_parent_notes = set(parent_note_paths) - used_parent_notes
+    if unused_parent_notes:
+        raise ValueError(
+            "parent note map entries were not used by an eligible target: "
+            f"{sorted(unused_parent_notes)}"
         )
 
     return {
@@ -1038,6 +1500,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--expected-collection-name")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--override-map", type=Path)
+    parser.add_argument(
+        "--parent-note-map",
+        type=Path,
+        help=(
+            "JSON object mapping parent item keys to absolute schema-9 HTML paths; "
+            "creates a child note when none exists or acts as a curated override "
+            "when exactly one exists"
+        ),
+    )
     parser.add_argument(
         "--pdf-attachment-map",
         type=Path,
@@ -1062,6 +1533,9 @@ def main() -> int:
     )
     staged = sum(
         1 for entry in manifest["entries"] if entry.get("status") == "staged_verified"
+    )
+    created = sum(
+        1 for entry in manifest["entries"] if entry.get("status") == "create_verified"
     )
     invalid = sum(
         1 for entry in manifest["entries"] if entry.get("status") == "staged_invalid"
@@ -1091,6 +1565,7 @@ def main() -> int:
             {
                 "manifest": str(manifest_path),
                 "staged_verified": staged,
+                "create_verified": created,
                 "unchanged_verified": unchanged,
                 "staged_invalid": invalid,
                 "blocked_multiple_notes": blocked_notes,

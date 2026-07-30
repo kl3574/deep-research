@@ -289,7 +289,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                         "target": {
                             "group_id": 1234567,
                             "library_id": 1234567,
-                            "library_name": "PRIVATE_ZOTERO_TARGET",
+                            "library_name": "Example Research Library",
                             "local_collection_id": "C1",
                             "collection_path": ["col"],
                             "collection_key": "COLL",
@@ -331,7 +331,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                         "target": {
                             "group_id": 1234567,
                             "library_id": 1234567,
-                            "library_name": "PRIVATE_ZOTERO_TARGET",
+                            "library_name": "Example Research Library",
                             "local_collection_id": "C1",
                             "collection_path": ["col"],
                             "collection_key": "COLL",
@@ -363,7 +363,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                         "target": {
                             "group_id": 1234567,
                             "library_id": 1234567,
-                            "library_name": "PRIVATE_ZOTERO_TARGET",
+                            "library_name": "Example Research Library",
                             "local_collection_id": "C1",
                             "collection_path": ["col"],
                             "collection_key": "COLL",
@@ -396,7 +396,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                         "target": {
                             "group_id": 1234567,
                             "library_id": 1234567,
-                            "library_name": "PRIVATE_ZOTERO_TARGET",
+                            "library_name": "Example Research Library",
                             "local_collection_id": "C1",
                             "collection_path": ["col"],
                             "collection_key": "COLL",
@@ -451,7 +451,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                         "target": {
                             "group_id": 1234567,
                             "library_id": 1234567,
-                            "library_name": "PRIVATE_ZOTERO_TARGET",
+                            "library_name": "Example Research Library",
                             "local_collection_id": "C1",
                             "collection_path": ["col"],
                             "collection_key": "COLL",
@@ -488,7 +488,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                         "target": {
                             "group_id": 1234567,
                             "library_id": 1234567,
-                            "library_name": "PRIVATE_ZOTERO_TARGET",
+                            "library_name": "Example Research Library",
                             "local_collection_id": "C1",
                             "collection_path": ["col"],
                             "collection_key": "COLL",
@@ -539,7 +539,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                         "target": {
                             "group_id": 1234567,
                             "library_id": 1234567,
-                            "library_name": "PRIVATE_ZOTERO_TARGET",
+                            "library_name": "Example Research Library",
                             "local_collection_id": "C1",
                             "collection_path": ["col"],
                             "collection_key": "COLL",
@@ -584,7 +584,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                         "target": {
                             "group_id": 1234567,
                             "library_id": 1234567,
-                            "library_name": "PRIVATE_ZOTERO_TARGET",
+                            "library_name": "Example Research Library",
                             "local_collection_id": "C1",
                             "collection_path": ["col"],
                             "collection_key": "COLL",
@@ -633,7 +633,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                         "target": {
                             "group_id": 1234567,
                             "library_id": 1234567,
-                            "library_name": "PRIVATE_ZOTERO_TARGET",
+                            "library_name": "Example Research Library",
                             "local_collection_id": "C1",
                             "collection_path": ["col"],
                             "collection_key": "COLL",
@@ -663,7 +663,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                         "target": {
                             "group_id": 1234567,
                             "library_id": 1234567,
-                            "library_name": "PRIVATE_ZOTERO_TARGET",
+                            "library_name": "Example Research Library",
                             "local_collection_id": "C1",
                             "collection_path": ["col"],
                             "collection_key": "COLL",
@@ -713,7 +713,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                         "target": {
                             "group_id": 1234567,
                             "library_id": 1234567,
-                            "library_name": "PRIVATE_ZOTERO_TARGET",
+                            "library_name": "Example Research Library",
                             "local_collection_id": "C1",
                             "collection_path": ["col"],
                             "collection_key": "COLL",
@@ -768,7 +768,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                         "target": {
                             "group_id": 1234567,
                             "library_id": 1234567,
-                            "library_name": "PRIVATE_ZOTERO_TARGET",
+                            "library_name": "Example Research Library",
                             "local_collection_id": "C1",
                             "collection_path": ["col"],
                             "collection_key": "COLL",
@@ -805,7 +805,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                         "target": {
                             "group_id": 1234567,
                             "library_id": 1234567,
-                            "library_name": "PRIVATE_ZOTERO_TARGET",
+                            "library_name": "Example Research Library",
                             "local_collection_id": "C1",
                             "collection_path": ["col"],
                             "collection_key": "COLL",
@@ -842,7 +842,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                         "target": {
                             "group_id": 1234567,
                             "library_id": 1234567,
-                            "library_name": "PRIVATE_ZOTERO_TARGET",
+                            "library_name": "Example Research Library",
                             "local_collection_id": "C1",
                             "collection_path": ["col"],
                             "collection_key": "COLL",
@@ -883,7 +883,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
         target = {
             "group_id": 1234567,
             "library_id": 2,
-            "library_name": "PRIVATE_ZOTERO_TARGET",
+            "library_name": "Example Research Library",
             "local_collection_id": "C27",
             "collection_path": ["foo", "target"],
             "collection_key": "COLL",
@@ -892,7 +892,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
 
         selected = {
             "libraryID": "2",
-            "libraryName": "PRIVATE_ZOTERO_TARGET",
+            "libraryName": "Example Research Library",
             "name": "target",
             "editable": True,
             "filesEditable": True,
@@ -909,7 +909,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
         target = {
             "group_id": 1234567,
             "library_id": 2,
-            "library_name": "PRIVATE_ZOTERO_TARGET",
+            "library_name": "Example Research Library",
             "local_collection_id": "27",
             "collection_key": "LEAFKEY1",
             "collection_name": "Leaf",
@@ -926,7 +926,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                         "library": {
                             "type": "group",
                             "id": 1234567,
-                            "name": "PRIVATE_ZOTERO_TARGET",
+                            "name": "Example Research Library",
                         },
                         "data": {
                             "key": "LEAFKEY1",
@@ -942,7 +942,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                         "library": {
                             "type": "group",
                             "id": 1234567,
-                            "name": "PRIVATE_ZOTERO_TARGET",
+                            "name": "Example Research Library",
                         },
                         "data": {
                             "key": "ROOTKEY1",
@@ -962,20 +962,20 @@ class UpdateExistingNoteTests(unittest.TestCase):
     def test_selected_target_reconstructs_exact_collection_path(self) -> None:
         payload = {
             "libraryID": 2,
-            "libraryName": "PRIVATE_ZOTERO_TARGET",
+            "libraryName": "Example Research Library",
             "id": 27,
-            "name": "PRIVATE_ZOTERO_TARGET",
+            "name": "示例研究主题",
             "editable": True,
             "filesEditable": True,
             "targets": [
                 {"id": "L1", "name": "我的文库", "level": 0},
                 {"id": "C1", "name": "无关集合", "level": 1},
-                {"id": "L2", "name": "PRIVATE_ZOTERO_TARGET", "level": 0},
-                {"id": "C9", "name": "PRIVATE_ZOTERO_TARGET", "level": 1},
-                {"id": "C20", "name": "PRIVATE_ZOTERO_TARGET", "level": 2},
+                {"id": "L2", "name": "Example Research Library", "level": 0},
+                {"id": "C9", "name": "示例研究域", "level": 1},
+                {"id": "C20", "name": "示例研究方向", "level": 2},
                 {
                     "id": "C27",
-                    "name": "PRIVATE_ZOTERO_TARGET",
+                    "name": "示例研究主题",
                     "level": 3,
                 },
             ],
@@ -989,7 +989,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
 
         self.assertEqual(
             selected["collectionPath"],
-            ["PRIVATE_ZOTERO_TARGET", "PRIVATE_ZOTERO_TARGET", "PRIVATE_ZOTERO_TARGET"],
+            ["示例研究域", "示例研究方向", "示例研究主题"],
         )
 
     def test_preflight_web_route_checks_key_then_every_entry(self) -> None:
@@ -1619,7 +1619,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
         manifest = {
             "group_id": 1234567,
             "library_id": 1234567,
-            "library_name": "PRIVATE_ZOTERO_TARGET",
+            "library_name": "Example Research Library",
             "local_collection_id": "C1",
             "collection_item_inventory": ["PARENT01"],
             "collection_path": ["集合"],
@@ -1647,7 +1647,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                 "selected_target",
                 return_value={
                     "libraryID": "1234567",
-                    "libraryName": "PRIVATE_ZOTERO_TARGET",
+                    "libraryName": "Example Research Library",
                     "name": "集合",
                     "id": "C1",
                     "collectionPath": ["集合"],
@@ -1698,7 +1698,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
         manifest = {
             "group_id": 1234567,
             "library_id": 2,
-            "library_name": "PRIVATE_ZOTERO_TARGET",
+            "library_name": "Example Research Library",
             "local_collection_id": "C1",
             "collection_path": ["集合"],
             "collection_key": "COLL",
@@ -1724,7 +1724,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                 "selected_target",
                 return_value={
                     "libraryID": "2",
-                    "libraryName": "PRIVATE_ZOTERO_TARGET",
+                    "libraryName": "Example Research Library",
                     "name": "集合",
                     "id": "C1",
                     "collectionPath": ["集合"],
@@ -1775,7 +1775,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
         manifest = {
             "group_id": 1234567,
             "library_id": 1234567,
-            "library_name": "PRIVATE_ZOTERO_TARGET",
+            "library_name": "Example Research Library",
             "local_collection_id": "C1",
             "collection_item_inventory": ["PARENT01", "PARENT02"],
             "collection_path": ["集合"],
@@ -1813,7 +1813,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                 "selected_target",
                 return_value={
                     "libraryID": "1234567",
-                    "libraryName": "PRIVATE_ZOTERO_TARGET",
+                    "libraryName": "Example Research Library",
                     "name": "集合",
                     "id": "C1",
                     "collectionPath": ["集合"],
@@ -1880,7 +1880,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
         manifest = {
             "group_id": 1234567,
             "library_id": 1234567,
-            "library_name": "PRIVATE_ZOTERO_TARGET",
+            "library_name": "Example Research Library",
             "local_collection_id": "C1",
             "collection_path": ["集合"],
             "collection_key": "COLL",
@@ -1909,7 +1909,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                 "selected_target",
                 return_value={
                     "libraryID": "1234567",
-                    "libraryName": "PRIVATE_ZOTERO_TARGET",
+                    "libraryName": "Example Research Library",
                     "name": "集合",
                     "id": "C1",
                     "collectionPath": ["集合"],
@@ -1969,7 +1969,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
         manifest = {
             "group_id": 1234567,
             "library_id": 1234567,
-            "library_name": "PRIVATE_ZOTERO_TARGET",
+            "library_name": "Example Research Library",
             "local_collection_id": "C1",
             "collection_path": ["集合"],
             "collection_key": "COLL",
@@ -2009,7 +2009,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                 "selected_target",
                 return_value={
                     "libraryID": "1234567",
-                    "libraryName": "PRIVATE_ZOTERO_TARGET",
+                    "libraryName": "Example Research Library",
                     "name": "集合",
                     "id": "C1",
                     "collectionPath": ["集合"],
@@ -2096,7 +2096,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
         manifest = {
             "group_id": 1234567,
             "library_id": 1234567,
-            "library_name": "PRIVATE_ZOTERO_TARGET",
+            "library_name": "Example Research Library",
             "local_collection_id": "C1",
             "collection_path": ["集合"],
             "collection_key": "COLL",
@@ -2155,7 +2155,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                 "selected_target",
                 return_value={
                     "libraryID": "1234567",
-                    "libraryName": "PRIVATE_ZOTERO_TARGET",
+                    "libraryName": "Example Research Library",
                     "name": "集合",
                     "id": "C1",
                     "collectionPath": ["集合"],
@@ -2238,7 +2238,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
         manifest = {
             "group_id": 1234567,
             "library_id": 1234567,
-            "library_name": "PRIVATE_ZOTERO_TARGET",
+            "library_name": "Example Research Library",
             "local_collection_id": "C1",
             "collection_item_inventory": ["PARENT01", "PARENT02"],
             "collection_path": ["集合"],
@@ -2278,7 +2278,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                 "selected_target",
                 return_value={
                     "libraryID": "1234567",
-                    "libraryName": "PRIVATE_ZOTERO_TARGET",
+                    "libraryName": "Example Research Library",
                     "name": "集合",
                     "id": "C1",
                     "collectionPath": ["集合"],
@@ -2357,7 +2357,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
         manifest = {
             "group_id": 1234567,
             "library_id": 1234567,
-            "library_name": "PRIVATE_ZOTERO_TARGET",
+            "library_name": "Example Research Library",
             "local_collection_id": "C1",
             "collection_path": ["集合"],
             "collection_key": "COLL",
@@ -2394,7 +2394,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                 "selected_target",
                 return_value={
                     "libraryID": "1234567",
-                    "libraryName": "PRIVATE_ZOTERO_TARGET",
+                    "libraryName": "Example Research Library",
                     "name": "集合",
                     "id": "C1",
                     "collectionPath": ["集合"],
@@ -2480,7 +2480,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
         manifest = {
             "group_id": 1234567,
             "library_id": 1234567,
-            "library_name": "PRIVATE_ZOTERO_TARGET",
+            "library_name": "Example Research Library",
             "local_collection_id": "C1",
             "collection_path": ["集合"],
             "collection_key": "COLL",
@@ -2507,7 +2507,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                 "selected_target",
                 return_value={
                     "libraryID": "1234567",
-                    "libraryName": "PRIVATE_ZOTERO_TARGET",
+                    "libraryName": "Example Research Library",
                     "name": "集合",
                     "id": "C1",
                     "collectionPath": ["集合"],
@@ -2562,7 +2562,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
         manifest = {
             "group_id": 1234567,
             "library_id": 1234567,
-            "library_name": "PRIVATE_ZOTERO_TARGET",
+            "library_name": "Example Research Library",
             "local_collection_id": "C1",
             "collection_path": ["集合"],
             "collection_key": "COLL",
@@ -2602,7 +2602,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                 "selected_target",
                 return_value={
                     "libraryID": "1234567",
-                    "libraryName": "PRIVATE_ZOTERO_TARGET",
+                    "libraryName": "Example Research Library",
                     "name": "集合",
                     "id": "C1",
                     "collectionPath": ["集合"],
@@ -2697,7 +2697,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
         manifest = {
             "group_id": 1234567,
             "library_id": 1234567,
-            "library_name": "PRIVATE_ZOTERO_TARGET",
+            "library_name": "Example Research Library",
             "local_collection_id": "C1",
             "collection_path": ["集合"],
             "collection_key": "COLL",
@@ -2735,7 +2735,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                 "selected_target",
                 return_value={
                     "libraryID": "1234567",
-                    "libraryName": "PRIVATE_ZOTERO_TARGET",
+                    "libraryName": "Example Research Library",
                     "name": "集合",
                     "id": "C1",
                     "collectionPath": ["集合"],
@@ -2844,7 +2844,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
         manifest = {
             "group_id": 1234567,
             "library_id": 1234567,
-            "library_name": "PRIVATE_ZOTERO_TARGET",
+            "library_name": "Example Research Library",
             "local_collection_id": "C1",
             "collection_path": ["集合"],
             "collection_key": "COLL",
@@ -2872,7 +2872,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                 "selected_target",
                 return_value={
                     "libraryID": "1234567",
-                    "libraryName": "PRIVATE_ZOTERO_TARGET",
+                    "libraryName": "Example Research Library",
                     "name": "集合",
                     "id": "C1",
                     "collectionPath": ["集合"],
@@ -2953,7 +2953,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
         manifest = {
             "group_id": 1234567,
             "library_id": 1234567,
-            "library_name": "PRIVATE_ZOTERO_TARGET",
+            "library_name": "Example Research Library",
             "local_collection_id": "C1",
             "collection_path": ["集合"],
             "collection_key": "COLL",
@@ -2990,7 +2990,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                 "selected_target",
                 return_value={
                     "libraryID": "1234567",
-                    "libraryName": "PRIVATE_ZOTERO_TARGET",
+                    "libraryName": "Example Research Library",
                     "name": "集合",
                     "id": "C1",
                     "collectionPath": ["集合"],
@@ -3078,7 +3078,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
         manifest = {
             "group_id": 1234567,
             "library_id": 1234567,
-            "library_name": "PRIVATE_ZOTERO_TARGET",
+            "library_name": "Example Research Library",
             "local_collection_id": "C1",
             "collection_path": ["集合"],
             "collection_key": "COLL",
@@ -3125,7 +3125,7 @@ class UpdateExistingNoteTests(unittest.TestCase):
                 "selected_target",
                 return_value={
                     "libraryID": "1234567",
-                    "libraryName": "PRIVATE_ZOTERO_TARGET",
+                    "libraryName": "Example Research Library",
                     "name": "集合",
                     "id": "C1",
                     "collectionPath": ["集合"],

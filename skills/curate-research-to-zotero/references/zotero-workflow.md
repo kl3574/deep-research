@@ -16,11 +16,12 @@ collection-creation or explicit-target capabilities. If a supported
 collection-create route is absent, ask the user to create/select the collection
 in the desktop UI, then repeat the readback gate.
 
-For existing-note updates, Zotero Desktop's official
+For existing-note updates and approved child-note creation under an existing
+parent, Zotero Desktop's official
 [**Tools → Developer → Run JavaScript** surface](https://www.zotero.org/support/dev/client_coding/javascript_api)
 is a no-key route when the user can paste and run the generated script in the
 app. Prefer it for an approved local batch because all notes can be rechecked
-and saved inside one Zotero database transaction:
+and updated or created inside one Zotero database transaction:
 
 1. stage and validate migration manifest v2, including `group_id`,
    `library_id`, `library_name`, `local_collection_id`, `collection_key`, and
@@ -28,14 +29,41 @@ and saved inside one Zotero database transaction:
    the keyed group collection hierarchy and the currently selected Desktop
    target, and refuses a mismatch. It paginates instead of accepting a
    100-item prefix and snapshots every live collection parent plus each
-   parent's child-note and attachment keys. A valid existing schema-9 note (or
-   a curated override equal after Zotero's storage trim) is
+   parent's complete child-item, child-note, and attachment keys. For an
+   approved parent-specific source file, pass an absolute-path JSON
+   `parent_key -> schema-9 HTML path` map with `--parent-note-map`. Zero live
+   child notes produces `create_verified`; exactly one uses the same source as
+   a curated override; more than one remains `blocked_multiple_notes`. A valid
+   existing schema-9 note (or a curated override equal after Zotero's storage
+   trim) is
    `unchanged_verified`; in the latter case, stage the exact live bytes so the
    unchanged file and old/new hashes remain identical. Only a genuinely
    changed, valid projection is `staged_verified`. Both statuses stay in the
    complete preflight inventory, but only `staged_verified` is a mutation
-   candidate;
-2. bind each staged note to one verified local PDF attachment, its parent,
+   candidate. After a successful creation, rerunning the same parent map sees
+   the single matching note and produces `unchanged_verified`, including
+   verified Zotero storage normalization: outer/source whitespace, implicit
+   table bodies, attribute-free `thead`/`tbody`/`tfoot` wrappers that contain
+   only ordered `tr` children, attribute-free single-paragraph table-cell
+   wrappers, and whitespace-only HTML-ASCII text nodes adjacent to an
+   attribute-free `br`. The comparison still preserves row and cell order,
+   `th` versus `td`, section attributes or non-row children, nonbreaking
+   spaces, attributed breaks, preserved-whitespace contexts, and every other
+   meaningful element and attribute;
+
+   ```json
+   {
+     "PARENT01": "/absolute/path/to/PARENT01.schema9.html"
+   }
+   ```
+
+   The map itself is passed as
+   `prepare_note_migration.py --parent-note-map /absolute/parent-note-map.json`;
+   every mapped HTML path must be absolute, readable, and independently valid
+   schema-9 HTML.
+
+2. before branching on child-note count, bind every parent to one verified
+   local PDF attachment, its parent,
    link mode, PDF magic bytes, and SHA-256. Multiple PDF children are
    ambiguous and block staging unless an approved JSON
    `parent_key -> attachment_key` map is supplied with
@@ -73,9 +101,16 @@ and saved inside one Zotero database transaction:
    preflight when `sync.autoSync` is false, and the dry-run report includes
    `syncState.autoSyncObserved`.
 
-7. apply only after the dry-run verifies every inventory note, parent, complete child
-   inventory, approved attachment/PDF, old backup, staged schema-9 HTML,
-   version, collection membership, and exact selected target. The renderer
+7. apply only after the dry-run verifies every inventory note or creation,
+   parent, complete child inventory, approved attachment/PDF, staged schema-9
+   HTML, version, collection membership, and exact selected target. Updates
+   additionally require the exact old backup; creations require the staged
+   parent version, a stable parent-bibliographic snapshot hash, and a still-empty
+   child-note inventory. The snapshot preserves `itemType`, every native
+   bibliographic field, and creator order, while excluding operational fields
+   already guarded elsewhere (`key`, `version`, timestamps, access date,
+   citation key, collection/tag/relation membership, and sync metadata). The
+   renderer
    reruns the schema validator and requires the uniquely labelled Chinese
    `全文SHA-256` field to equal the file hash. It also requires the attachment's
    current `getFilePathAsync()` result to equal the manifest PDF path; a
@@ -84,17 +119,25 @@ and saved inside one Zotero database transaction:
    collection and every parent's notes and attachments before the batch and
    again at transaction start, so a newly added second note blocks rather than
    bypasses ambiguity handling. It revalidates all previously verified
-   entries (`staged_verified` plus `unchanged_verified`) inside one transaction,
-   then passes only the manifest-bound `staged_verified` keys to
-   the save transaction; it never calls `save()` for
-   `unchanged_verified`. If every note is unchanged, apply returns
+   entries (`staged_verified`, `unchanged_verified`, and `create_verified`)
+   inside one transaction, then updates only the manifest-bound
+   `staged_verified` keys and creates only the verified zero-note parents with
+   `new Zotero.Item("note")`, `libraryID`, `parentKey`, `setNote()`, and
+   `save()`. It never calls `save()` for `unchanged_verified`. If every note is
+   unchanged, apply returns
    `no_changes` without acquiring the sync barrier or opening a write
-   transaction. The report keeps inventory and mutation counts/keys separate.
+   transaction. The report keeps update and creation counts separate and
+   records updated note keys, creation parent keys, and newly assigned note
+   keys.
    The transaction rolls
    back on an in-transaction failure, rechecks parent membership and target
    identity again at transaction start, and performs committed local-database
-   readback. That readback must reload the saved note and verify item type,
-   deletion state, parent, content, and a nondecreasing object version. It must
+   readback. That readback must reload each updated or created note and verify
+   its assigned key, item type, deletion state, parent, content, and collection
+   membership, then re-enumerate the post-create child inventories. Existing
+   notes require a nondecreasing object version and created notes require a
+   valid nonnegative local object version; a newly created unsynced note
+   normally remains at version `0`. Readback must
    not require the object version to advance inside the sync barrier: Zotero's
    [sync contract](https://www.zotero.org/support/dev/web_api/v3/syncing#local_object_versions)
    leaves the server object version unchanged for a local edit and advances it
@@ -128,9 +171,13 @@ whitespace, so the report records both
 the staged-source SHA-256 and the expected stored SHA-256 when they differ.
 Zotero may also normalize valid table markup and source whitespace. Accept a
 non-byte-exact readback only when a deterministic DOM projection preserves the
-schema root, ordered text chunks, headings, table rows/cells, LaTeX blocks,
-links, and images; record both hashes and the normalization. Never relax a
-content, parent, collection, item-type, deletion, or version check.
+schema root, ordered text chunks, headings, ordered table rows and cell tags,
+LaTeX blocks, links, images, and list content. Normalize only the verified
+attribute-free table-section, table-cell paragraph, and `br`-adjacent
+HTML-ASCII whitespace cases above; reject section attributes, non-row
+children, row/cell changes, nonbreaking spaces, attributed breaks, and
+preserved-whitespace changes. Record both hashes and the normalization. Never
+relax a content, parent, collection, item-type, deletion, or version check.
 
 Feature-probe HTTP/API updates instead of assuming that every Zotero release
 has the same local-API capabilities:

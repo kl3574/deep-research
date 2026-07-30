@@ -31,6 +31,7 @@ SUPPORTED_PDF_LINK_MODES = {
     "imported_url",
     "linked_file",
 }
+PARENT_DATA_SNAPSHOT_SCHEMA = "zotero-item-bibliographic-v1"
 
 
 def sha256_bytes(value: bytes) -> str:
@@ -103,6 +104,7 @@ def load_and_validate_manifest(
     allowed_statuses = {
         "staged_verified",
         "unchanged_verified",
+        "create_verified",
         "staged_invalid",
         "no_existing_note",
         "blocked_multiple_notes",
@@ -133,6 +135,7 @@ def load_and_validate_manifest(
         )
     for entry in entries:
         parent_key = entry.get("parent_key")
+        child_item_inventory = entry.get("child_item_inventory")
         child_note_inventory = entry.get("child_note_inventory")
         child_attachment_inventory = entry.get("child_attachment_inventory")
         for label, child_inventory in (
@@ -151,6 +154,24 @@ def load_and_validate_manifest(
             ):
                 raise ValueError(f"{parent_key}: {label} is invalid")
         status = entry.get("status")
+        if child_item_inventory is not None:
+            if (
+                not isinstance(child_item_inventory, list)
+                or any(
+                    not isinstance(key, str)
+                    or not ITEM_KEY_PATTERN.fullmatch(key)
+                    for key in child_item_inventory
+                )
+                or child_item_inventory != sorted(child_item_inventory)
+                or len(child_item_inventory) != len(set(child_item_inventory))
+            ):
+                raise ValueError(f"{parent_key}: child_item_inventory is invalid")
+            if child_item_inventory != sorted(
+                child_note_inventory + child_attachment_inventory
+            ):
+                raise ValueError(
+                    f"{parent_key}: child_item_inventory is inconsistent"
+                )
         if status == "no_existing_note" and child_note_inventory:
             raise ValueError(
                 f"{parent_key}: no_existing_note has a nonempty child note inventory"
@@ -174,6 +195,38 @@ def load_and_validate_manifest(
                 raise ValueError(
                     f"{parent_key}: blocked_multiple_pdfs inventory is inconsistent"
                 )
+        if status == "create_verified":
+            if child_note_inventory:
+                raise ValueError(
+                    f"{parent_key}: create_verified requires zero existing notes"
+                )
+            if child_item_inventory is None:
+                raise ValueError(
+                    f"{parent_key}: create_verified requires a complete child inventory"
+                )
+            if entry.get("expected_parent_key") != parent_key:
+                raise ValueError(
+                    f"{parent_key}: create expected_parent_key is inconsistent"
+                )
+            parent_version = entry.get("parent_version")
+            if type(parent_version) is not int or parent_version <= 0:
+                raise ValueError(
+                    f"{parent_key}: create parent_version is invalid"
+                )
+            if (
+                entry.get("parent_data_snapshot_schema")
+                != PARENT_DATA_SNAPSHOT_SCHEMA
+                or not isinstance(
+                    entry.get("parent_data_snapshot_sha256"),
+                    str,
+                )
+                or not SHA256_PATTERN.fullmatch(
+                    str(entry.get("parent_data_snapshot_sha256"))
+                )
+            ):
+                raise ValueError(
+                    f"{parent_key}: create parent data snapshot is invalid"
+                )
 
     staged = [
         entry
@@ -181,6 +234,7 @@ def load_and_validate_manifest(
         if isinstance(entry, dict) and entry.get("status") in {
             "staged_verified",
             "unchanged_verified",
+            "create_verified",
         }
     ]
     mutation = [
@@ -188,7 +242,13 @@ def load_and_validate_manifest(
     ]
     if not staged:
         raise ValueError("migration manifest has no staged entries")
-    note_keys = [entry.get("note_key") for entry in staged]
+    existing_staged = [
+        entry for entry in staged if entry.get("status") != "create_verified"
+    ]
+    create_staged = [
+        entry for entry in staged if entry.get("status") == "create_verified"
+    ]
+    note_keys = [entry.get("note_key") for entry in existing_staged]
     mutation_keys = [str(entry.get("note_key")) for entry in mutation]
     if any(
         not isinstance(key, str) or not ITEM_KEY_PATTERN.fullmatch(key)
@@ -204,8 +264,17 @@ def load_and_validate_manifest(
         raise ValueError("migration manifest contains duplicate note keys")
     if len(mutation_keys) != len(set(mutation_keys)):
         raise ValueError("migration manifest contains duplicate staged note keys")
+    create_parent_keys = [str(entry.get("parent_key")) for entry in create_staged]
+    if len(create_parent_keys) != len(set(create_parent_keys)):
+        raise ValueError("migration manifest contains duplicate create parents")
     for entry in staged:
-        note_key = str(entry["note_key"])
+        status = str(entry.get("status"))
+        is_create = status == "create_verified"
+        note_key = (
+            f"create:{entry.get('parent_key')}"
+            if is_create
+            else str(entry["note_key"])
+        )
         parent_key = entry.get("expected_parent_key")
         if not isinstance(parent_key, str) or not ITEM_KEY_PATTERN.fullmatch(parent_key):
             raise ValueError(f"{note_key}: expected_parent_key is invalid")
@@ -213,18 +282,22 @@ def load_and_validate_manifest(
             raise ValueError(
                 f"{note_key}: parent_key does not equal expected_parent_key"
             )
-        if entry.get("child_note_inventory") != [note_key]:
+        expected_note_inventory = [] if is_create else [note_key]
+        if entry.get("child_note_inventory") != expected_note_inventory:
             raise ValueError(
-                f"{note_key}: staged child note inventory must contain only note_key"
+                f"{note_key}: staged child note inventory is inconsistent"
             )
-        note_version = entry.get("note_version")
-        if type(note_version) is not int or note_version <= 0:
-            raise ValueError(f"{note_key}: note_version is invalid")
-        for field in ("old_path", "new_path"):
+        if not is_create:
+            note_version = entry.get("note_version")
+            if type(note_version) is not int or note_version <= 0:
+                raise ValueError(f"{note_key}: note_version is invalid")
+        path_fields = ("new_path",) if is_create else ("old_path", "new_path")
+        for field in path_fields:
             value = entry.get(field)
             if not isinstance(value, str) or not Path(value).expanduser().is_absolute():
                 raise ValueError(f"{note_key}: {field} must be an absolute path")
-        for field in ("old_sha256", "new_sha256"):
+        hash_fields = ("new_sha256",) if is_create else ("old_sha256", "new_sha256")
+        for field in hash_fields:
             value = entry.get(field)
             if not isinstance(value, str) or not SHA256_PATTERN.fullmatch(value):
                 raise ValueError(f"{note_key}: {field} is invalid")
@@ -251,22 +324,24 @@ def load_and_validate_manifest(
         summary = entry.get("validation_summary")
         if not isinstance(summary, dict) or str(summary.get("schema_version")) != "9":
             raise ValueError(f"{note_key}: validation_summary is not schema version 9")
-        old_path = Path(str(entry["old_path"])).expanduser().resolve()
         new_path = Path(str(entry["new_path"])).expanduser().resolve()
         pdf_path = Path(pdf_path_value).expanduser().resolve()
         try:
-            old_bytes = old_path.read_bytes()
             new_bytes = new_path.read_bytes()
-            old_bytes.decode("utf-8")
             new_html = new_bytes.decode("utf-8")
             pdf_bytes = pdf_path.read_bytes()
+            if is_create:
+                old_bytes = None
+            else:
+                old_path = Path(str(entry["old_path"])).expanduser().resolve()
+                old_bytes = old_path.read_bytes()
+                old_bytes.decode("utf-8")
         except (OSError, UnicodeError) as exc:
             raise ValueError(f"{note_key}: staged input cannot be read: {exc}") from exc
-        if sha256_bytes(old_bytes) != entry["old_sha256"]:
+        if old_bytes is not None and sha256_bytes(old_bytes) != entry["old_sha256"]:
             raise ValueError(f"{note_key}: old_path hash does not match manifest")
         if sha256_bytes(new_bytes) != entry["new_sha256"]:
             raise ValueError(f"{note_key}: new_path hash does not match manifest")
-        status = str(entry.get("status"))
         if status == "staged_verified":
             storage_sha256 = sha256_bytes(
                 normalize_staged_html_for_storage(new_html).encode("utf-8")
@@ -323,6 +398,7 @@ def protected_manifest_paths(
             or entry.get("status") not in {
                 "staged_verified",
                 "unchanged_verified",
+                "create_verified",
             }
         ):
             continue
@@ -348,6 +424,12 @@ def render_runner(
     raw, payload, inventory_count, mutation_count, mutation_keys = (
         load_and_validate_manifest(manifest_path)
     )
+    create_entries = [
+        entry
+        for entry in payload["entries"]
+        if isinstance(entry, dict) and entry.get("status") == "create_verified"
+    ]
+    create_parent_keys = sorted(str(entry["parent_key"]) for entry in create_entries)
     mode = "apply" if apply else "dry_run"
     if report_path is None:
         report_path = manifest_path.parent / f"zotero_desktop_{mode}_report.json"
@@ -381,6 +463,8 @@ def render_runner(
         "expectedInventoryNoteCount": inventory_count,
         "expectedMutationCount": mutation_count,
         "expectedMutationKeys": mutation_keys,
+        "expectedCreateCount": len(create_entries),
+        "expectedCreateParentKeys": create_parent_keys,
         "manifestPath": str(manifest_path),
         "manifestSHA256": sha256_bytes(raw),
         "requireAutoSyncEnabled": require_auto_sync_enabled,

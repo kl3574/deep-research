@@ -105,10 +105,10 @@ def make_bundle(
     note_path: Path,
     *,
     group_id: int = 123456,
-    library_name: str = "PRIVATE_ZOTERO_TARGET",
+    library_name: str = "Example Research Library",
     library_id: int = 2,
     collection_key: str = "TESTCOL1",
-    collection_path: str = "PRIVATE_ZOTERO_TARGET/PRIVATE_ZOTERO_TARGET/PRIVATE_ZOTERO_TARGET",
+    collection_path: str = "示例研究域/示例研究方向/示例研究主题",
     doi: str = "10.1234/undefined",
 ) -> None:
     payload = {
@@ -337,11 +337,11 @@ class AuditSparseDynamicsRunTests(unittest.TestCase):
         entries: list[dict[str, object]] = []
         readback_keys: list[tuple[str, str, str, str]] = []
         default_target = {
-            "library_name": "PRIVATE_ZOTERO_TARGET",
+            "library_name": "Example Research Library",
             "library_id": 2,
             "group_id": group_id,
             "collection_key": "TESTCOL1",
-            "collection_path": "PRIVATE_ZOTERO_TARGET/PRIVATE_ZOTERO_TARGET/PRIVATE_ZOTERO_TARGET",
+            "collection_path": "示例研究域/示例研究方向/示例研究主题",
         }
 
         for idx in range(1, count + 1):
@@ -1028,11 +1028,11 @@ class AuditSparseDynamicsRunTests(unittest.TestCase):
                 root,
                 ids[0],
                 target={
-                    "library_name": "PRIVATE_ZOTERO_TARGET",
+                    "library_name": "Example Research Library",
                     "library_id": 2,
                     "group_id": 123456,
                     "collection_key": "TESTCOL1",
-                    "collection_path": "PRIVATE_ZOTERO_TARGET/PRIVATE_ZOTERO_TARGET/PRIVATE_ZOTERO_TARGET",
+                    "collection_path": "示例研究域/示例研究方向/示例研究主题",
                     "name": "sparse_dynamics",
                 },
             )
@@ -1082,11 +1082,11 @@ class AuditSparseDynamicsRunTests(unittest.TestCase):
                 root,
                 ids[0],
                 target={
-                    "library_name": "PRIVATE_ZOTERO_TARGET",
+                    "library_name": "Example Research Library",
                     "library_id": 2,
                     "group_id": 999999,
                     "collection_key": "BADKEY",
-                    "collection_path": "PRIVATE_ZOTERO_TARGET/PRIVATE_ZOTERO_TARGET/PRIVATE_ZOTERO_TARGET",
+                    "collection_path": "示例研究域/示例研究方向/示例研究主题",
                 },
             )
             code, report = self._run_audit(
@@ -1165,11 +1165,11 @@ class AuditSparseDynamicsRunTests(unittest.TestCase):
                         "source_id": "stale",
                         "id": "stale",
                         "target": {
-                            "library_name": "PRIVATE_ZOTERO_TARGET",
+                            "library_name": "Example Research Library",
                             "library_id": 2,
                             "group_id": 123456,
                             "collection_key": "TESTCOL1",
-                            "collection_path": "PRIVATE_ZOTERO_TARGET/PRIVATE_ZOTERO_TARGET/PRIVATE_ZOTERO_TARGET",
+                            "collection_path": "示例研究域/示例研究方向/示例研究主题",
                         },
                     },
                     ensure_ascii=False,
@@ -1723,11 +1723,11 @@ class AuditSparseDynamicsRunTests(unittest.TestCase):
                     "source_id": source_id,
                     "title": source_id,
                     "target": {
-                        "library_name": "PRIVATE_ZOTERO_TARGET",
+                        "library_name": "Example Research Library",
                         "library_id": 2,
                         "group_id": 123456,
                         "collection_key": "TESTCOL1",
-                        "collection_path": "PRIVATE_ZOTERO_TARGET/PRIVATE_ZOTERO_TARGET/PRIVATE_ZOTERO_TARGET",
+                        "collection_path": "示例研究域/示例研究方向/示例研究主题",
                     },
                     "doi": f"10.1234/{source_id}",
                     "source": {"doi": f"10.1234/{source_id}", "title": source_id},

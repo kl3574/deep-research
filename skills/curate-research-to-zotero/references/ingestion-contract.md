@@ -60,7 +60,7 @@ Do not commit downloaded research documents unless their redistribution license 
         "decision": "add",
         "reason": "no_existing_match",
         "target": {
-          "library_name": "PRIVATE_ZOTERO_TARGET",
+          "library_name": "Example Research Library",
           "library_id": 2,
           "collection_path": "Agent文献学习与深度调研",
           "collection_key": "<confirmed-key>"

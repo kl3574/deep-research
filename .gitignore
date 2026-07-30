@@ -5,6 +5,18 @@ __pycache__/
 
 # Research corpora and Zotero exports stay outside the public skill repository.
 *.pdf
+*.bib
+*.bibtex
+*.ris
+*.enw
+*.html
 zotero-note-migration-*/
+zotero-all-notes-*/
+migration_manifest*.json
+zotero_desktop_*_report.json
+zotero_desktop_v*_preflight.js
+zotero_desktop_v*_apply.js
+parent-note-map*.json
+pdf-attachment-map*.json
 corpus/
 downloads/
