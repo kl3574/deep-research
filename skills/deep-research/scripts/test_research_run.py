@@ -389,6 +389,24 @@ class ResearchRunTests(unittest.TestCase):
         self.assertEqual(code, 0, error)
         return json.loads(output)
 
+    def suggest_next(
+        self,
+        run_id: str | None = None,
+        *,
+        network_path: Path | None = None,
+        max_suggestions: int | None = None,
+    ) -> tuple[int, dict[str, object], str]:
+        arguments = ["suggest-next"]
+        if network_path is not None:
+            arguments.extend(["--network-path", str(network_path)])
+        if max_suggestions is not None:
+            arguments.extend(["--max-suggestions", str(max_suggestions)])
+        code, output, error = invoke(self.root, run_id or self.run_id, arguments)
+        payload: dict[str, object] = {}
+        if output:
+            payload = json.loads(output)
+        return code, payload, error
+
     def prepare_complete_run(
         self, *, run_id: str | None = None, max_rounds: int | None = None
     ) -> None:
@@ -1376,6 +1394,78 @@ class ResearchRunTests(unittest.TestCase):
         ]
         self.assertEqual(invoke(self.root, run_id, arguments)[0], 1)
         self.assertFalse((self.root / "runs" / run_id).exists())
+
+    def test_suggest_next_generates_run_based_next_actions(self) -> None:
+        self.init_run(coverage_gap_ids=["gap-a", "gap-b"])
+        self.assertEqual(self.record_gap("gap-a", run_id=self.run_id), 0)
+        self.assertEqual(self.record_gap("gap-b", run_id=self.run_id), 0)
+        code, payload, error = self.suggest_next()
+        self.assertEqual(code, 0, error)
+        suggestions = payload["next_actions"]
+        self.assertIsInstance(suggestions, list)
+        self.assertGreaterEqual(len(suggestions), 2)
+        self.assertEqual(suggestions[0]["gap_id"], "gap-a")
+        self.assertEqual(suggestions[0]["source"], "run")
+        self.assertEqual(suggestions[0]["action_type"], "inspect")
+        self.assertEqual(suggestions[1]["gap_id"], "gap-b")
+        self.assertEqual(suggestions[1]["source"], "run")
+        self.assertEqual(suggestions[1]["action_type"], "inspect")
+
+    def test_suggest_next_uses_network_gaps_with_priority_and_cap(self) -> None:
+        self.init_run()
+        self.assertEqual(self.record_gap("gap-primary"), 0)
+        self.assertEqual(
+            self.set_gap_status(
+                "gap-primary",
+                "deferred",
+                next_action="Delay for follow-up network-guided route",
+            ),
+            0,
+        )
+        network_payload = {
+            "gaps": [
+                {
+                    "gap_id": "net-medium",
+                    "gap_type": "implicit_candidate",
+                    "impact": "medium",
+                    "description": "Medium-priority network gap",
+                    "derivation_rule": "derived-gap",
+                },
+                {
+                    "gap_id": "net-high",
+                    "gap_type": "implicit_candidate",
+                    "impact": "high",
+                    "description": "High-priority network gap",
+                    "derivation_rule": "derived-gap",
+                },
+                {
+                    "gap_id": "net-low",
+                    "gap_type": "implicit_candidate",
+                    "impact": "low",
+                    "description": "Low-priority network gap",
+                    "derivation_rule": "derived-gap",
+                },
+            ]
+        }
+        network_file = self.root / "network_payload.json"
+        network_file.write_text(json.dumps(network_payload), encoding="utf-8")
+        code, payload, error = self.suggest_next(
+            network_path=network_file,
+            max_suggestions=2,
+        )
+        self.assertEqual(code, 0, error)
+        suggestions = payload["next_actions"]
+        self.assertEqual([row["gap_id"] for row in suggestions], ["net-high", "net-medium"])
+        self.assertEqual([row["source"] for row in suggestions], ["knowledge_network"] * 2)
+        self.assertEqual([row["action_type"] for row in suggestions], ["discover", "discover"])
+
+    def test_suggest_next_rejects_missing_network_payload(self) -> None:
+        self.init_run()
+        code, _, error = self.suggest_next(
+            network_path=self.root / "missing-network.json"
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("network payload not found", error)
 
 
 if __name__ == "__main__":

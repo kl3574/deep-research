@@ -46,6 +46,11 @@ DECISION_IMPACTS = {"high", "medium", "low"}
 ROUND_STATUSES = {"completed", "partial", "failed", "interrupted"}
 GAP_STATUSES = {"open", "resolved", "unresolved", "blocked", "deferred"}
 TERMINAL_GAP_STATUSES = {"resolved", "unresolved"}
+NETWORK_SUGGESTION_DEFAULTS = {
+    "action_type": "discover",
+    "priority": 3,
+    "expected_information_gain": "missing evidence pattern for the gap",
+}
 ACTION_TYPES = {
     "discover",
     "inspect",
@@ -764,6 +769,151 @@ def _summary(
         ),
         "outcome": _derive_outcome(records),
     }
+
+
+def _normalize_network_gap_record(row: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(row, dict):
+        return None
+    gap_id = row.get("gap_id")
+    if not isinstance(gap_id, str) or not gap_id.strip():
+        return None
+    impact = row.get("impact") or "medium"
+    if impact not in DECISION_IMPACTS:
+        impact = "medium"
+    if row.get("status", "open") != "open":
+        return None
+    return {
+        "gap_id": gap_id.strip(),
+        "gap_type": row.get("gap_type") or "implicit_candidate",
+        "impact": impact,
+        "description": row.get("description") or "Derived from network gap derivation.",
+        "derivation_rule": row.get("derivation_rule") or "derived_from_network",
+        "source": row.get("source") or row.get("derivation_source") or "knowledge_network",
+        "claim_id": row.get("claim_id"),
+    }
+
+
+def _network_gaps_from_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    raw_gaps = payload.get("gaps")
+    if isinstance(raw_gaps, list):
+        for row in raw_gaps:
+            normalized = _normalize_network_gap_record(row)
+            if normalized is not None:
+                candidates.append(normalized)
+    if not candidates:
+        for gap_id in payload.get("open_gaps", []):
+            if isinstance(gap_id, str) and gap_id.strip():
+                candidates.append(
+                    {
+                        "gap_id": gap_id.strip(),
+                        "gap_type": "implicit_candidate",
+                        "impact": "medium",
+                        "description": f"Open gap {gap_id.strip()} derived from network state.",
+                        "derivation_rule": "open_gap",
+                        "source": "knowledge_network",
+                    }
+                )
+    derived = payload.get("derived")
+    if isinstance(derived, dict):
+        for gap_id in derived.get("open_gaps", []):
+            if isinstance(gap_id, str) and gap_id.strip():
+                normalized = _normalize_network_gap_record(
+                    {
+                        "gap_id": gap_id.strip(),
+                        "impact": "medium",
+                        "status": "open",
+                        "description": f"Network-derived open gap {gap_id.strip()}.",
+                        "derivation_rule": "derived_open_gap",
+                    }
+                )
+                if normalized is not None:
+                    candidates.append(normalized)
+    return candidates
+
+
+def _network_suggested_action_type(gap: dict[str, Any]) -> str:
+    rule = str(gap.get("derivation_rule") or "")
+    if "conflict" in rule:
+        return "countercheck"
+    if gap.get("gap_type") == "implicit_candidate":
+        return "discover"
+    if "missing" in rule:
+        return "discover"
+    if "single" in rule or gap.get("gap_type") == "deterministic_structural":
+        return "inspect"
+    return NETWORK_SUGGESTION_DEFAULTS["action_type"]
+
+
+def _network_priority(impact: str) -> int:
+    return {"high": 1, "medium": 2, "low": 3}.get(impact, 3)
+
+
+def _run_gap_suggested_action(gap: dict[str, Any]) -> str:
+    if gap.get("counterevidence_required"):
+        return "countercheck"
+    if gap.get("coverage_role") == "promised":
+        return "inspect"
+    if gap.get("decision_impact") in {"high"}:
+        return "discover"
+    return NETWORK_SUGGESTION_DEFAULTS["action_type"]
+
+
+def _build_next_actions_from_run(gaps: dict[str, dict[str, Any]]) -> list[dict[str, str]]:
+    suggestions: list[dict[str, str]] = []
+    for index, gap_id in enumerate(sorted(gaps), start=1):
+        gap = gaps[gap_id]
+        if gap.get("status") != "open":
+            continue
+        action = _run_gap_suggested_action(gap)
+        suggestions.append(
+            {
+                "suggestion_id": f"suggest:{index}:{gap_id}",
+                "source": "run",
+                "gap_id": gap_id,
+                "action_type": action,
+                "impact": gap.get("decision_impact", "medium"),
+                "description": gap.get("description", ""),
+                "expected_information_gain": f"Close {gap_id} to satisfy its acceptance criteria.",
+            }
+        )
+    return suggestions
+
+
+def _build_next_actions_from_network(
+    payload: dict[str, Any], known_run_gaps: set[str]
+) -> list[dict[str, str]]:
+    suggestions: list[dict[str, str]] = []
+    index = 1
+    for gap in sorted(
+        _network_gaps_from_payload(payload),
+        key=lambda candidate: (
+            _network_priority(candidate.get("impact", "medium")),
+            candidate.get("gap_id"),
+        ),
+    ):
+        gap_id = gap.get("gap_id")
+        if gap_id is None or gap_id in known_run_gaps:
+            continue
+        action_type = _network_suggested_action_type(gap)
+        description = gap.get("description") or ""
+        suggestions.append(
+            {
+                "suggestion_id": f"network:{index}:{gap_id}",
+                "source": "knowledge_network",
+                "gap_id": gap_id,
+                "action_type": action_type,
+                "impact": str(gap.get("impact") or "medium"),
+                "description": str(description),
+                "expected_information_gain": (
+                    "Collect decisive evidence or a discriminating countercheck."
+                    if action_type == "countercheck"
+                    else f"Address network-derived {gap.get('gap_type')} for {gap_id}."
+                ),
+            }
+        )
+        index += 1
+    return suggestions
 
 
 def _validate_envelopes(
@@ -2335,6 +2485,49 @@ def command_status(args: argparse.Namespace) -> int:
     return code
 
 
+def command_suggest_next(args: argparse.Namespace) -> int:
+    paths = _paths(args)
+    state, records = _read_bundle(paths)
+    validation_errors = _validate_bundle(paths, state, records)
+    if validation_errors:
+        _print_errors(validation_errors)
+        return 1
+
+    gap_state = _gap_state(records)
+    suggestions = _build_next_actions_from_run(gap_state)
+    if args.network_path:
+        network_path = Path(args.network_path)
+        if not network_path.is_file():
+            print(f"network payload not found: {network_path}", file=sys.stderr)
+            return 1
+        try:
+            network_payload = _read_json(network_path)
+        except (OSError, ValueError) as exc:
+            print(f"{exc.__class__.__name__}: {exc}", file=sys.stderr)
+            return 1
+        suggestions.extend(_build_next_actions_from_network(network_payload, set(gap_state)))
+
+    if isinstance(args.max_suggestions, int):
+        suggestions = suggestions[: args.max_suggestions]
+
+    summary = _summary(state, records, validation_errors)
+    print(
+        json.dumps(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "run_id": paths.run_id,
+                "summary": summary,
+                "validation_errors": validation_errors,
+                "next_actions": suggestions,
+            },
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def command_validate(args: argparse.Namespace) -> int:
     payload, code = _status_payload(_paths(args))
     if code:
@@ -2530,6 +2723,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     status = commands.add_parser("status")
     status.set_defaults(func=command_status)
+    suggest_next = commands.add_parser("suggest-next")
+    suggest_next.add_argument("--network-path")
+    suggest_next.add_argument("--max-suggestions", type=_positive_int)
+    suggest_next.set_defaults(func=command_suggest_next)
     validate = commands.add_parser("validate")
     validate.set_defaults(func=command_validate)
     return parser
@@ -2545,7 +2742,7 @@ def main(argv: list[str] | None = None) -> int:
     except SystemExit as exc:
         return int(exc.code) if isinstance(exc.code, int) else 2
     try:
-        read_only = args.command in {"status", "validate"}
+        read_only = args.command in {"status", "suggest-next", "validate"}
         with _run_lock(_paths(args), exclusive=not read_only):
             return args.func(args)
     except (

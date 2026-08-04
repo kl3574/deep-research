@@ -213,11 +213,16 @@ resolve-conflict
 record-error
 resolve-error
 set-coverage
+suggest-next
 status
 validate
 resume
 finalize
 ```
+
+`suggest-next` can be used in the same run context to produce the next action
+queue. Pass optional `--network-path` to inject a knowledge-network payload and
+`--max-suggestions` to cap output length.
 
 Use `--help` on a subcommand for its complete required fields. `resume` converts an
 interrupted run back to `running` and appends a lifecycle event; on an already
