@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import re
+import stat
 import sys
 import tempfile
 from contextlib import contextmanager
@@ -20,11 +22,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from validate_research_handoff import validate_knowledge_network
+
 SCHEMA_VERSION = "1"
 RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{2,62}")
 ENTITY_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{1,62}")
 TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 PROTOCOL_REF_RE = re.compile(r"sha256:[0-9a-f]{64}")
+SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
 LEDGER_NAMES = (
     "events",
@@ -46,11 +51,28 @@ DECISION_IMPACTS = {"high", "medium", "low"}
 ROUND_STATUSES = {"completed", "partial", "failed", "interrupted"}
 GAP_STATUSES = {"open", "resolved", "unresolved", "blocked", "deferred"}
 TERMINAL_GAP_STATUSES = {"resolved", "unresolved"}
+NETWORK_SUGGESTION_DEFAULTS = {
+    "action_type": "discover",
+    "priority": 3,
+    "expected_information_gain": "missing evidence pattern for the gap",
+}
+NETWORK_GAP_TYPES = {"explicit", "deterministic_structural", "implicit_candidate"}
+NETWORK_PRIORITIES = {"decision_critical", "high", "medium", "low"}
+ACTION_URGENCY = {
+    "reopen_gap": 0,
+    "countercheck": 1,
+    "corroborate": 2,
+    "search_test": 3,
+    "discover": 4,
+    "inspect": 5,
+}
 ACTION_TYPES = {
     "discover",
     "inspect",
     "extract",
     "countercheck",
+    "corroborate",
+    "search_test",
     "merge",
     "citation_audit",
     "other",
@@ -60,6 +82,8 @@ ACTION_ARTIFACT_PREFIXES = {
     "inspect": ("source:", "round:"),
     "extract": ("claim:", "source:"),
     "countercheck": ("round:", "claim:", "conflict:"),
+    "corroborate": ("round:", "source:", "claim:"),
+    "search_test": ("round:", "source:"),
     "merge": ("claim:", "conflict:"),
     "citation_audit": ("claim:", "source:", "conflict:"),
     "other": ("round:", "source:", "claim:", "conflict:", "error:"),
@@ -162,6 +186,12 @@ def _positive_int(value: str) -> int:
     if number <= 0:
         raise argparse.ArgumentTypeError("must be a positive integer")
     return number
+
+
+def _sha256_hex(value: str) -> str:
+    if not SHA256_RE.fullmatch(value):
+        raise argparse.ArgumentTypeError("must be 64 lowercase hexadecimal characters")
+    return value
 
 
 @dataclass(frozen=True)
@@ -516,6 +546,7 @@ def _gap_state(records: dict[str, list[dict[str, Any]]]) -> dict[str, dict[str, 
                 "dependencies": row.get("dependencies", []),
                 "priority": row.get("priority"),
                 "status": "open",
+                "open_instance_id": row.get("record_id"),
                 "rationale": None,
                 "artifact_refs": [],
                 "next_action": None,
@@ -529,6 +560,8 @@ def _gap_state(records: dict[str, list[dict[str, Any]]]) -> dict[str, dict[str, 
                     "next_action": row.get("next_action"),
                 }
             )
+            if row.get("status") == "open":
+                states[gap_id]["open_instance_id"] = row.get("record_id")
     return states
 
 
@@ -764,6 +797,331 @@ def _summary(
         ),
         "outcome": _derive_outcome(records),
     }
+
+
+def _read_regular_file_bytes(
+    path: Path,
+) -> tuple[bytes, tuple[int, int, int, int, int]]:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError(f"knowledge network must be a regular file: {path}")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    finally:
+        os.close(descriptor)
+    identity = (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+    return b"".join(chunks), identity
+
+
+def _network_policy_errors(payload: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    for index, gap in enumerate(payload.get("gaps", [])):
+        if not isinstance(gap, dict):
+            continue
+        label = f"knowledge_network.gaps[{index}]"
+        priority = gap.get("priority")
+        valid_priority = (
+            isinstance(priority, str) and priority in NETWORK_PRIORITIES
+        ) or (
+            isinstance(priority, int)
+            and not isinstance(priority, bool)
+            and priority > 0
+        )
+        if not valid_priority:
+            errors.append(
+                f"{label}.priority must be decision_critical, high, medium, low, "
+                "or a positive integer"
+            )
+        gap_type = gap.get("gap_type")
+        if gap_type is not None and gap_type not in NETWORK_GAP_TYPES:
+            errors.append(f"{label}.gap_type is invalid")
+        impact = gap.get("impact")
+        if impact is not None and impact not in DECISION_IMPACTS:
+            errors.append(f"{label}.impact is invalid")
+        if gap.get("novelty_claimed") not in {None, False}:
+            errors.append(f"{label}.novelty_claimed must be false when present")
+        if gap_type == "implicit_candidate":
+            for field in ("grounds", "warrant", "backing", "qualifier"):
+                if not isinstance(gap.get(field), str) or not gap[field].strip():
+                    errors.append(
+                        f"{label}.{field} is required for an implicit candidate"
+                    )
+            defeaters = gap.get("defeaters")
+            if not isinstance(defeaters, list) or not all(
+                isinstance(item, str) and item.strip() for item in defeaters
+            ):
+                errors.append(
+                    f"{label}.defeaters must be a list of non-empty strings"
+                )
+            if (
+                not isinstance(gap.get("search_test"), str)
+                or not gap["search_test"].strip()
+            ):
+                errors.append(
+                    f"{label}.search_test is required for an implicit candidate"
+                )
+    return errors
+
+
+def _load_knowledge_network(
+    path: Path, expected_sha256: str
+) -> tuple[dict[str, Any], dict[str, str]]:
+    if not path.is_absolute():
+        raise ValueError("network path must be absolute")
+    if path.is_symlink():
+        raise ValueError(f"knowledge network must not be a symlink: {path}")
+    if not path.exists():
+        raise ValueError(f"network payload not found: {path}")
+
+    first_bytes, first_identity = _read_regular_file_bytes(path)
+    actual_sha256 = hashlib.sha256(first_bytes).hexdigest()
+    if actual_sha256 != expected_sha256:
+        raise ValueError(
+            "knowledge network SHA-256 mismatch: "
+            f"expected {expected_sha256}, got {actual_sha256}"
+        )
+    try:
+        payload = json.loads(first_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid knowledge network JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("knowledge network root must be an object")
+
+    validation_errors = validate_knowledge_network(payload)
+    validation_errors.extend(_network_policy_errors(payload))
+    if validation_errors:
+        raise ValueError(
+            "invalid KnowledgeNetwork/v1: " + "; ".join(validation_errors)
+        )
+
+    second_bytes, second_identity = _read_regular_file_bytes(path)
+    if (
+        second_identity != first_identity
+        or hashlib.sha256(second_bytes).hexdigest() != actual_sha256
+    ):
+        raise ValueError("knowledge network changed while being read")
+    return payload, {
+        "schema": payload["schema"],
+        "network_id": payload["network_id"],
+        "snapshot_id": payload["snapshot_id"],
+        "sha256": actual_sha256,
+    }
+
+
+def _network_gap_has_single_source(
+    payload: dict[str, Any], gap: dict[str, Any]
+) -> bool:
+    objects: dict[str, dict[str, Any]] = {}
+    for node in payload.get("nodes", []):
+        if isinstance(node, dict) and isinstance(node.get("node_id"), str):
+            objects[node["node_id"]] = node
+    for relation in payload.get("relations", []):
+        if isinstance(relation, dict) and isinstance(relation.get("relation_id"), str):
+            objects[relation["relation_id"]] = relation
+    source_ids: set[str] = set()
+    for object_id in gap.get("derived_from", []):
+        obj = objects.get(object_id, {})
+        for provenance in obj.get("provenance", []):
+            source_id = provenance.get("source_id")
+            if isinstance(source_id, str):
+                source_ids.add(source_id)
+    return len(source_ids) == 1
+
+
+def _network_suggested_action_type(
+    payload: dict[str, Any], gap: dict[str, Any]
+) -> str:
+    if gap.get("gap_type") == "implicit_candidate":
+        return "search_test"
+    if gap.get("reason") == "conflict":
+        return "countercheck"
+    if gap.get("reason") == "missing":
+        return "discover"
+    if _network_gap_has_single_source(payload, gap):
+        return "corroborate"
+    return "inspect"
+
+
+def _decision_critical_rank(value: Any) -> int:
+    return 0 if value == "decision_critical" else 1
+
+
+def _numeric_priority_rank(value: Any) -> int:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return NETWORK_SUGGESTION_DEFAULTS["priority"]
+
+
+def _impact_rank(value: Any) -> int:
+    return {"high": 0, "medium": 1, "low": 2}.get(value, 3)
+
+
+def _network_impact(gap: dict[str, Any]) -> str:
+    impact = gap.get("impact")
+    if isinstance(impact, str):
+        return impact
+    if gap.get("priority") in {"decision_critical", "high"}:
+        return "high"
+    if gap.get("priority") == "low":
+        return "low"
+    return "medium"
+
+
+def _run_gap_suggested_action(gap: dict[str, Any]) -> str:
+    if gap.get("counterevidence_required"):
+        return "countercheck"
+    return NETWORK_SUGGESTION_DEFAULTS["action_type"]
+
+
+def _build_next_actions_from_run(
+    gaps: dict[str, dict[str, Any]], ready_gap_ids: set[str]
+) -> list[dict[str, Any]]:
+    suggestions: list[dict[str, Any]] = []
+    for gap_id in sorted(ready_gap_ids):
+        gap = gaps[gap_id]
+        if gap.get("status") != "open":
+            continue
+        action = _run_gap_suggested_action(gap)
+        suggestions.append(
+            {
+                "source": "run",
+                "gap_id": gap_id,
+                "open_instance_id": gap.get("open_instance_id"),
+                "action_type": action,
+                "priority": gap.get("priority") or NETWORK_SUGGESTION_DEFAULTS["priority"],
+                "impact": gap.get("decision_impact", "medium"),
+                "description": gap.get("description", ""),
+                "next_action": gap.get("next_action"),
+                "expected_information_gain": f"Close {gap_id} to satisfy its acceptance criteria.",
+            }
+        )
+    return suggestions
+
+
+def _build_next_actions_from_network(
+    payload: dict[str, Any],
+    run_gaps: dict[str, dict[str, Any]],
+    ready_gap_ids: set[str],
+) -> list[dict[str, Any]]:
+    suggestions: list[dict[str, Any]] = []
+    for gap in sorted(payload["gaps"], key=lambda candidate: candidate["gap_id"]):
+        if gap.get("status") != "open":
+            continue
+        gap_id = gap["gap_id"]
+        run_gap = run_gaps.get(gap_id)
+        source = "knowledge_network"
+        open_instance_id = None
+        if run_gap is not None:
+            if run_gap.get("status") == "open":
+                if gap_id not in ready_gap_ids:
+                    continue
+                source = "run+knowledge_network"
+                open_instance_id = run_gap.get("open_instance_id")
+            else:
+                suggestions.append(
+                    {
+                        "source": "run+knowledge_network",
+                        "gap_id": gap_id,
+                        "action_type": "reopen_gap",
+                        "priority": gap["priority"],
+                        "impact": _network_impact(gap),
+                        "gap_type": gap.get(
+                            "gap_type", "deterministic_structural"
+                        ),
+                        "reason": gap["reason"],
+                        "derived_from": list(gap["derived_from"]),
+                        "next_action": gap["next_action"],
+                        "description": gap.get(
+                            "description",
+                            f"Knowledge-network gap {gap_id}: {gap['reason']}.",
+                        ),
+                        "requires_explicit_reopen": True,
+                        "reopen_reason": gap["next_action"],
+                        "expected_information_gain": (
+                            f"Explicitly reopen {gap_id} before scheduling work."
+                        ),
+                    }
+                )
+                continue
+        action_type = _network_suggested_action_type(payload, gap)
+        candidate: dict[str, Any] = {
+            "source": source,
+            "gap_id": gap_id,
+            "open_instance_id": open_instance_id,
+            "action_type": action_type,
+            "priority": gap["priority"],
+            "impact": _network_impact(gap),
+            "gap_type": gap.get("gap_type", "deterministic_structural"),
+            "reason": gap["reason"],
+            "derived_from": list(gap["derived_from"]),
+            "next_action": gap["next_action"],
+            "description": gap.get(
+                "description", f"Knowledge-network gap {gap_id}: {gap['reason']}."
+            ),
+            "expected_information_gain": (
+                "Run the explicit falsifiable search test."
+                if action_type == "search_test"
+                else f"Address the network-derived {gap['reason']} gap {gap_id}."
+            ),
+        }
+        if action_type == "search_test":
+            candidate["search_test"] = gap["search_test"]
+            candidate["novelty_claimed"] = False
+        suggestions.append(candidate)
+    return suggestions
+
+
+def _finalize_suggestions(
+    candidates: list[dict[str, Any]], max_suggestions: int | None
+) -> list[dict[str, Any]]:
+    deduplicated: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for candidate in candidates:
+        open_instance = candidate.get("open_instance_id")
+        source_identity = (
+            f"run:{open_instance}"
+            if isinstance(open_instance, str)
+            else f"network:{candidate.get('source')}"
+        )
+        identity = (
+            source_identity,
+            str(candidate.get("gap_id")),
+            str(candidate.get("action_type")),
+        )
+        deduplicated[identity] = candidate
+    ordered = sorted(
+        deduplicated.values(),
+        key=lambda candidate: (
+            _decision_critical_rank(candidate.get("priority")),
+            _impact_rank(candidate.get("impact")),
+            _numeric_priority_rank(candidate.get("priority")),
+            ACTION_URGENCY.get(candidate.get("action_type"), 99),
+            str(candidate.get("source")),
+            str(candidate.get("gap_id")),
+        ),
+    )
+    if max_suggestions is not None:
+        ordered = ordered[:max_suggestions]
+    finalized: list[dict[str, Any]] = []
+    for index, candidate in enumerate(ordered, start=1):
+        row = dict(candidate)
+        row["suggestion_id"] = (
+            f"suggest:{index}:{row['gap_id']}:{row['action_type']}"
+        )
+        finalized.append(row)
+    return finalized
 
 
 def _validate_envelopes(
@@ -2335,6 +2693,71 @@ def command_status(args: argparse.Namespace) -> int:
     return code
 
 
+def command_suggest_next(args: argparse.Namespace) -> int:
+    paths = _paths(args)
+    state, records = _read_bundle(paths)
+    validation_errors = _validate_bundle(paths, state, records)
+    if validation_errors:
+        _print_errors(validation_errors)
+        return 1
+
+    if bool(args.network_path) != bool(args.knowledge_network_sha256):
+        print(
+            "--network-path and --knowledge-network-sha256 must be provided together",
+            file=sys.stderr,
+        )
+        return 1
+
+    network_payload: dict[str, Any] | None = None
+    network_binding: dict[str, str] | None = None
+    if args.network_path:
+        try:
+            network_payload, network_binding = _load_knowledge_network(
+                Path(args.network_path), args.knowledge_network_sha256
+            )
+        except (OSError, ValueError) as exc:
+            print(f"{exc.__class__.__name__}: {exc}", file=sys.stderr)
+            return 1
+
+    summary = _summary(state, records, validation_errors)
+    candidates: list[dict[str, Any]] = []
+    if summary["lifecycle"] == "running":
+        gap_state = _gap_state(records)
+        ready_gap_ids = set(summary["ready_gap_ids"])
+        candidates.extend(_build_next_actions_from_run(gap_state, ready_gap_ids))
+        if network_payload is not None:
+            network_candidates = _build_next_actions_from_network(
+                network_payload, gap_state, ready_gap_ids
+            )
+            replaced_gap_ids = {
+                row["gap_id"]
+                for row in network_candidates
+                if row.get("source") == "run+knowledge_network"
+                and row.get("action_type") != "reopen_gap"
+            }
+            candidates = [
+                row for row in candidates if row["gap_id"] not in replaced_gap_ids
+            ]
+            candidates.extend(network_candidates)
+    suggestions = _finalize_suggestions(candidates, args.max_suggestions)
+    print(
+        json.dumps(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "run_id": paths.run_id,
+                "summary": summary,
+                "validation_errors": validation_errors,
+                "knowledge_network": network_binding,
+                "next_actions": suggestions,
+            },
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def command_validate(args: argparse.Namespace) -> int:
     payload, code = _status_payload(_paths(args))
     if code:
@@ -2530,6 +2953,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
     status = commands.add_parser("status")
     status.set_defaults(func=command_status)
+    suggest_next = commands.add_parser("suggest-next")
+    suggest_next.add_argument("--network-path")
+    suggest_next.add_argument(
+        "--knowledge-network-sha256",
+        type=_sha256_hex,
+        help="Required SHA-256 binding for --network-path",
+    )
+    suggest_next.add_argument("--max-suggestions", type=_positive_int)
+    suggest_next.set_defaults(func=command_suggest_next)
     validate = commands.add_parser("validate")
     validate.set_defaults(func=command_validate)
     return parser
@@ -2545,7 +2977,7 @@ def main(argv: list[str] | None = None) -> int:
     except SystemExit as exc:
         return int(exc.code) if isinstance(exc.code, int) else 2
     try:
-        read_only = args.command in {"status", "validate"}
+        read_only = args.command in {"status", "suggest-next", "validate"}
         with _run_lock(_paths(args), exclusive=not read_only):
             return args.func(args)
     except (

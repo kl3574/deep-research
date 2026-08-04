@@ -1,0 +1,165 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.invalid/curation-batch-v1.schema.json",
+  "title": "CurationBatch and CurationExecution version 1",
+  "oneOf": [
+    { "$ref": "#/$defs/batch" },
+    { "$ref": "#/$defs/execution" },
+    { "$ref": "#/$defs/observedTarget" },
+    { "$ref": "#/$defs/corpusSnapshot" }
+  ],
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^(sha256:)?[0-9a-f]{64}$"
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["group_id", "library_id", "library_name", "collection_key", "collection_path"],
+      "properties": {
+        "group_id": { "type": "integer", "minimum": 1 },
+        "library_id": { "type": "integer", "minimum": 0 },
+        "library_name": { "type": "string", "minLength": 1 },
+        "collection_key": { "type": "string", "pattern": "^[A-Z0-9]{8}$" },
+        "collection_path": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "fingerprint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity_sha256", "state_sha256", "captured_at", "collection_version", "top_level_parent_keys"],
+      "properties": {
+        "identity_sha256": { "$ref": "#/$defs/digest" },
+        "state_sha256": { "$ref": "#/$defs/digest" },
+        "captured_at": { "type": "string", "format": "date-time" },
+        "collection_version": { "type": "integer", "minimum": 0 },
+        "top_level_parent_keys": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[A-Z0-9]{8}$" }
+        }
+      }
+    },
+    "canonicalIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "value"],
+      "properties": {
+        "type": { "enum": ["doi", "pmid", "isbn", "arxiv", "repository", "title_author_year"] },
+        "value": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1 },
+        "year": { "type": "integer", "minimum": 1000, "maximum": 9999 },
+        "creators": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "expectedEffect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["new_parent_count", "target_membership", "note_action", "attachment_action"],
+      "properties": {
+        "new_parent_count": { "enum": [0, 1] },
+        "target_membership": { "type": "boolean" },
+        "note_action": { "enum": ["create", "update", "no_op"] },
+        "attachment_action": { "enum": ["create", "no_op"] }
+      }
+    },
+    "fileArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/digest" },
+        "schema_version": { "const": "9" },
+        "artifact_role": {
+          "enum": ["main_text", "version_of_record", "accepted_manuscript", "preprint", "supplement", "supporting_information"]
+        },
+        "counts_as_fulltext": { "type": "boolean" }
+      }
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entry_id", "canonical_identity", "decision", "handler", "gate_status", "fulltext_status", "expected_effect"],
+      "properties": {
+        "entry_id": { "type": "string", "minLength": 1 },
+        "canonical_identity": { "$ref": "#/$defs/canonicalIdentity" },
+        "decision": {
+          "enum": ["create_parent", "metadata_only_create", "reuse_existing_parent_add_collection", "create_missing_note", "update_existing_note", "attach_missing_pdf", "no_op_verified", "blocked_duplicate_conflict", "blocked_version_conflict", "blocked_access", "blocked_unsupported_operation"]
+        },
+        "handler": { "enum": ["import_zotero_bundle", "prepare_note_migration", "desktop_membership_transaction", "desktop_attachment_transaction", "readback_only", "none"] },
+        "gate_status": { "enum": ["golden", "blocked"] },
+        "fulltext_status": { "enum": ["fulltext_verified", "metadata_only", "blocked_access"] },
+        "expected_effect": { "$ref": "#/$defs/expectedEffect" },
+        "bundle_path": { "type": "string", "minLength": 1 },
+        "bundle_sha256": { "$ref": "#/$defs/digest" },
+        "note_artifact": { "$ref": "#/$defs/fileArtifact" },
+        "pdf_artifacts": { "type": "array", "items": { "$ref": "#/$defs/fileArtifact" } },
+        "existing_parent": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["key", "version", "in_target"],
+          "properties": {
+            "key": { "type": "string", "pattern": "^[A-Z0-9]{8}$" },
+            "version": { "type": "integer", "minimum": 1 },
+            "in_target": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "batch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "batch_id", "created_at", "target", "target_fingerprint", "entries"],
+      "properties": {
+        "schema": { "const": "CurationBatch/v1" },
+        "batch_id": { "type": "string", "minLength": 1 },
+        "created_at": { "type": "string", "format": "date-time" },
+        "target": { "$ref": "#/$defs/target" },
+        "target_fingerprint": { "$ref": "#/$defs/fingerprint" },
+        "entries": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/entry" } }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "batch_digest", "target_identity_sha256", "initial_state_sha256", "events", "results"],
+      "properties": {
+        "schema": { "const": "CurationExecution/v1" },
+        "batch_digest": { "$ref": "#/$defs/digest" },
+        "target_identity_sha256": { "$ref": "#/$defs/digest" },
+        "initial_state_sha256": { "$ref": "#/$defs/digest" },
+        "events": { "type": "array", "minItems": 1, "items": { "type": "object" } },
+        "results": { "type": "array", "items": { "type": "object" } }
+      }
+    },
+    "observedTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "target", "target_fingerprint"],
+      "properties": {
+        "schema": { "const": "ObservedTarget/v1" },
+        "target": { "$ref": "#/$defs/target" },
+        "target_fingerprint": { "$ref": "#/$defs/fingerprint" }
+      }
+    },
+    "corpusSnapshot": {
+      "type": "object",
+      "required": ["schema", "retrieved_at", "collection", "parents", "identity_sha256", "state_sha256"],
+      "properties": {
+        "schema": { "const": "ZoteroCorpusSnapshot/v1" },
+        "retrieved_at": { "type": "string", "format": "date-time" },
+        "collection": { "type": "object" },
+        "parents": { "type": "array" },
+        "identity_sha256": { "$ref": "#/$defs/digest" },
+        "state_sha256": { "$ref": "#/$defs/digest" }
+      }
+    }
+  }
+}

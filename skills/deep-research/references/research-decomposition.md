@@ -8,6 +8,7 @@ Use this reference when the question is unfamiliar, spans several technical rout
 - [Global map](#global-map)
 - [Dimension-separated matrix](#dimension-separated-matrix)
 - [Technical-route map](#technical-route-map)
+- [Corpus-first and benchmark profiles](#corpus-first-and-benchmark-profiles)
 - [Bottleneck ranking](#bottleneck-ranking)
 - [Iterative search plan](#iterative-search-plan)
 - [Identification terminology guard](#identification-terminology-guard)
@@ -75,6 +76,19 @@ unresolved bottleneck
 ```
 
 Compare routes only after normalizing target, constraints, metric, dataset/environment, and maturity. Avoid a single weighted score when trade-offs are decision-specific.
+
+## Corpus-first and benchmark profiles
+
+When Zotero is part of the request, start from the read-only corpus snapshot in
+[KnowledgeNetwork/v1](knowledge-network.md). Search externally only against a
+named missing, conflicting, stale, or low-confidence node/relation; merge accepted
+evidence with explicit change history.
+
+For algorithm-identification or calibration research, represent every reusable
+toy model or real benchmark with
+[BenchmarkProfile/v1](algorithm-benchmark-profile.md). Do not compare algorithms
+until equations/library, parameters, observation operator, noise, sampling,
+trajectory split, metrics, and failure boundaries are aligned.
 
 ## Bottleneck ranking
 

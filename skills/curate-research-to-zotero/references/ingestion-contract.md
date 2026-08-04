@@ -134,3 +134,12 @@ Preserve:
 - differences found during readback.
 
 One failed item need not invalidate a verified independent item, but a target mismatch blocks the entire write batch.
+
+## CurationBatch/v1 integration
+
+For multi-item work, freeze target identity and mutable state separately in
+`CurationBatch/v1`; see [curation-batch.md](curation-batch.md). New-parent entries
+reference the native importer bundle by absolute path and SHA-256 rather than
+copying its item schema. Existing parents outside the target must use
+`reuse_existing_parent_add_collection` or `blocked_unsupported_operation`, never
+a duplicate parent. Authorization binds the canonical batch digest.

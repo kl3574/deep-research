@@ -30,3 +30,17 @@ Stop on ambiguity or drift. Never expose credentials, edit SQLite, publish priva
 Verify target, children, files, content, and hashes. Record differences/counts and rerun staging for idempotence.
 
 For Chinese notes, preserve Chinese prose, terms, and LaTeX. Validate schema-9 HTML with [zotero-note-html.md](references/zotero-note-html.md) and [verify_note_html.py](scripts/verify_note_html.py).
+
+## Versioned batch orchestration
+
+For multi-item work, use [curation-batch.md](references/curation-batch.md) and
+validate `CurationBatch/v1` before dry-run or write. It only orchestrates
+hash-bound native importer bundles; it does not replace their item schema. An
+existing parent outside the target must be reused through an approved membership
+transaction or marked `blocked_unsupported_operation`, never recreated. Bind
+authorization to the frozen batch digest and validate `CurationExecution/v1`
+through readback.
+
+Use [snapshot_zotero_collection.py](scripts/snapshot_zotero_collection.py) for a
+private read-only `ZoteroCorpusSnapshot/v1`. It is research input only; do not
+write temporary knowledge-graph state back as a permanent Zotero note.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import concurrent.futures
+import hashlib
 import importlib.util
 import io
 import json
@@ -84,6 +85,9 @@ class ResearchRunTests(unittest.TestCase):
         *,
         run_id: str | None = None,
         counterevidence_required: bool = False,
+        decision_impact: str = "high",
+        priority: int = 1,
+        dependencies: list[str] | None = None,
     ) -> int:
         selected = run_id or self.run_id
         state = json.loads(
@@ -105,10 +109,12 @@ class ResearchRunTests(unittest.TestCase):
             "--coverage-role",
             role,
             "--decision-impact",
-            "high",
+            decision_impact,
             "--priority",
-            "1",
+            str(priority),
         ]
+        for dependency in dependencies or []:
+            arguments.extend(["--depends-on", dependency])
         if counterevidence_required:
             arguments.append("--counterevidence-required")
         return invoke(self.root, selected, arguments)[0]
@@ -388,6 +394,141 @@ class ResearchRunTests(unittest.TestCase):
         code, output, error = invoke(self.root, run_id or self.run_id, ["status"])
         self.assertEqual(code, 0, error)
         return json.loads(output)
+
+    def suggest_next(
+        self,
+        run_id: str | None = None,
+        *,
+        network_path: Path | None = None,
+        network_sha256: str | None = None,
+        max_suggestions: int | None = None,
+    ) -> tuple[int, dict[str, object], str]:
+        arguments = ["suggest-next"]
+        if network_path is not None:
+            arguments.extend(["--network-path", str(network_path)])
+            if (
+                network_sha256 is None
+                and network_path.is_file()
+                and not network_path.is_symlink()
+            ):
+                network_sha256 = hashlib.sha256(network_path.read_bytes()).hexdigest()
+        if network_sha256 is not None:
+            arguments.extend(
+                ["--knowledge-network-sha256", network_sha256]
+            )
+        if max_suggestions is not None:
+            arguments.extend(["--max-suggestions", str(max_suggestions)])
+        code, output, error = invoke(self.root, run_id or self.run_id, arguments)
+        payload: dict[str, object] = {}
+        if output:
+            payload = json.loads(output)
+        return code, payload, error
+
+    def write_knowledge_network(
+        self,
+        gaps: list[dict[str, object]],
+        *,
+        path: Path | None = None,
+    ) -> tuple[Path, str]:
+        normalized_gaps: list[dict[str, object]] = []
+        for gap in gaps:
+            row: dict[str, object] = {
+                "gap_id": gap["gap_id"],
+                "derived_from": ["REL-001"],
+                "reason": "missing",
+                "priority": "medium",
+                "status": "open",
+                "next_action": f"Inspect decisive evidence for {gap['gap_id']}",
+            }
+            row.update(gap)
+            normalized_gaps.append(row)
+        payload = {
+            "schema": "KnowledgeNetwork/v1",
+            "network_id": "KN-TEST-001",
+            "snapshot_id": "KN-TEST-001-S001",
+            "corpus_snapshot": {
+                "source": "filesystem",
+                "captured_at": "2026-08-04T00:00:00Z",
+                "inventory_digest": "a" * 64,
+                "item_count": 1,
+                "item_refs": ["private:item:SRC-001"],
+            },
+            "nodes": [
+                {
+                    "node_id": "source:SRC-001",
+                    "kind": "source",
+                    "label": "Canonical source",
+                    "status": "active",
+                    "confidence": "high",
+                    "provenance": [
+                        {
+                            "source_id": "source:SRC-001",
+                            "locator": "PDF p.1",
+                        }
+                    ],
+                },
+                {
+                    "node_id": "claim:C1",
+                    "kind": "claim",
+                    "label": "Decision claim",
+                    "status": "unresolved",
+                    "confidence": "medium",
+                    "provenance": [
+                        {
+                            "source_id": "source:SRC-001",
+                            "locator": "PDF p.2",
+                        }
+                    ],
+                },
+            ],
+            "relations": [
+                {
+                    "relation_id": "REL-001",
+                    "from_id": "source:SRC-001",
+                    "to_id": "claim:C1",
+                    "predicate": "supports",
+                    "status": "supported",
+                    "confidence": "medium",
+                    "provenance": [
+                        {
+                            "source_id": "source:SRC-001",
+                            "locator": "PDF p.2",
+                        }
+                    ],
+                }
+            ],
+            "gap_derivation": {
+                "rules": ["missing", "conflict", "low_confidence"],
+                "derived_gap_ids": [row["gap_id"] for row in normalized_gaps],
+            },
+            "gaps": normalized_gaps,
+            "change_history": [
+                {
+                    "change_id": "CHG-001",
+                    "action": "derive_gaps",
+                    "object_ids": [row["gap_id"] for row in normalized_gaps],
+                    "basis_refs": ["REL-001"],
+                    "recorded_at": "2026-08-04T00:00:00Z",
+                }
+            ],
+            "completion": {
+                "status": "partial",
+                "open_gap_ids": [row["gap_id"] for row in normalized_gaps],
+                "gate_checks": {
+                    "corpus_snapshotted": True,
+                    "provenance_complete": True,
+                    "conflicts_terminal": False,
+                    "low_confidence_edges_terminal": False,
+                    "change_history_recorded": True,
+                },
+            },
+        }
+        selected_path = path or self.root / "knowledge-network.json"
+        selected_path.write_text(
+            json.dumps(payload, sort_keys=True), encoding="utf-8"
+        )
+        digest = hashlib.sha256(selected_path.read_bytes()).hexdigest()
+        return selected_path, digest
 
     def prepare_complete_run(
         self, *, run_id: str | None = None, max_rounds: int | None = None
@@ -1376,6 +1517,379 @@ class ResearchRunTests(unittest.TestCase):
         ]
         self.assertEqual(invoke(self.root, run_id, arguments)[0], 1)
         self.assertFalse((self.root / "runs" / run_id).exists())
+
+    def test_suggest_next_generates_run_based_next_actions(self) -> None:
+        self.init_run(coverage_gap_ids=["gap-a", "gap-b"])
+        self.assertEqual(self.record_gap("gap-a", run_id=self.run_id), 0)
+        self.assertEqual(self.record_gap("gap-b", run_id=self.run_id), 0)
+        code, payload, error = self.suggest_next()
+        self.assertEqual(code, 0, error)
+        suggestions = payload["next_actions"]
+        self.assertIsInstance(suggestions, list)
+        self.assertGreaterEqual(len(suggestions), 2)
+        self.assertEqual(suggestions[0]["gap_id"], "gap-a")
+        self.assertEqual(suggestions[0]["source"], "run")
+        self.assertEqual(suggestions[0]["action_type"], "discover")
+        self.assertEqual(suggestions[1]["gap_id"], "gap-b")
+        self.assertEqual(suggestions[1]["source"], "run")
+        self.assertEqual(suggestions[1]["action_type"], "discover")
+
+    def test_suggest_next_uses_network_gaps_with_priority_and_cap(self) -> None:
+        self.init_run()
+        self.assertEqual(self.record_gap("gap-primary"), 0)
+        self.assertEqual(
+            self.set_gap_status(
+                "gap-primary",
+                "deferred",
+                next_action="Delay for follow-up network-guided route",
+            ),
+            0,
+        )
+        network_file, _ = self.write_knowledge_network(
+            [
+                {
+                    "gap_id": "net-medium",
+                    "gap_type": "deterministic_structural",
+                    "priority": "medium",
+                    "description": "Medium-priority network gap",
+                },
+                {
+                    "gap_id": "net-high",
+                    "gap_type": "deterministic_structural",
+                    "priority": "high",
+                    "description": "High-priority network gap",
+                },
+                {
+                    "gap_id": "net-low",
+                    "gap_type": "deterministic_structural",
+                    "priority": "low",
+                    "description": "Low-priority network gap",
+                },
+            ]
+        )
+        code, payload, error = self.suggest_next(
+            network_path=network_file,
+            max_suggestions=2,
+        )
+        self.assertEqual(code, 0, error)
+        suggestions = payload["next_actions"]
+        self.assertEqual([row["gap_id"] for row in suggestions], ["net-high", "net-medium"])
+        self.assertEqual([row["source"] for row in suggestions], ["knowledge_network"] * 2)
+        self.assertEqual([row["action_type"] for row in suggestions], ["discover", "discover"])
+
+    def test_suggest_next_rejects_missing_network_payload(self) -> None:
+        self.init_run()
+        code, _, error = self.suggest_next(
+            network_path=self.root / "missing-network.json",
+            network_sha256="0" * 64,
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("network payload not found", error)
+
+    def test_suggest_next_rejects_unbound_wrong_schema_and_wrong_digest(self) -> None:
+        self.init_run()
+        network_file, digest = self.write_knowledge_network(
+            [{"gap_id": "net-gap"}]
+        )
+        code, _, error = invoke(
+            self.root,
+            self.run_id,
+            ["suggest-next", "--network-path", str(network_file)],
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("must be provided together", error)
+
+        code, _, error = self.suggest_next(
+            network_path=network_file, network_sha256="0" * 64
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("SHA-256 mismatch", error)
+
+        payload = json.loads(network_file.read_text(encoding="utf-8"))
+        payload["schema"] = "Unrelated/v9"
+        network_file.write_text(json.dumps(payload), encoding="utf-8")
+        code, _, error = self.suggest_next(network_path=network_file)
+        self.assertEqual(code, 1)
+        self.assertIn("KnowledgeNetwork/v1", error)
+        self.assertNotEqual(digest, hashlib.sha256(network_file.read_bytes()).hexdigest())
+
+    def test_suggest_next_rejects_relative_symlink_and_read_drift(self) -> None:
+        self.init_run()
+        network_file, digest = self.write_knowledge_network(
+            [{"gap_id": "net-gap"}]
+        )
+        code, _, error = invoke(
+            self.root,
+            self.run_id,
+            [
+                "suggest-next",
+                "--network-path",
+                "relative-network.json",
+                "--knowledge-network-sha256",
+                digest,
+            ],
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("must be absolute", error)
+
+        symlink = self.root / "network-link.json"
+        symlink.symlink_to(network_file)
+        code, _, error = self.suggest_next(
+            network_path=symlink, network_sha256=digest
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("must not be a symlink", error)
+
+        raw = network_file.read_bytes()
+        first_identity = (1, 2, len(raw), 3, 4)
+        second_identity = (1, 2, len(raw), 3, 5)
+        with mock.patch.object(
+            module,
+            "_read_regular_file_bytes",
+            side_effect=[
+                (raw, first_identity),
+                (raw, second_identity),
+            ],
+        ):
+            code, _, error = self.suggest_next(
+                network_path=network_file, network_sha256=digest
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("changed while being read", error)
+
+    def test_suggest_next_maps_conflict_and_implicit_candidate_policy(self) -> None:
+        self.init_run()
+        conflict_file, _ = self.write_knowledge_network(
+            [
+                {
+                    "gap_id": "net-conflict",
+                    "reason": "conflict",
+                    "priority": "decision_critical",
+                    "gap_type": "deterministic_structural",
+                    "next_action": "Run a discriminating countercheck",
+                }
+            ]
+        )
+        code, payload, error = self.suggest_next(network_path=conflict_file)
+        self.assertEqual(code, 0, error)
+        suggestion = payload["next_actions"][0]
+        self.assertEqual(suggestion["action_type"], "countercheck")
+        self.assertEqual(suggestion["reason"], "conflict")
+        self.assertEqual(suggestion["priority"], "decision_critical")
+        self.assertEqual(suggestion["derived_from"], ["REL-001"])
+        self.assertEqual(
+            suggestion["next_action"], "Run a discriminating countercheck"
+        )
+
+        implicit_file, _ = self.write_knowledge_network(
+            [
+                {
+                    "gap_id": "net-implicit",
+                    "gap_type": "implicit_candidate",
+                    "grounds": "Observed structural absence",
+                    "warrant": "The absence may affect the decision",
+                    "backing": "The inspected relation inventory",
+                    "qualifier": "Candidate only",
+                    "defeaters": ["A missed synonym could explain the absence"],
+                    "search_test": "Search exact synonyms in two independent indexes",
+                    "novelty_claimed": False,
+                }
+            ],
+            path=self.root / "implicit-network.json",
+        )
+        code, payload, error = self.suggest_next(network_path=implicit_file)
+        self.assertEqual(code, 0, error)
+        suggestion = payload["next_actions"][0]
+        self.assertEqual(suggestion["action_type"], "search_test")
+        self.assertFalse(suggestion["novelty_claimed"])
+        self.assertEqual(
+            suggestion["search_test"],
+            "Search exact synonyms in two independent indexes",
+        )
+
+        invalid = json.loads(implicit_file.read_text(encoding="utf-8"))
+        invalid["gaps"][0]["novelty_claimed"] = True
+        implicit_file.write_text(json.dumps(invalid), encoding="utf-8")
+        code, _, error = self.suggest_next(network_path=implicit_file)
+        self.assertEqual(code, 1)
+        self.assertIn("novelty_claimed must be false", error)
+
+    def test_suggest_next_excludes_active_and_dependency_blocked_gaps(self) -> None:
+        self.init_run(
+            coverage_gap_ids=["gap-active", "gap-dependent", "gap-prerequisite"]
+        )
+        self.assertEqual(self.record_gap("gap-active"), 0)
+        self.assertEqual(self.record_gap("gap-prerequisite"), 0)
+        self.assertEqual(
+            self.record_gap(
+                "gap-dependent", dependencies=["gap-prerequisite"]
+            ),
+            0,
+        )
+        self.assertEqual(
+            self.set_gap_status(
+                "gap-prerequisite",
+                "deferred",
+                next_action="Wait for a bounded prerequisite route",
+            ),
+            0,
+        )
+        self.assertEqual(
+            self.start_action("action-active", "gap-active"),
+            0,
+        )
+        network_file, _ = self.write_knowledge_network(
+            [
+                {"gap_id": "gap-active"},
+                {"gap_id": "gap-dependent"},
+            ]
+        )
+        code, payload, error = self.suggest_next(network_path=network_file)
+        self.assertEqual(code, 0, error)
+        self.assertEqual(payload["summary"]["ready_gap_ids"], [])
+        self.assertEqual(payload["next_actions"], [])
+
+    def test_suggest_next_applies_global_priority_before_cap(self) -> None:
+        self.init_run(coverage_gap_ids=["gap-run-medium"])
+        self.assertEqual(
+            self.record_gap(
+                "gap-run-medium", decision_impact="medium", priority=1
+            ),
+            0,
+        )
+        network_file, _ = self.write_knowledge_network(
+            [
+                {
+                    "gap_id": "gap-network-critical",
+                    "reason": "conflict",
+                    "priority": "decision_critical",
+                }
+            ]
+        )
+        code, payload, error = self.suggest_next(
+            network_path=network_file, max_suggestions=1
+        )
+        self.assertEqual(code, 0, error)
+        self.assertEqual(
+            payload["next_actions"][0]["gap_id"], "gap-network-critical"
+        )
+
+    def test_suggest_next_orders_high_run_before_five_medium_network_gaps(
+        self,
+    ) -> None:
+        self.init_run(coverage_gap_ids=["gap-run-high"])
+        self.assertEqual(
+            self.record_gap(
+                "gap-run-high", decision_impact="high", priority=100
+            ),
+            0,
+        )
+        network_file, _ = self.write_knowledge_network(
+            [
+                {
+                    "gap_id": f"gap-network-medium-{index}",
+                    "priority": "medium",
+                }
+                for index in range(1, 6)
+            ]
+        )
+        code, payload, error = self.suggest_next(
+            network_path=network_file, max_suggestions=5
+        )
+        self.assertEqual(code, 0, error)
+        self.assertEqual(len(payload["next_actions"]), 5)
+        self.assertEqual(payload["next_actions"][0]["gap_id"], "gap-run-high")
+        self.assertNotIn(
+            "gap-network-medium-5",
+            [row["gap_id"] for row in payload["next_actions"]],
+        )
+
+    def test_suggest_next_uses_numeric_priority_then_stable_source_gap_ties(
+        self,
+    ) -> None:
+        run_gap_ids = [
+            "gap-run-priority-1",
+            "gap-run-priority-100",
+            "gap-run-tie-a",
+            "gap-run-tie-b",
+        ]
+        self.init_run(coverage_gap_ids=run_gap_ids)
+        self.assertEqual(
+            self.record_gap(
+                "gap-run-priority-1", decision_impact="high", priority=1
+            ),
+            0,
+        )
+        self.assertEqual(
+            self.record_gap(
+                "gap-run-priority-100", decision_impact="high", priority=100
+            ),
+            0,
+        )
+        self.assertEqual(
+            self.record_gap(
+                "gap-run-tie-b", decision_impact="high", priority=5
+            ),
+            0,
+        )
+        self.assertEqual(
+            self.record_gap(
+                "gap-run-tie-a", decision_impact="high", priority=5
+            ),
+            0,
+        )
+        network_file, _ = self.write_knowledge_network(
+            [
+                {
+                    "gap_id": "gap-network-tie",
+                    "priority": 5,
+                    "impact": "high",
+                }
+            ]
+        )
+        code, payload, error = self.suggest_next(network_path=network_file)
+        self.assertEqual(code, 0, error)
+        self.assertEqual(
+            [row["gap_id"] for row in payload["next_actions"]],
+            [
+                "gap-run-priority-1",
+                "gap-network-tie",
+                "gap-run-tie-a",
+                "gap-run-tie-b",
+                "gap-run-priority-100",
+            ],
+        )
+
+    def test_suggest_next_requires_explicit_reopen_for_non_open_run_gap(self) -> None:
+        self.init_run(coverage_gap_ids=["gap-reopen"])
+        self.assertEqual(self.record_gap("gap-reopen"), 0)
+        self.assertEqual(
+            self.set_gap_status(
+                "gap-reopen",
+                "deferred",
+                next_action="Reopen only with fresh network evidence",
+            ),
+            0,
+        )
+        network_file, _ = self.write_knowledge_network(
+            [
+                {
+                    "gap_id": "gap-reopen",
+                    "priority": "high",
+                    "next_action": "Reopen after confirming the new evidence route",
+                }
+            ]
+        )
+        code, payload, error = self.suggest_next(network_path=network_file)
+        self.assertEqual(code, 0, error)
+        self.assertEqual(len(payload["next_actions"]), 1)
+        suggestion = payload["next_actions"][0]
+        self.assertEqual(suggestion["action_type"], "reopen_gap")
+        self.assertTrue(suggestion["requires_explicit_reopen"])
+        self.assertEqual(
+            suggestion["reopen_reason"],
+            "Reopen after confirming the new evidence route",
+        )
 
 
 if __name__ == "__main__":
