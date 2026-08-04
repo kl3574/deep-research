@@ -100,7 +100,9 @@ without abusing one relation row as the claim itself.
 Initialization declares stable promised `coverage_gap_ids`. Open each with a
 description, acceptance criterion, decision impact, dependencies, priority, and
 whether a counterevidence check is required. Emergent gaps use the same schema but
-are marked `emergent`.
+are marked `emergent`. Run-gap priority is a positive integer where a smaller
+number means higher priority; it is a tie-break only among suggestions with the
+same decision impact.
 
 A gap remains `open`, `blocked`, or `deferred` until a status event marks it
 `resolved` or explicitly `unresolved`. A terminal gap must reference its own
@@ -221,8 +223,28 @@ finalize
 ```
 
 `suggest-next` can be used in the same run context to produce the next action
-queue. Pass optional `--network-path` to inject a knowledge-network payload and
-`--max-suggestions` to cap output length.
+queue. A knowledge-network input is accepted only as a complete, validated
+`KnowledgeNetwork/v1` snapshot. Pass an absolute, ordinary, non-symlink path
+with both `--network-path` and its exact
+`--knowledge-network-sha256 <64-lowercase-hex>` binding. The command rejects a
+wrong schema, invalid provenance or gap fields, digest mismatch, and a path that
+changes during validation.
+
+Only open gaps in `summary.ready_gap_ids` produce ordinary actions. Active,
+dependency-blocked, resolved, unresolved, blocked, and deferred run gaps are not
+silently scheduled. If an open network gap matches a non-open run gap, the
+output is an explicit `reopen_gap` proposal with
+`requires_explicit_reopen=true`, not a runnable action.
+
+Network conflict gaps map to `countercheck`, missing-coverage gaps to
+`discover`, single-source low-confidence gaps to `corroborate`, and fully
+qualified implicit candidates to their falsifiable `search_test`. Implicit
+candidates cannot claim novelty. Run and network candidates are normalized,
+deduplicated by open instance/source, and globally sorted with
+`decision_critical` first, then impact (`high`, `medium`, `low`), numeric
+priority, action urgency, and deterministic `source + gap_id`. Source type never
+globally precedes impact or priority. `--max-suggestions` is applied only after
+this global ordering.
 
 Use `--help` on a subcommand for its complete required fields. `resume` converts an
 interrupted run back to `running` and appends a lifecycle event; on an already

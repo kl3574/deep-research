@@ -327,3 +327,7 @@ The existing importer remains unchanged.
 `snapshot_zotero_collection.py` is a read-only local-API export for research. It
 omits note bodies, abstracts, full text, attachment locations, and credentials.
 A temporary knowledge graph is not a Zotero note and receives no write authority.
+Its `--base-url` accepts either a loopback origin such as
+`http://127.0.0.1:23119` or the equivalent API root
+`http://127.0.0.1:23119/api`; both are normalized to the origin. Other paths,
+credentials, queries, fragments, and non-loopback hosts are rejected.

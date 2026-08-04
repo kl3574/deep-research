@@ -110,13 +110,21 @@ identity/version/path, sorted parent metadata, child types/roles/availability,
 and identity/state digests. It omits note bodies, abstracts, full text,
 attachment paths/URLs, credentials, and authorization headers.
 
+`--base-url` accepts either the loopback origin
+(`http://127.0.0.1:23119`) or its API root
+(`http://127.0.0.1:23119/api`, with an optional trailing slash). Both forms are
+normalized to the origin before request paths are appended. Other URL paths,
+credentials, query strings, fragments, and non-loopback hosts are rejected.
+
 ```bash
 python scripts/snapshot_zotero_collection.py \
   --base-url http://127.0.0.1:23119 \
-  --group-id 6588343 \
-  --collection-key 7V4BEGN4 \
+  --group-id 1234567 \
+  --collection-key COLL0001 \
   --output /private/staging/corpus-snapshot.json
 ```
+
+Using `--base-url http://127.0.0.1:23119/api` is equivalent.
 
 Output is created exclusively with mode `0600`; an existing file is never
 overwritten.

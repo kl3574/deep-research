@@ -29,12 +29,14 @@ class FakeZoteroHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def payload(path: str) -> object:
-        if path.endswith("/collections/7V4BEGN4"):
+        if not path.startswith("/api/groups/"):
+            raise AssertionError(path)
+        if path.endswith("/collections/COLL0001"):
             return {
-                "key": "7V4BEGN4",
+                "key": "COLL0001",
                 "version": 7,
                 "data": {
-                    "key": "7V4BEGN4",
+                    "key": "COLL0001",
                     "name": "Target",
                     "parentCollection": "PARENT01",
                     "version": 7,
@@ -51,7 +53,7 @@ class FakeZoteroHandler(BaseHTTPRequestHandler):
                     "version": 3,
                 },
             }
-        if path.endswith("/collections/7V4BEGN4/items/top"):
+        if path.endswith("/collections/COLL0001/items/top"):
             return [
                 {
                     "key": "ABCDEFGH",
@@ -92,7 +94,7 @@ class FakeZoteroHandler(BaseHTTPRequestHandler):
                         "filename": "secret-si.pdf",
                         "contentType": "application/pdf",
                         "linkMode": "imported_file",
-                        "path": "/home/private/secret-si.pdf",
+                        "path": "/home/tester/secret-si.pdf",
                         "url": "https://secret.example/token",
                     },
                 },
@@ -120,11 +122,11 @@ class SnapshotTests(unittest.TestCase):
 
     def test_snapshot_omits_private_content_and_hashes_state(self) -> None:
         value = snapshotter.build_snapshot(
-            self.base_url, 6588343, "7V4BEGN4"
+            self.base_url, 1234567, "COLL0001"
         )
         self.assertEqual("ZoteroCorpusSnapshot/v1", value["schema"])
         self.assertEqual(
-            ["PARENT01", "7V4BEGN4"],
+            ["PARENT01", "COLL0001"],
             [
                 item["key"]
                 for item in value["collection"]["collection_path"]
@@ -150,9 +152,30 @@ class SnapshotTests(unittest.TestCase):
         self.assertTrue(value["identity_sha256"].startswith("sha256:"))
         self.assertTrue(value["state_sha256"].startswith("sha256:"))
 
+    def test_origin_and_api_base_urls_are_equivalent(self) -> None:
+        origin = snapshotter.build_snapshot(
+            self.base_url, 1234567, "COLL0001"
+        )
+        api = snapshotter.build_snapshot(
+            self.base_url + "/api", 1234567, "COLL0001"
+        )
+        api_slash = snapshotter.build_snapshot(
+            self.base_url + "/api/", 1234567, "COLL0001"
+        )
+        self.assertEqual(
+            self.base_url,
+            snapshotter.validate_base_url(self.base_url + "/api"),
+        )
+        self.assertEqual(origin["collection"], api["collection"])
+        self.assertEqual(origin["parents"], api["parents"])
+        self.assertEqual(origin["state_sha256"], api["state_sha256"])
+        self.assertEqual(api["collection"], api_slash["collection"])
+        self.assertEqual(api["parents"], api_slash["parents"])
+        self.assertEqual(api["state_sha256"], api_slash["state_sha256"])
+
     def test_private_writer_and_base_url_guards(self) -> None:
         value = snapshotter.build_snapshot(
-            self.base_url, 6588343, "7V4BEGN4"
+            self.base_url, 1234567, "COLL0001"
         )
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "snapshot.json"
@@ -164,6 +187,16 @@ class SnapshotTests(unittest.TestCase):
             snapshotter.validate_base_url(
                 "http://user:secret@127.0.0.1:23119"
             )
+        for invalid in (
+            self.base_url + "/foo",
+            self.base_url + "/api/v1",
+            self.base_url + "?key=value",
+            self.base_url + "/api?key=value",
+            self.base_url + "#fragment",
+        ):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    snapshotter.validate_base_url(invalid)
         with self.assertRaises(ValueError):
             snapshotter.validate_base_url("https://example.com")
 

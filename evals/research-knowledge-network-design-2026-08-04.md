@@ -73,3 +73,44 @@
 - 拒绝“只做知识图不做 GapQueue”：不会触发可执行收敛。
 - 拒绝“只做 GapQueue 不做 Zotero 落库”：可执行性无法闭环。
 - 拒绝“直接复用外部系统源码”：许可证和边界不满足本仓库清洁室与可迁移要求。
+
+## 8. 真实回归与迭代结果（2026-08-04 脱敏汇总）
+
+- 真实回归与补全仅基于本地公开可回放材料，未触及私有 artifact；corpus 规模由 59 增加到 62。
+- 本轮可审计落点收敛到：10 条 finalized claim、16 条 evidence、8 条 relation。
+- 结构覆盖结果为 4/4 的维度已覆盖、4/4 的 benchmark profile 已覆盖。
+- top profile 缺口中有 2 个被 3 篇 targeted research evidence 关闭，仍保留 5 个 medium 缺口。
+- 任务边界修正后形成 2 条主线：WENDy 与 WSINDy 分离测试。
+  - WENDy：聚焦弱形式目标项在含噪声、非光滑项与偏置项条件下的稳定回归验证。
+  - WSINDy：聚焦稀疏识别与导数估计耦合边界的可比对基线验证。
+- Toy model 回归补齐为 5 个目标模型族，支持后续可复现性分层测试。
+- 算法修订方向同步为：
+  - DF-SINDy 默认 SI-only 的执行约束；
+  - DRGEP reduction 的 adversarial 防错；
+  - suggest-next 生成改为高优先级跑分策略，implicit 类型优先 `search_test`，并固定 `novelty=false`。
+
+### 真实回归驱动修复（5 类）
+- 修复外部 snapshot path 解析与一致化问题。
+- 修复 state/file/identity digest 校验链条。
+- 修复 semantic/physical gap ID 编制与映射不一致问题。
+- 修复 aggregate coverage 与 Cartesian 扫描边界的统计偏差问题。
+- 修复 global priority 的排序与回放一致性问题。
+
+### 回归测试与评估（公开记录）
+- deep 模块：`deep53` / `curation173` / `network39` / `root3`。
+- 质量检查：`Ruff` + `privacy(8 private identifiers in-memory denylist)` + `quick_validate`。
+- 复核策略：independent no-blocking review。
+- 插件评测：`deep77/C`、`network72/C`（均为公开验证入口）。
+- 明确 `deferred-token / complexity` 的静态 heuristic 仅为先验指标，不得替代真实 outcome evidence。
+
+### 新增公开原始来源（仅标题 + 官方 DOI / arXiv）
+- WENDy baseline 相关公开来源（标题 + DOI/arXiv）
+- MDBench（官方来源：标题 + DOI/arXiv）
+- Benchmarking sparse system identification with low-dimensional chaos（标题 + DOI/arXiv）
+- SINDy vs Hard Nonlinearities and Hidden Dynamics（标题 + DOI/arXiv）
+
+### 风险与未完成项
+- `59/62` 不是全量深读覆盖；仅为本轮迭代回归可追溯记录。
+- 云同步路径与云端一致性未在本轮完成验证。
+- `transaction v1 crash journal` 仍需人工审计。
+- 未主张“所有 gap 已关闭”；现有网络仍有保留缺口用于下一轮有目标闭环。

@@ -27,11 +27,11 @@ class CurationBatchTests(unittest.TestCase):
             encoding="utf-8",
         )
         self.target = {
-            "group_id": 6588343,
+            "group_id": 1234567,
             "library_id": 2,
-            "library_name": "wolfs",
-            "collection_key": "7V4BEGN4",
-            "collection_path": ["形貌仿真", "形貌反问题", "化学反应集识别与校准"],
+            "library_name": "Example Research Library",
+            "collection_key": "COLL0001",
+            "collection_path": ["Research", "Inverse Problems", "Calibration"],
         }
         identity = verify.compute_identity_fingerprint(self.target)
         self.fingerprint = {

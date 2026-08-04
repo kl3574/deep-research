@@ -18,7 +18,9 @@ Allowed evidence stance:
 
 ## Determinism
 
-- All writes are atomic with temporary-file replacement.
+- Individual files use temporary-file replacement. Multi-file ingest uses a
+  prepared journal and handled-failure rollback; crash recovery remains an
+  explicit audited operation.
 - All read/write operations to network files occur under workspace root.
 - JSONL reads reject malformed lines and return validation failure.
 - File locks guard concurrent writers.
@@ -27,5 +29,5 @@ Allowed evidence stance:
 
 - Conflict: same claim has both supports and contradicts from different independence groups.
 - Unsupported high-impact: high-impact claim without decisive evidence.
-- Missing promised dimension/benchmark: dimensions or benchmark profiles required in init that are absent from a claim record.
+- Missing promised dimension/benchmark: dimensions or benchmark profiles required in init that are absent from aggregate evidence-backed active-claim coverage.
 - Unresolved high-impact gap or open conflict blocks completion.

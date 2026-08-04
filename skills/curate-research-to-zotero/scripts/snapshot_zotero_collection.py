@@ -43,7 +43,11 @@ def validate_base_url(value: str) -> str:
         raise ValueError("base URL must not contain credentials, query, or fragment")
     if parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
         raise ValueError("only a loopback Zotero API is accepted")
-    return value.rstrip("/")
+    if parsed.path not in {"", "/", "/api", "/api/"}:
+        raise ValueError("base URL path must be empty or /api")
+    return urllib.parse.urlunsplit(
+        (parsed.scheme, parsed.netloc, "", "", "")
+    )
 
 
 def api_get(
@@ -293,7 +297,15 @@ def write_private_snapshot(path: Path, snapshot: dict[str, Any]) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base-url", required=True)
+    parser.add_argument(
+        "--base-url",
+        required=True,
+        help=(
+            "loopback Zotero origin or API root, for example "
+            "http://127.0.0.1:23119 or http://127.0.0.1:23119/api; "
+            "both normalize to the origin"
+        ),
+    )
     parser.add_argument("--group-id", type=int, required=True)
     parser.add_argument("--collection-key", required=True)
     parser.add_argument("--output", type=Path, required=True)

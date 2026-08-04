@@ -10,9 +10,10 @@ description: Use when reviewed evidence must form a persistent, auditable networ
 Use this skill for tasks that must transform local research artifacts into an auditable, incremental knowledge graph:
 
 1. Read-only ingestion of reviewed evidence cards and Zotero corpus snapshot files.
-2. Claim/evidence/entity bookkeeping with provenance and deterministic, append-only append-only ledgers.
+2. Claim/evidence/entity bookkeeping with provenance and deterministic, append-only ledgers.
 3. Conflict detection, gap derivation, coverage checks, and completion readiness checks.
 4. Reproducible export/snapshot output for review or downstream analysis.
+5. Deterministic bulk import of local `ZoteroCorpusSnapshot/v1` parent metadata.
 
 The skill must not perform retrieval, external search, model-based interpretation beyond local rules, or Zotero writes.
 
@@ -35,6 +36,7 @@ Load this skill when the user asks for:
 - Enforce deterministic local schema and fail-closed duplicate semantics.
 - Keep entity IDs unmerged unless explicitly superseded.
 - Bind each network to one local `ZoteroCorpusSnapshot` digest and verify it on validation.
+- `ingest-zotero-snapshot` accepts only `ZoteroCorpusSnapshot/v1` and supports deterministic metadata-only source onboarding.
 - Record evidence with `supports|contradicts|qualifies|not_tested`, exact locator, and independence group.
 - Derive gap candidates for unresolved high-impact evidence needs, single-source claims, open conflicts, and missing promised dimensions/profiles.
 
@@ -42,7 +44,13 @@ Load this skill when the user asks for:
 
 - This skill does not call the web, does not perform paper-level deep-read, and does not update Zotero.
 - Evidence is never treated as truth; it is represented as claims + polarity + exact locator + source/version context.
-- Command outputs must stay deterministic with atomic writes and file locks.
+- Command outputs must stay deterministic with file locks and atomic replacement
+  for each individual file. Multi-file commits use staged handled-failure
+  rollback plus a durable detection journal, not an atomicity claim.
+- Snapshot inputs may live outside the network root, but must be absolute,
+  regular, non-symlink files that remain unchanged throughout a no-follow read.
+- Snapshot input freedom never applies to ledgers, state, snapshots, or export
+  outputs; those remain confined to the network root.
 
 ## CLI command map
 
@@ -50,20 +58,50 @@ Use `python3 scripts/knowledge_network.py` with required `--root` and `--network
 
 - `init`
   - initialize corpus-bound network envelope
+  - for `ZoteroCorpusSnapshot/v1`, `--snapshot-digest` is the producer's
+    recomputed `state_sha256`, not a user-computed file hash
+  - file SHA-256 is computed automatically from the same stable read
 - `add-source`
 - `add-entity`
 - `add-claim`
 - `add-evidence`
 - `add-relation`
 - `record-gap`
+- `transition-gap`
+  - append a guarded `open|resolved|blocked` revision from the latest gap record
+  - `resolved` requires a reason and evidence associated with the gap claim;
+    claimless resolution also requires an explicit resolution source
 - `derive-gaps`
 - `status`
 - `validate`
+- `ingest-zotero-snapshot`
+  - `--snapshot` imports all parents into `sources` only, with
+    `role=zotero_corpus` and `read_depth=metadata`
+  - bound path must be an absolute path
+  - file, identity, and state digests are recomputed and verified
+  - no note/PDF body contents are read
+  - writes are preflighted and staged; handled commit failures roll back
+  - a prepared journal left by process/power loss blocks later validation and
+    mutation. Version 1 requires audited recovery before the journal is cleared.
+  - identical repeats are idempotent
+  - `--allow-refresh` accepts same-identity state drift, appends revisions for
+    changed parents, preserves removed history, and updates current membership
+  - refresh may bind a new absolute producer output path; its event preserves
+    previous and new path/state/file digests
 - `snapshot`
 - `export`
+  - project the internal ledgers into the strict `KnowledgeNetwork/v1` contract
+    consumed by `deep-research suggest-next`
+  - include content-addressed snapshot/ledger digests and validated corpus,
+    node, relation, latest-gap, change-history, and completion projections
+
+`snapshot` is the lossless internal audit artifact. `export` is the minimal
+cross-skill adapter; both are generated from the same state and ledgers.
 
 Prefer deterministic IDs and explicit IDs in command usage.
 Use `--supersedes` for controlled revisions and never auto-merge entity IDs.
+Use `transition-gap`, not a second `record-gap`, to resolve, block, or reopen a
+recorded or derived gap.
 
 ## Validation expectations
 
