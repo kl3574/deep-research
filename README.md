@@ -30,6 +30,9 @@
 - 把 `version-fit`、全文访问、方法适配和来源身份作为硬门，而不是用名望或引用数代替审查；
 - 对关键论文执行 `Map → Evidence → Reconstruction`，逐项保留页码、章节、图、表、公式或定理定位；
 - 所有跨来源结论在主张级综合，主动寻找反证并保留未决冲突；
+- 对长任务使用显式 gap/action 循环；在获准的持久工作区中，可用版本化
+  JSON/JSONL 账本断点续跑，并机械检查关系结构、交叉引用、locator 是否存在、
+  冲突、预算字段/数值上限和停止门槛；
 - 只从合法、公开或官方渠道下载；PDF、笔记和 Zotero 条目都做写后读回；
 - 中文 Zotero 笔记保留原始术语，公式统一使用 LaTeX。
 
@@ -73,7 +76,8 @@ skills/
 ├── deep-research/
 │   ├── SKILL.md
 │   ├── agents/openai.yaml
-│   └── references/
+│   ├── references/
+│   └── scripts/
 ├── learn-from-papers/
 │   ├── SKILL.md
 │   ├── agents/openai.yaml
@@ -88,6 +92,23 @@ evals/
 ```
 
 `SKILL.md` 只保留执行主干，详细方法与研究依据按需加载。下载的论文和个人 Zotero 数据不会提交到本仓库。
+
+`skills/deep-research/scripts/research_run.py` 是可选的纯 Python 标准库运行账本：
+它只记录和验证研究状态，不联网、不调用模型，也不执行来源中的指令。只有用户
+授权持久工作区后才使用；否则技能继续在临时上下文中维护等价结构。完整字段与
+命令见 `skills/deep-research/references/run-state.md`。
+
+运行所有本地验证：
+
+```bash
+ruff check --no-cache skills evals scripts
+python scripts/check_public_privacy.py
+python -m unittest discover -s scripts -p 'test_*.py'
+python -m unittest discover -s skills/deep-research/scripts -p 'test_*.py'
+python -m unittest discover -s skills/curate-research-to-zotero/scripts -p 'test_*.py'
+python -m unittest discover -s evals/real-world -p 'test_*.py'
+python -m compileall -q skills evals scripts
+```
 
 `curate-research-to-zotero` 还提供三层笔记保障：
 

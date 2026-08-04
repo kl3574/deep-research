@@ -2,6 +2,16 @@
 
 Use this reference when the question is unfamiliar, spans several technical routes, or risks mixing incomparable evidence.
 
+## Contents
+
+- [Choose the research mode](#choose-the-research-mode)
+- [Global map](#global-map)
+- [Dimension-separated matrix](#dimension-separated-matrix)
+- [Technical-route map](#technical-route-map)
+- [Bottleneck ranking](#bottleneck-ranking)
+- [Iterative search plan](#iterative-search-plan)
+- [Identification terminology guard](#identification-terminology-guard)
+
 ## Choose the research mode
 
 | Mode | Intended coverage | Required disclosure |

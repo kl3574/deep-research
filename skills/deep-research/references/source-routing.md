@@ -2,6 +2,12 @@
 
 Trust is relative to a claim. Apply identity, status, version, access, scope, and method gates before assigning authority.
 
+## Contents
+
+- [Academic sources](#academic-sources)
+- [Industry and technical sources](#industry-and-technical-sources)
+- [Source registry](#source-registry)
+
 ## Academic sources
 
 | Source type | Best use | Required audit | Cannot establish alone |
