@@ -316,3 +316,14 @@ Report counts separately:
 `staged / file-verified / parent-imported / attachment-imported / readback-verified / metadata-only / failed`
 
 A `201 Created`, successful parent search, or visible citation is insufficient to claim full PDF synchronization.
+
+## Versioned batch and corpus snapshot
+
+Use [curation-batch.md](curation-batch.md) for the strict `CurationExecution/v1`
+path through readback. Target identity mismatch or mutable-state drift invalidates
+the old approval. `partial_commit` and `readback_mismatch` are terminal failures.
+The existing importer remains unchanged.
+
+`snapshot_zotero_collection.py` is a read-only local-API export for research. It
+omits note bodies, abstracts, full text, attachment locations, and credentials.
+A temporary knowledge graph is not a Zotero note and receives no write authority.

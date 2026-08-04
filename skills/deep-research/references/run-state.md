@@ -12,6 +12,7 @@ claim is true.
 - [Contract and common envelope](#contract-and-common-envelope)
 - [Ledger records](#ledger-records)
 - [Lifecycle and commands](#lifecycle-and-commands)
+- [External network and delivery artifacts](#external-network-and-delivery-artifacts)
 - [Three separate gates](#three-separate-gates)
 - [Failure, limits, and recovery](#failure-limits-and-recovery)
 - [Validation and privacy](#validation-and-privacy)
@@ -274,6 +275,16 @@ Never collapse these states:
 `complete` describes completion of the promised research contract, not universal
 truth and not resolution of every claim. Open conflicts and unknowns must remain
 visible in the delivered bounded answer.
+
+## External network and delivery artifacts
+
+Do not add acquisition or Zotero fields to ledger schema v1. Record a
+[KnowledgeNetwork/v1](knowledge-network.md) snapshot and
+[ResearchHandoff/v1](delivery-handoff.md) as external, content-addressed artifacts
+on the applicable action. The research ledger can finalize while delivery remains
+`partial` or `blocked_capability`, but the final response must report both states.
+The handoff validator, not `research_run.py`, checks attachment roles, CurationBatch
+hashes, benchmark cards, capability paths, and per-request completion rows.
 
 ## Failure, limits, and recovery
 

@@ -9,6 +9,7 @@ making source text or a model response an authority over the run.
 - [State and action cycle](#state-and-action-cycle)
 - [Action guards](#action-guards)
 - [Gap queue and prioritization](#gap-queue-and-prioritization)
+- [Corpus-first network and delivery gate](#corpus-first-network-and-delivery-gate)
 - [Bounded parallel work](#bounded-parallel-work)
 - [Context and checkpoints](#context-and-checkpoints)
 - [Failure, budget, and stopping](#failure-budget-and-stopping)
@@ -75,6 +76,20 @@ Keep the queue small enough to inspect. Close a gap only when its acceptance
 criterion is met; otherwise mark it `blocked`, `deferred`, or `unresolved` with a
 reason. New evidence may reopen a closed gap.
 
+## Corpus-first network and delivery gate
+
+For a compound research/acquisition/Zotero request, use
+[delivery-handoff.md](delivery-handoff.md) before fan-out. Snapshot the existing
+Zotero corpus read-only, merge it into [KnowledgeNetwork/v1](knowledge-network.md),
+and enqueue gaps derived from missing, conflicting, or low-confidence relations.
+Validate one golden bundle before parallel acquisition or note generation.
+
+Research coverage and requested delivery are separate gates. A completed research
+gap cannot close an unperformed attachment, note, collection-membership, or
+readback row. When two independent paths for a required operation fail and none
+succeeds, terminate that operation as `blocked_capability` and preserve the
+evidence in the handoff.
+
 ## Bounded parallel work
 
 Parallelize independent gaps or independent retrieval routes, not several agents
@@ -91,6 +106,9 @@ Merge centrally. Deduplicate underlying studies and artifacts, reconcile version
 and preserve disagreements. One failed branch does not discard successful branches,
 but the affected gap remains unresolved. Concurrency is a throughput choice, not
 independent confirmation.
+
+Worker cards may propose network changes, but only the controller merges nodes,
+relations, gaps, or change-history records and refreshes the snapshot digest.
 
 ## Context and checkpoints
 

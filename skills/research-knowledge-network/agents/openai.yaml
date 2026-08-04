@@ -1,0 +1,4 @@
+interface:
+  display_name: "Research Knowledge Network"
+  short_description: "Build auditable evidence chains"
+  default_prompt: "Use research-knowledge-network to record evidence cards, claims, and gap audits with local-only inputs."

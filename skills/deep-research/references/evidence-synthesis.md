@@ -8,6 +8,7 @@ Draft from structured evidence, then audit the prose. Do not draft a conclusion 
 - [Confidence gates](#confidence-gates)
 - [Conflict log](#conflict-log)
 - [Citation audit](#citation-audit)
+- [Network and delivery audit](#network-and-delivery-audit)
 - [Transparent stopping report](#transparent-stopping-report)
 - [Minimal run artifacts](#minimal-run-artifacts)
 
@@ -112,6 +113,20 @@ Before delivery:
 
 Never attach a related citation to repair an unsupported claim.
 
+## Network and delivery audit
+
+For Zotero-backed work, synthesize from the content-addressed
+[KnowledgeNetwork/v1](knowledge-network.md), not from an untracked list of papers.
+Every consequential network relation requires provenance and an exact locator;
+missing, conflicting, and low-confidence relations must derive explicit gap IDs.
+The final citation audit must match the network snapshot referenced by
+[ResearchHandoff/v1](delivery-handoff.md).
+
+Audit research completion and requested delivery separately. A valid paper claim
+does not prove that its main text, note, collection membership, or stored hash was
+delivered. Use the per-item completion matrix, and report partial or
+`blocked_capability` rows without collapsing them into research uncertainty.
+
 ## Transparent stopping report
 
 Record:
@@ -170,3 +185,7 @@ These artifacts may remain in-memory, but the final answer must preserve enough
 of them to audit consequential claims. When durable workspace writes are
 authorized, use the versioned envelope, lifecycle, and validation gates in
 [run-state.md](run-state.md) instead of inventing an ad hoc checkpoint format.
+
+Compound research and delivery additionally use the versioned external artifacts
+in [delivery-handoff.md](delivery-handoff.md); these do not change the research
+ledger schema.

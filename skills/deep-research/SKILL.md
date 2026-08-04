@@ -1,6 +1,6 @@
 ---
 name: deep-research
-description: Conduct targeted, auditable multi-source research from high-confidence academic and official industry sources. Use for field mapping, technical-route comparison, literature review, current product/docs/source-code verification, evidence-conflict resolution, or consequential research/engineering decisions. Not for deep-reading one supplied paper or Zotero-only acquisition.
+description: Use when a task needs auditable multi-source research, field mapping, route comparison, or conflict resolution. Not for one-paper reading, Zotero curation, or knowledge-network maintenance.
 ---
 
 # Deep Research
@@ -13,11 +13,47 @@ Normalize terms; map globally; traverse `landscape -> branch -> bottleneck -> de
 
 Run `scope -> map -> enqueue gap -> discover -> inspect -> extract -> countercheck -> merge -> citation audit -> stop or continue`. Every action must close a named gap or improve a decision-critical claim. Apply the guards, bounded-parallel rules, failure handling, and untrusted-content boundary in [execution-loop.md](references/execution-loop.md).
 
+## Compound research and delivery preflight
+
+When one request combines research with acquisition, notes, or Zotero delivery,
+run the read-only preflight in [delivery-handoff.md](references/delivery-handoff.md)
+before retrieval fan-out. If Zotero is in scope, inventory the existing target
+corpus first, build a [KnowledgeNetwork/v1](references/knowledge-network.md)
+snapshot, and derive new searches from missing, conflicting, or low-confidence
+network edges. Do not treat an empty web search as proof that the existing corpus
+is complete.
+
+Classify papers before deep reading:
+
+- **Tier A:** decision-critical. Send to `$learn-from-papers` and require its
+  paper-card, evidence-ledger, and passed locator-audit references.
+- **Tier B:** supporting or benchmark evidence. Inspect full text to evidence
+  depth and retain exact locators for every used claim.
+- **Tier C:** orientation or discovery. Metadata, abstract, review, or snippet
+  evidence cannot carry a decisive claim.
+
+Before parallel acquisition or note generation, complete and validate one golden
+bundle end to end: identity/version, lawful attachment role, reading tier,
+structured note, exact target, dry-run, and supported readback. Fan-out inherits
+that contract; it does not weaken it.
+
+Keep `research_status` and `delivery_status` separate. Research may be complete
+while acquisition or Zotero delivery is partial. For each required acquisition
+or Zotero operation, record independent support paths and evidence. If two paths
+fail or are unavailable and no path succeeds, mark the operation and aggregate
+delivery `blocked_capability`; do not manufacture a duplicate or claim delivery
+completion.
+
 ## Evidence gates
 
 Maintain the registry, atomic claim/evidence ledger, conflict log, locators, and search trail from [source-routing.md](references/source-routing.md) and [evidence-synthesis.md](references/evidence-synthesis.md).
 
 When the user authorizes a durable workspace, use the deterministic ledger in [run-state.md](references/run-state.md) to checkpoint and validate the run. Otherwise keep equivalent temporary state and do not create persistent artifacts. The ledger records research; it never performs web requests, invokes models, or makes source content executable.
+
+For a compound request, materialize a private `ResearchHandoff/v1` even when the
+research ledger itself remains temporary. Validate it with
+`scripts/validate_research_handoff.py` before calling research or delivery
+complete.
 
 Use reviews/textbooks to orient and primary full text for decisive academic claims; applicable versioned standards/official references for norms; exact releases/full commits, source/tests, and authorized runtime evidence for implementation. Issues, roadmaps, snippets, abstracts, and AI summaries are discovery only.
 
@@ -34,5 +70,11 @@ Stop targeted work only when promised coverage is met; every consequential claim
 Lead with the bounded answer. Deliver coverage, map/deep branches, route comparison, registry/ledger, conflicts, gaps, and the next highest-information check. Keep confidence dimensions separate; a hard-gate failure may dominate.
 
 `$deep-research` owns cross-source synthesis. Hand one paper at a time to `$learn-from-papers`. Use `$curate-research-to-zotero` only for requested acquisition/preservation, passing reviewed identity, version, provenance, and exact target. Acquisition never authorizes writes; require explicit target/batch approval and readback.
+
+The handoff must preserve the knowledge-network digest, requested-item completion
+matrix, attachment roles, and immutable CurationBatch manifest hashes. A
+supplement is `supplement`, never `main_text`. Public outputs may summarize the
+network but must not contain private Zotero identifiers, local paths, notes, PDFs,
+or unredacted handoff manifests.
 
 [research-basis.md](references/research-basis.md): maintenance/audit only.

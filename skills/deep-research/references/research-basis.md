@@ -119,3 +119,55 @@ This reference records the methodological basis for maintaining the skill. Repor
       multi-source coverage, conflict, version, and claim-level evidence gates.
 
 Treat the complete workflow as an evidence-informed design requiring forward tests, not as a formally proven optimal research algorithm.
+
+## High-quality systems and split-skill decomposition evidence
+
+23. llm-for-zotero — [GitHub](https://github.com/yilewang/llm-for-zotero), [AGPL License](https://github.com/yilewang/llm-for-zotero/blob/main/LICENSE), [official README](https://github.com/yilewang/llm-for-zotero/blob/main/README.md)
+    - Clean-room idea taken: corpus-wide agent mode, grounded citations, durable evidence cache, and coverage frontier visibility.
+    - Constraint: AGPL-3.0 in public repository, so this repo does not copy implementation or prompts.
+
+24. Microsoft GraphRAG — [repository](https://github.com/microsoft/graphrag), [technical docs](https://microsoft.github.io/graphrag/), [paper](https://arxiv.org/abs/2404.02821)
+    - Clean-room idea taken: explicit `document / text-unit / entity / relation / claim / community` separation, stable IDs, local-global retrieval, and incremental indexing.
+    - Constraint: does not prescribe domain-specific conflict semantics or implicit-gap warrants.
+
+25. OpenScholar — [official website](https://open-scholar.github.io/), [GitHub](https://github.com/akariasai/openscholar), [Nature](https://www.nature.com/articles/s41586-025-10072-4), [license](https://github.com/akariasai/openscholar/blob/main/LICENSE)
+    - Clean-room idea taken: full-text retrieval, citation-grounded synthesis, and self-feedback quality checks.
+    - Constraint: benchmark-oriented claims need adaptation before procedural adoption; license and API dependencies checked before merge.
+
+26. PaperQA2 — [GitHub](https://github.com/Future-House/paper-qa), [license](https://github.com/Future-House/paper-qa/blob/main/LICENSE)
+    - Clean-room idea taken: full-text QA with explicit citation pointers and retraction-aware pipeline.
+    - Constraint: this skill treats PaperQA2 as a component pattern, not a full control loop.
+
+27. STORM — [GitHub](https://github.com/stanford-oval/storm), [arXiv](https://arxiv.org/abs/2402.14207)
+    - Clean-room idea taken: multi-perspective question generation and collaborative decomposition of long technical questions.
+    - Constraint: generic knowledge curation emphasis is strong, but evidence graph persistence and gap gating remain external concerns.
+
+28. HippoRAG — [GitHub](https://github.com/emory-irl-lab/HippoRAG), [license](https://github.com/emory-irl-lab/HippoRAG/blob/main/LICENSE)
+    - Clean-room idea taken: hybrid graph + retrieval, PageRank-style ranking, incremental updates.
+    - Constraint: only retrieval/re-ranking concepts are adopted, with no direct dependence on its code.
+
+29. ORKG — [official docs](https://www.orkg.org/), [schema docs](https://www.orkg.org/academy), [paper](https://arxiv.org/abs/2208.03366)
+    - Clean-room idea taken: semantic contribution objects and comparison-centered knowledge modeling.
+    - Constraint: licensing and deployment model depend on the active ORKG deployment target; design is adapted per endpoint.
+
+30. GAPMAP — [arXiv](https://arxiv.org/abs/2510.25055)
+    - Clean-room idea taken: explicit gap buckets, implicit-gap hypotheses, and Toulmin-style abductive scaffolding.
+    - Constraint: preprint status means no production-grade implementation guarantee.
+
+31. RAGA — [arXiv](https://arxiv.org/abs/2605.17072)
+    - Clean-room idea taken: Read-Search-Verify-Construct loop and graph-CRUD consistency constraints.
+    - Constraint: early-stage evidence with limited operational maturity.
+
+32. zotero-mcp — [GitHub](https://github.com/54yyyu/zotero-mcp), [license](https://github.com/54yyyu/zotero-mcp/blob/main/LICENSE)
+    - Clean-room idea taken: semantic retrieval, PDF/annotation transport, and local cache design around Zotero.
+    - Constraint: strong transport/retrieval layer only; not a complete evidence-gap orchestration design.
+
+33. SeerAI — [GitHub](https://github.com/dralkh/seerai), [license](https://github.com/dralkh/seerai/blob/main/LICENSE)
+    - Clean-room idea taken: local-first Zotero + systematic-review UX for reproducible curation.
+    - Constraint: no direct evidence-network semantics or gap derivation logic.
+
+34. K-Dense scientific skills — [GitHub](https://github.com/K-Dense-AI/scientific-agent-skills), [hypothesis-generation section](https://github.com/K-Dense-AI/scientific-agent-skills/blob/main/README.md#scientific-hypothesis-generation-skill), [license](https://github.com/K-Dense-AI/scientific-agent-skills/blob/main/LICENSE)
+    - Clean-room idea taken: rival explanations, falsification controls, structured hypotheses.
+    - Constraint: not a full library workflow by itself; selected hypothesis-patterns are composable with other skills.
+
+No single reviewed system provides end-to-end, auditable, non-overlapping separation of (1) global deep-research orchestration, (2) single-paper reconstruction, (3) evidence-network governance, and (4) Zotero curation/readback.
