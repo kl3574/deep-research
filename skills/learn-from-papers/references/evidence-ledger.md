@@ -12,7 +12,7 @@ Use the smallest ledger that can make consequential conclusions auditable. Keep 
 | Evidence | Faithful paraphrase or a necessary short excerpt |
 | Locator | Page and section plus figure/table/equation/theorem/appendix when available |
 | Conditions | Population, regime, assumptions, comparison, units, and exclusions |
-| Relation | `supports`, `contradicts`, `qualifies`, or `not-tested` |
+| Relation | `supports`, `contradicts`, `qualifies`, or `not_tested` |
 | Strength | `direct`, `indirect`, `mixed`, `contrary`, or `missing` |
 | Confidence | `high`, `medium`, or `low`, with a brief reason |
 | Verification | Existence, entailment, and locator check status |

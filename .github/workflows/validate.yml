@@ -51,6 +51,12 @@ jobs:
           -s skills/curate-research-to-zotero/scripts
           -p 'test_*.py'
 
+      - name: Run research-ledger tests
+        run: >-
+          python -m unittest discover
+          -s skills/deep-research/scripts
+          -p 'test_*.py'
+
       - name: Run reproducibility-harness tests
         run: >-
           python -m unittest discover

@@ -2,11 +2,21 @@
 
 Draft from structured evidence, then audit the prose. Do not draft a conclusion first and hunt for citations that resemble it.
 
+## Contents
+
+- [Claim/evidence matrix](#claimevidence-matrix)
+- [Confidence gates](#confidence-gates)
+- [Conflict log](#conflict-log)
+- [Citation audit](#citation-audit)
+- [Transparent stopping report](#transparent-stopping-report)
+- [Minimal run artifacts](#minimal-run-artifacts)
+
 ## Claim/evidence matrix
 
 Keep one row per atomic claim-source relation:
 
 ```text
+relation_id
 claim_id
 claim_text
 claim_type
@@ -157,4 +167,6 @@ source_record:
 ```
 
 These artifacts may remain in-memory, but the final answer must preserve enough
-of them to audit consequential claims.
+of them to audit consequential claims. When durable workspace writes are
+authorized, use the versioned envelope, lifecycle, and validation gates in
+[run-state.md](run-state.md) instead of inventing an ad hoc checkpoint format.

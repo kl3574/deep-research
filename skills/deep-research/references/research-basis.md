@@ -2,6 +2,15 @@
 
 This reference records the methodological basis for maintaining the skill. Reporting guidance does not itself certify research quality, and methods developed for one field require adaptation elsewhere.
 
+## Contents
+
+- [Mapping, decomposition, and technical routes](#mapping-decomposition-and-technical-routes)
+- [Search and synthesis](#search-and-synthesis)
+- [Academic quality and claim-level confidence](#academic-quality-and-claim-level-confidence)
+- [Technical provenance](#technical-provenance)
+- [Agent evidence controls](#agent-evidence-controls)
+- [Audited implementation patterns](#audited-implementation-patterns)
+
 ## Mapping, decomposition, and technical routes
 
 1. Petersen, K., Vakkalanka, S., & Kuzniarz, L. (2015). “Guidelines for conducting systematic mapping studies in software engineering.” *Information and Software Technology*, 64, 1–18. DOI: [10.1016/j.infsof.2015.03.007](https://doi.org/10.1016/j.infsof.2015.03.007)
@@ -81,5 +90,32 @@ This reference records the methodological basis for maintaining the skill. Repor
 
 19. Min, S., et al. (2023). “FActScore.” *EMNLP 2023*. DOI: [10.18653/v1/2023.emnlp-main.741](https://doi.org/10.18653/v1/2023.emnlp-main.741)
     - Supports atomic claim decomposition for fine-grained evidence checking.
+
+## Audited implementation patterns
+
+20. Jina AI. `node-DeepResearch` at the fork merge-base
+    [`f1b9b2f55e01f7158900da125f85957bbfbd0019`](https://github.com/jina-ai/node-DeepResearch/tree/f1b9b2f55e01f7158900da125f85957bbfbd0019).
+    - Motivates an explicit search/read/reflect action loop, gap queue, bounded
+      retrieval, structured state, and action/token budgets.
+    - Its model-chosen actions and evaluators are implementation patterns, not
+      evidence that a claim, citation, or stopping decision passed this skill's
+      independent gates.
+
+21. Matt Pocock's experimental fork of `node-DeepResearch` at
+    [`69f345ef8ef28f725aaa778177f6be181801411e`](https://github.com/mattpocock/node-DeepResearch/tree/69f345ef8ef28f725aaa778177f6be181801411e).
+    - The six-commit delta experiments with an `AgentRunner` refactor, prompt
+      composition, failure-path control, and forced terminal handling. At the
+      2026-08-04 audit it was 6 commits ahead and 308 behind current upstream, so
+      it is treated as a historical experiment rather than a current release.
+    - This Apache-2.0 TypeScript fork is not a Codex `SKILL.md`; no source code or
+      prompt text is copied here. Forced certainty/answers, first-answer bypass,
+      optional attribution, model-only judging, and overwrite-style shared debug
+      state observed in this snapshot are deliberately not adopted.
+
+22. Matt Pocock. [`research` skill](https://github.com/mattpocock/skills/blob/2ab958093e83e0ec752e6c1c5932da465bf23e0c/skills/engineering/research/SKILL.md).
+    - Supports a compact primary-source-oriented research handoff with explicit
+      citations.
+    - Its brief background-research contract does not replace this skill's
+      multi-source coverage, conflict, version, and claim-level evidence gates.
 
 Treat the complete workflow as an evidence-informed design requiring forward tests, not as a formally proven optimal research algorithm.
