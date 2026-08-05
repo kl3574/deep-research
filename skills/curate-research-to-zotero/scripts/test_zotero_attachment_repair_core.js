@@ -25,8 +25,8 @@ const target = {
   library_id: 2,
   library_name: "group",
   local_collection_id: 40,
-  collection_key: "TARGET01",
-  collection_path: [{key: "ROOT0001", name: "root"}, {key: "TARGET01", name: "target"}],
+  collection_key: "COLL0001",
+  collection_path: [{key: "ROOT0001", name: "root"}, {key: "COLL0001", name: "target"}],
   require_library_editable: true,
   require_files_editable: true,
 };
@@ -46,7 +46,7 @@ test("target mismatch", () => {
 test("parent version drift", () => {
   const expected = {
     key: "PARENT01", version: 3, item_type: "journalArticle", doi: "10/x",
-    title: "paper", collection_key: "TARGET01",
+    title: "paper", collection_key: "COLL0001",
   };
   throwsWith(
     () => core.verifyParent(expected, {...expected, version: 4, in_target_collection: true}),
@@ -75,27 +75,52 @@ test("duplicate live key", () => {
   );
 });
 
-test("same hash is idempotent no-op and reports duplicates", () => {
+test("one same hash is an idempotent no-op", () => {
+  const first = {
+    key: "ATTACH01", version: 1, content_type: "application/pdf", link_mode: "imported_file",
+    readable_pdf: true, sha256: "sha256:a",
+  };
+  const result = core.classifyLiveAttachments(
+    "attach_missing_pdf", [], [first], "sha256:a",
+  );
+  assert.strictEqual(result.decision, "no_op_same_hash");
+  assert.strictEqual(result.duplicateCount, 0);
+});
+
+test("multiple same-hash PDFs are a conflict", () => {
   const first = {
     key: "ATTACH01", version: 1, content_type: "application/pdf", link_mode: "imported_file",
     readable_pdf: true, sha256: "sha256:a",
   };
   const second = {...first, key: "ATTACH02"};
-  const result = core.classifyLiveAttachments(
-    "attach_missing_pdf", [], [first, second], "sha256:a",
+  throwsWith(
+    () => core.classifyLiveAttachments(
+      "attach_missing_pdf", [], [first, second], "sha256:a",
+    ),
+    "multiple readable PDFs with the source hash",
   );
-  assert.strictEqual(result.decision, "no_op_same_hash");
-  assert.strictEqual(result.duplicateCount, 1);
 });
 
-test("partial transaction is explicit", () => {
+test("single import outcome requires positive evidence to claim commit", () => {
   assert.strictEqual(
-    core.classifyTransactionOutcome(
+    core.classifyImportOutcome(["PARENT01"], {PARENT01: true}, false),
+    "committed",
+  );
+  assert.strictEqual(
+    core.classifyImportOutcome(["PARENT01"], {PARENT01: false}, false),
+    "unknown",
+  );
+  assert.strictEqual(
+    core.classifyImportOutcome(["PARENT01"], {PARENT01: true}, true),
+    "unknown",
+  );
+  throwsWith(
+    () => core.classifyImportOutcome(
       ["PARENT01", "PARENT02"],
       {PARENT01: true, PARENT02: false},
       false,
     ),
-    "partial_commit",
+    "exactly one planned parent",
   );
 });
 

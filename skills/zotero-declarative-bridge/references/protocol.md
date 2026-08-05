@@ -34,10 +34,21 @@ Primary references:
   manifest digest and complete live-state digest. Apply repeats preflight both
   before and inside the database transaction.
 - Request bodies are bounded at 8 MiB, notes at 1 MiB, PDFs at 256 MiB, entries
-  at 100, and operations at three per parent.
+  at 100, and operations at four per parent.
 - Schemas reject unknown fields. Operation names are an enum, not dispatchable
   JavaScript names. No `eval`, `Function`, module path, SQL, delete, or arbitrary
-  metadata operation exists.
+  metadata operation exists. The only parent-field operation is the literal
+  `ensure_parent_short_title`; callers cannot supply a field name.
+
+## Stable installation boundary
+
+The stable skill intentionally has no source-proxy installer. It never changes
+`extensions.startupScanScopes`, `extensions.autoDisableScopes`,
+`extensions.enabledScopes`, `extensions.lastApp*`, `extensions.json`, or the
+Zotero profile database. Install the reviewed, hash-bound XPI through Zotero's
+visible Plugins action. A source proxy or profile preference edit performed by
+separate developer tooling is outside this skill's supported and tested trust
+boundary.
 
 ## Manifest
 
@@ -49,12 +60,30 @@ Primary references:
   and SHA-256 of that identity object;
 - complete child-note or attachment baselines for the operation that needs it;
 - exact old/new note hashes or local PDF path/size/magic/hash;
+- for `shortTitle`, redundant exact library ID, parent key/version, expected old
+  value, and non-empty reviewed new value;
 - SHA-256 of canonical JSON for the whole manifest.
 
 Idempotence is state-based. A rerun is `no_changes` only when every requested
 state already matches exactly. If only part of a prior transaction is present,
 the old version/baseline normally conflicts and a fresh reviewed manifest is
 required.
+Readback also enforces target membership independently of operation
+idempotence: an entry without `ensure_collection_membership` must still match
+its bound `expected_target_membership`, while a satisfied membership operation
+must observe the parent present in the target collection.
+
+Transaction profiles are derived rather than declared. Collection membership,
+parent `shortTitle`, and child-note operations may share one `db_atomic`
+manifest. PDF operations cannot share a manifest with those database-only
+operations. A PDF-only manifest may describe already-satisfied rows for
+readback, but preview refuses more than one live `needs_write` PDF. Compile a
+multi-row repair source with one reviewed `--parent-key` at a time. The single
+PDF import calls Zotero's public `importFromFile()` without a bridge-owned outer
+transaction because that API owns its own database and storage transaction.
+An attachment failure is `unknown` until readback proves the result; only a
+failed `db_atomic` write whose state digest equals its preflight baseline may be
+reported as `rolled_back`.
 
 ## Commands
 
@@ -83,10 +112,28 @@ Compile collection membership for existing parents, again using only GET:
 python scripts/zotero_declarative_bridge.py compile-membership \
   /absolute/zotero-membership-transaction.json \
   --transaction-id doe-membership-20260805 \
-  --group-id 6588343 --library-id 2 --library-name wolfs \
-  --local-collection-id 40 --collection-key KHQKFIWX \
-  --parent-key ABCD1234 --parent-key EFGH5678
+  --group-id 1234567 --library-id 2 --library-name 'Example Research Library' \
+  --local-collection-id 40 --collection-key COLL0001 \
+  --parent-key PARENT01 --parent-key PARENT02
 ```
+
+Compile one reviewed parent `shortTitle`. The compiler first reads the live
+parent and refuses collection, version, or old-value drift:
+
+```bash
+python scripts/zotero_declarative_bridge.py compile-short-title \
+  /absolute/zotero-short-title-transaction.json \
+  --transaction-id doe-short-title-20260805 \
+  --group-id 1234567 --library-id 2 --library-name 'Example Research Library' \
+  --local-collection-id 40 --collection-key COLL0001 \
+  --parent-key PARENT01 --expected-parent-version 17 \
+  --expected-old-value "" --new-short-title "Reviewed short title"
+```
+
+An already-applied manifest remains idempotent even though Zotero has advanced
+the item version: exact equality with `new_short_title` is `satisfied`. Any
+non-matching value still requires the bound old value and version and otherwise
+fails closed as drift.
 
 Execute after separate plugin installation:
 
@@ -105,6 +152,14 @@ python scripts/zotero_declarative_bridge.py readback /absolute/zotero-transactio
   --receipt /absolute/readback-receipt.json
 ```
 
+A schema-valid structured HTTP failure for `preview`, `apply`, or `readback`
+is evidence and is therefore written to the requested receipt with exclusive
+create semantics and mode `0600`. The command exits nonzero and stderr contains
+only `error_code`, `commit_state`, and the receipt path; private inspection
+state, item keys, source paths, and hashes remain inside the receipt. Treat
+`unknown` and `committed_unverified` as requiring a fresh authenticated
+readback. `rolled_back` is evidence that the post-failure database state digest
+matched the bound preflight baseline, not evidence that no write was attempted.
+
 All manifests and receipts contain private Zotero state. Keep them outside the
 public repository in a user-only directory.
-

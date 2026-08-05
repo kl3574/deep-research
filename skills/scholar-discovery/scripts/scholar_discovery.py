@@ -960,13 +960,11 @@ def _expected_query_ids(request: dict[str, Any], max_queries: int | None = None)
     routes = request["routes"]
     provider_order = request["routes"]["automatic"]
     query_ids: set[str] = set()
+    autonomous_count = 0
 
     for seed_index, seed in enumerate(request["query_seeds"], start=1):
-        route_specs = [(provider, DOCUMENTED_EXECUTION) for provider in provider_order]
-        if routes["google_scholar"] != "disabled":
-            route_specs.append((GOOGLE_PROVIDER, SCHOLAR_EXECUTION))
-        for provider, _ in route_specs:
-            if max_queries is not None and len(query_ids) >= max_queries:
+        for provider in provider_order:
+            if max_queries is not None and autonomous_count >= max_queries:
                 break
             identity = {
                 "request_digest": request_digest,
@@ -976,9 +974,17 @@ def _expected_query_ids(request: dict[str, Any], max_queries: int | None = None)
                 "query": seed["query"],
             }
             query_ids.add("query-" + sha256_json(identity)[:16])
+            autonomous_count += 1
 
-        if max_queries is not None and len(query_ids) >= max_queries:
-            break
+        if routes["google_scholar"] != "disabled":
+            identity = {
+                "request_digest": request_digest,
+                "seed_index": seed_index,
+                "objective": seed["objective"],
+                "provider": GOOGLE_PROVIDER,
+                "query": seed["query"],
+            }
+            query_ids.add("query-" + sha256_json(identity)[:16])
 
     return query_ids
 
@@ -989,14 +995,12 @@ def _build_plan(request: dict[str, Any]) -> dict[str, Any]:
     provider_order = request["routes"]["automatic"]
     max_queries = request["budgets"]["max_queries"]
     queries: list[dict[str, Any]] = []
+    autonomous_count = 0
+    autonomous_covered: set[int] = set()
 
     for seed_index, seed in enumerate(request["query_seeds"], start=1):
-        route_specs = [(provider, DOCUMENTED_EXECUTION) for provider in provider_order]
-        if routes["google_scholar"] != "disabled":
-            route_specs.append((GOOGLE_PROVIDER, SCHOLAR_EXECUTION))
-
-        for provider, execution in route_specs:
-            if len(queries) >= max_queries:
+        for provider in provider_order:
+            if autonomous_count >= max_queries:
                 break
             identity = {
                 "request_digest": request_digest,
@@ -1010,21 +1014,40 @@ def _build_plan(request: dict[str, Any]) -> dict[str, Any]:
                 "seed_index": seed_index,
                 "objective": seed["objective"],
                 "provider": provider,
-                "execution": execution,
+                "execution": DOCUMENTED_EXECUTION,
                 "query": seed["query"],
                 "filters": request["metadata_filters"],
             }
-            if provider == GOOGLE_PROVIDER:
-                row["search_url"] = scholar_url(seed["query"], request["metadata_filters"])
-                row["policy"] = routes["google_scholar"]
-            else:
-                row["endpoint_hint"] = ENDPOINT_HINTS[provider]
+            row["endpoint_hint"] = ENDPOINT_HINTS[provider]
             queries.append(row)
+            autonomous_count += 1
+            autonomous_covered.add(seed_index)
 
-        if len(queries) >= max_queries:
-            break
+        if routes["google_scholar"] != "disabled":
+            identity = {
+                "request_digest": request_digest,
+                "seed_index": seed_index,
+                "objective": seed["objective"],
+                "provider": GOOGLE_PROVIDER,
+                "query": seed["query"],
+            }
+            queries.append(
+                {
+                    "query_id": "query-" + sha256_json(identity)[:16],
+                    "seed_index": seed_index,
+                    "objective": seed["objective"],
+                    "provider": GOOGLE_PROVIDER,
+                    "execution": SCHOLAR_EXECUTION,
+                    "query": seed["query"],
+                    "filters": request["metadata_filters"],
+                    "search_url": scholar_url(seed["query"], request["metadata_filters"]),
+                    "policy": routes["google_scholar"],
+                }
+            )
 
-    covered = {query["seed_index"] for query in queries}
+    missing_autonomous_seeds = (
+        set(range(1, len(request["query_seeds"]) + 1)) - autonomous_covered
+    )
     return {
         "schema": PLAN_SCHEMA,
         "request_id": request["request_id"],
@@ -1035,12 +1058,8 @@ def _build_plan(request: dict[str, Any]) -> dict[str, Any]:
         "queries": queries,
         "truncation": {
             "max_queries": max_queries,
-            "query_budget_reached": bool(
-                set(range(1, len(request["query_seeds"]) + 1)) - covered
-            ),
-            "unplanned_seed_indices": sorted(
-                set(range(1, len(request["query_seeds"]) + 1)) - covered
-            ),
+            "query_budget_reached": bool(missing_autonomous_seeds),
+            "unplanned_seed_indices": sorted(missing_autonomous_seeds),
         },
     }
 

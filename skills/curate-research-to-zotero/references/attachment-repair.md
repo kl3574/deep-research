@@ -30,12 +30,12 @@ python scripts/zotero_attachment_repair.py generate \
   /absolute/zotero_baseline.json \
   /absolute/repair_manifest.json \
   /absolute/zotero_attachment_repair_manifest.json \
-  --group-id 6588343 \
+  --group-id 1234567 \
   --library-id 2 \
-  --library-name wolfs \
+  --library-name 'Example Research Library' \
   --local-collection-id 40 \
-  --collection-key KHQKFIWX \
-  --collection-path '形貌仿真/形貌反问题/DoE采样'
+  --collection-key COLL0001 \
+  --collection-path 'Example/Research/DoE'
 
 python scripts/zotero_attachment_repair.py validate \
   /absolute/zotero_attachment_repair_manifest.json
@@ -93,16 +93,22 @@ python scripts/zotero_attachment_repair.py render \
 
 The Desktop runner requires exact selected-target identity, group/library/file
 editability, unchanged parent identity/version/membership, unchanged baseline
-attachments, and unchanged source bytes before any write. It preflights every
-entry, repeats preflight in the transaction, then calls Zotero's official
-`Zotero.Attachments.importFromFile()` for the exact parent. It does not delete,
-rename, relink, or overwrite existing attachments. A readable existing PDF with
-the same hash is an idempotent no-op; a different readable PDF is a conflict.
+attachments, and unchanged source bytes before any write. Preview may inspect a
+batch, but fallback apply accepts exactly one parent entry and can import at most
+one attachment. It repeats preflight immediately before calling Zotero's public
+`Zotero.Attachments.importFromFile()` for that exact parent. It deliberately
+does not wrap that API in `Zotero.DB.executeTransaction()`: `importFromFile()`
+owns its transaction. The fallback does not delete, rename, relink, or overwrite
+existing attachments. Exactly one readable existing PDF with the same hash is
+an idempotent no-op; multiple same-hash PDFs or any different readable PDF are
+conflicts.
 
-Committed readback verifies attachment parent, content type, stored size and
-SHA-256, effective collection inheritance through the exact parent, and absence
-of direct child collection membership. A transaction or post-commit failure is
-followed by parent/hash inspection and is reported as rolled back, partial,
-committed, or unknown rather than assuming atomic success. The report contains
+Immediate readback verifies the exact attachment key and parent, content type,
+stored size and SHA-256, effective collection inheritance through the exact
+parent, absence of direct child collection membership, and a full live inventory
+containing exactly one matching readable PDF. If import or readback fails, a
+second parent/hash inspection reports `committed` only with that positive
+single-attachment evidence; otherwise commit state is `unknown`, never an
+assumed rollback. Do not blindly rerun an `unknown` result. The report contains
 no PDF content or credentials. Local committed readback is not evidence of
 cloud synchronization.

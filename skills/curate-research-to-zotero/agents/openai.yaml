@@ -1,4 +1,4 @@
 interface:
   display_name: "Curate Research to Zotero"
   short_description: "Verify research files and safely sync Zotero"
-  default_prompt: "Use $curate-research-to-zotero to verify accepted research artifacts, deterministically project any PaperUnderstandingNoteInput/v1 handoff to a private PaperKnowledgeNote/v2 child-note HTML, preserve parent bibliographic title and shortTitle fields, preview the exact Zotero target, and synchronize only after authorization and readback gates pass."
+  default_prompt: "Use $curate-research-to-zotero to verify accepted research artifacts, deterministically project any PaperUnderstandingNoteInput/v1 handoff to private PaperKnowledgeNote/v2 child-note HTML, route only existing-parent collection membership, child-note creation, child-note update, and existing-parent missing-PDF attachment through the reviewed four-operation bridge, treat PaperKnowledgeNote/v2 as never authorizing bibliographic shortTitle, permit shortTitle changes only through an independently reviewed and version-bound sealed metadata manifest, preview the exact Zotero target, and synchronize only after authorization and readback gates pass."

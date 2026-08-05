@@ -1,12 +1,13 @@
 {
   "manifest_version": 2,
   "name": "Zotero Declarative Bridge",
-  "version": "0.1.1",
+  "version": "0.1.5",
   "description": "Constrained, capability-bound local transactions for reviewed Zotero manifests.",
   "author": "deep-research",
   "applications": {
     "zotero": {
       "id": "zotero-declarative-bridge@deep-research.local",
+      "update_url": "https://raw.githubusercontent.com/kl3574/deep-research/main/skills/zotero-declarative-bridge/assets/zotero-plugin/updates.json",
       "strict_min_version": "9.0",
       "strict_max_version": "9.0.*"
     }

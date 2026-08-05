@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import hmac
 import importlib.util
+import io
 import json
 import stat
 import subprocess
@@ -25,16 +27,6 @@ PLUGIN_ROOT = HERE.parent / "assets" / "zotero-plugin"
 
 def load_builder():
     spec = importlib.util.spec_from_file_location("bridge_build_xpi", HERE / "build_xpi.py")
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader
-    spec.loader.exec_module(module)
-    return module
-
-
-def load_packed_installer():
-    spec = importlib.util.spec_from_file_location(
-        "bridge_install_packed_xpi", HERE / "install_packed_xpi.py"
-    )
     module = importlib.util.module_from_spec(spec)
     assert spec.loader
     spec.loader.exec_module(module)
@@ -84,42 +76,142 @@ def unsigned_manifest() -> dict:
 
 
 class BridgeTests(unittest.TestCase):
-    def test_zotero_9_runtime_contract_and_packed_profile_shape(self) -> None:
-        builder = load_builder()
-        installer = load_packed_installer()
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            zotero_root = root / "zotero"
-            profile = zotero_root / "fixture.default"
-            profile.mkdir(parents=True)
-            (zotero_root / "profiles.ini").write_text(
-                "[Profile0]\nName=default\nIsRelative=1\nPath=fixture.default\nDefault=1\n",
-                encoding="utf-8",
-            )
-            (profile / "compatibility.ini").write_text(
-                "[Compatibility]\nLastVersion=9.0.6_fixture/build\n",
-                encoding="utf-8",
-            )
-            xpi = root / "bridge.xpi"
-            builder.build(xpi, PLUGIN_ROOT)
-            receipt = root / "install-receipt.json"
-            with mock.patch.object(installer, "zotero_is_running", return_value=False):
-                result = installer.install_packed_xpi(xpi, profile, receipt)
-            destination = profile / "extensions" / f"{installer.PLUGIN_ID}.xpi"
-            self.assertEqual(destination.read_bytes(), xpi.read_bytes())
-            self.assertEqual(result["destination"], str(destination))
-            self.assertEqual(stat.S_IMODE(receipt.stat().st_mode), 0o600)
-            self.assertFalse((profile / "extensions.json").exists())
-            self.assertFalse(any(profile.glob("*.sqlite")))
-
     def test_manifest_and_bootstrap_expose_zotero_9_diagnostics(self) -> None:
         manifest = json.loads((PLUGIN_ROOT / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["manifest_version"], 2)
-        self.assertEqual(manifest["version"], "0.1.1")
+        self.assertEqual(manifest["version"], "0.1.5")
+        self.assertEqual(
+            manifest["applications"]["zotero"]["update_url"],
+            (
+                "https://raw.githubusercontent.com/kl3574/deep-research/main/skills/"
+                "zotero-declarative-bridge/assets/zotero-plugin/updates.json"
+            ),
+        )
         self.assertEqual(manifest["applications"]["zotero"]["strict_max_version"], "9.0.*")
         bootstrap = (PLUGIN_ROOT / "bootstrap.js").read_text(encoding="utf-8")
         self.assertIn("unsupported Zotero runtime", bootstrap)
         self.assertIn("Zotero.logError(error)", bootstrap)
+        self.assertIn('row.live.parent.setField("shortTitle", operation.new_short_title)', bootstrap)
+        self.assertIn('"ensure_parent_short_title"', bootstrap)
+
+    def test_xpi_build_rejects_missing_zotero_update_url(self) -> None:
+        builder = load_builder()
+        with tempfile.TemporaryDirectory() as directory:
+            plugin_root = Path(directory) / "plugin"
+            plugin_root.mkdir()
+            for name in (*builder.FILES, "updates.json"):
+                (plugin_root / name).write_bytes((PLUGIN_ROOT / name).read_bytes())
+            manifest_path = plugin_root / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            del manifest["applications"]["zotero"]["update_url"]
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "update URL"):
+                builder.build(Path(directory) / "missing-update-url.xpi", plugin_root)
+
+    def test_xpi_build_rejects_wrong_zotero_update_url(self) -> None:
+        builder = load_builder()
+        with tempfile.TemporaryDirectory() as directory:
+            plugin_root = Path(directory) / "plugin"
+            plugin_root.mkdir()
+            for name in (*builder.FILES, "updates.json"):
+                (plugin_root / name).write_bytes((PLUGIN_ROOT / name).read_bytes())
+            manifest_path = plugin_root / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["applications"]["zotero"]["update_url"] = "https://example.invalid/updates.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "update URL"):
+                builder.build(Path(directory) / "wrong-update-url.xpi", plugin_root)
+
+    def test_xpi_build_rejects_duplicate_current_version(self) -> None:
+        builder = load_builder()
+        with tempfile.TemporaryDirectory() as directory:
+            plugin_root = Path(directory) / "plugin"
+            plugin_root.mkdir()
+            for name in (*builder.FILES, "updates.json"):
+                (plugin_root / name).write_bytes((PLUGIN_ROOT / name).read_bytes())
+            updates_path = plugin_root / "updates.json"
+            updates = json.loads(updates_path.read_text(encoding="utf-8"))
+            entries = updates["addons"][builder.PLUGIN_ID]["updates"]
+            entries.append(json.loads(json.dumps(entries[0])))
+            updates_path.write_text(json.dumps(updates), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "one current version"):
+                builder.build(Path(directory) / "duplicate-version.xpi", plugin_root)
+
+    def test_xpi_build_rejects_wrong_release_tag(self) -> None:
+        builder = load_builder()
+        with tempfile.TemporaryDirectory() as directory:
+            plugin_root = Path(directory) / "plugin"
+            plugin_root.mkdir()
+            for name in (*builder.FILES, "updates.json"):
+                (plugin_root / name).write_bytes((PLUGIN_ROOT / name).read_bytes())
+            updates_path = plugin_root / "updates.json"
+            updates = json.loads(updates_path.read_text(encoding="utf-8"))
+            entry = updates["addons"][builder.PLUGIN_ID]["updates"][0]
+            entry["update_link"] = entry["update_link"].replace("/v0.6.1/", "/v0.6.0/")
+            updates_path.write_text(json.dumps(updates), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "release tag and asset"):
+                builder.build(Path(directory) / "wrong-release-tag.xpi", plugin_root)
+
+    def test_xpi_build_rejects_wrong_release_asset(self) -> None:
+        builder = load_builder()
+        with tempfile.TemporaryDirectory() as directory:
+            plugin_root = Path(directory) / "plugin"
+            plugin_root.mkdir()
+            for name in (*builder.FILES, "updates.json"):
+                (plugin_root / name).write_bytes((PLUGIN_ROOT / name).read_bytes())
+            updates_path = plugin_root / "updates.json"
+            updates = json.loads(updates_path.read_text(encoding="utf-8"))
+            entry = updates["addons"][builder.PLUGIN_ID]["updates"][0]
+            entry["update_link"] = entry["update_link"].replace(
+                builder.XPI_FILENAME, "zotero-declarative-bridge-wrong.xpi"
+            )
+            updates_path.write_text(json.dumps(updates), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "release tag and asset"):
+                builder.build(Path(directory) / "wrong-release-asset.xpi", plugin_root)
+
+    def test_xpi_build_rejects_wrong_release_hash(self) -> None:
+        builder = load_builder()
+        with tempfile.TemporaryDirectory() as directory:
+            plugin_root = Path(directory) / "plugin"
+            plugin_root.mkdir()
+            for name in (*builder.FILES, "updates.json"):
+                (plugin_root / name).write_bytes((PLUGIN_ROOT / name).read_bytes())
+            updates_path = plugin_root / "updates.json"
+            updates = json.loads(updates_path.read_text(encoding="utf-8"))
+            updates["addons"][builder.PLUGIN_ID]["updates"][0]["update_hash"] = "sha256:" + "0" * 64
+            updates_path.write_text(json.dumps(updates), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "XPI hash"):
+                builder.build(Path(directory) / "wrong-release-hash.xpi", plugin_root)
+
+    def test_xpi_build_rejects_missing_updates_json(self) -> None:
+        builder = load_builder()
+        with tempfile.TemporaryDirectory() as directory:
+            plugin_root = Path(directory) / "plugin"
+            plugin_root.mkdir()
+            for name in builder.FILES:
+                (plugin_root / name).write_bytes((PLUGIN_ROOT / name).read_bytes())
+            with self.assertRaisesRegex(ValueError, "invalid external update manifest"):
+                builder.build(Path(directory) / "missing-updates.xpi", plugin_root)
+
+    def test_xpi_build_rejects_malformed_updates_json(self) -> None:
+        builder = load_builder()
+        with tempfile.TemporaryDirectory() as directory:
+            plugin_root = Path(directory) / "plugin"
+            plugin_root.mkdir()
+            for name in builder.FILES:
+                (plugin_root / name).write_bytes((PLUGIN_ROOT / name).read_bytes())
+            (plugin_root / "updates.json").write_text("{not-json", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "invalid external update manifest"):
+                builder.build(Path(directory) / "malformed-updates.xpi", plugin_root)
+
+    def test_stable_skill_excludes_security_sensitive_development_proxy(self) -> None:
+        self.assertFalse((HERE / "install_development_proxy.py").exists())
+        for path in (
+            HERE.parent / "SKILL.md",
+            HERE.parent / "references" / "install-uninstall.md",
+            HERE.parent / "references" / "protocol.md",
+        ):
+            self.assertNotIn("install_development_proxy.py", path.read_text(encoding="utf-8"))
 
     def test_manifest_seal_validate_and_unknown_field_rejection(self) -> None:
         sealed = bridge.seal_manifest(unsigned_manifest())
@@ -147,6 +239,26 @@ class BridgeTests(unittest.TestCase):
         manifest["entries"][0]["operations"][0]["new_html"] = "<h1>x</h1><script>bad()</script>"
         with self.assertRaisesRegex(bridge.BridgeError, "executable"):
             bridge.seal_manifest(manifest)
+
+    def test_pdf_and_database_operations_cannot_share_a_manifest(self) -> None:
+        pdf = b"%PDF-1.7\nfixture\n"
+        with tempfile.TemporaryDirectory() as directory:
+            pdf_path = Path(directory) / "paper.pdf"
+            pdf_path.write_bytes(pdf)
+            manifest = unsigned_manifest()
+            manifest["target"]["require_files_editable"] = True
+            manifest["entries"][0]["operations"].append(
+                {
+                    "type": "ensure_pdf_attachment",
+                    "source_path": str(pdf_path),
+                    "source_size_bytes": len(pdf),
+                    "source_sha256": "sha256:" + hashlib.sha256(pdf).hexdigest(),
+                    "source_magic": "%PDF-",
+                    "expected_attachments": [],
+                }
+            )
+            with self.assertRaisesRegex(bridge.BridgeError, "cannot share"):
+                bridge.seal_manifest(manifest)
 
     def test_capability_requires_private_regular_literal_loopback_file(self) -> None:
         capability = {
@@ -194,7 +306,7 @@ class BridgeTests(unittest.TestCase):
                         "schema": bridge.RESPONSE_SCHEMA,
                         "status": "available",
                         "action": "probe",
-                        "request_id": "x",
+                        "request_id": captured["body"]["request_id"],
                         "result": {"status": "available"},
                         "error": None,
                     }
@@ -215,6 +327,95 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(mac, expected)
         self.assertEqual(captured["content_type"], "application/octet-stream")
         self.assertNotIn("capability_token", captured["body"])
+
+    def test_cli_persists_structured_http_errors_without_stderr_leaks(self) -> None:
+        capability = {
+            "endpoint": "http://127.0.0.1:23119" + bridge.ENDPOINT_PATH,
+            "key_id": "a" * 16,
+            "capability_token": "b" * 64,
+        }
+        private_hash = "sha256:" + "c" * 64
+        private_source = "/private/library/paper.pdf"
+        private_parent_key = "PRIVATE1"
+        for commit_state in ("rolled_back", "unknown", "committed_unverified"):
+            with self.subTest(commit_state=commit_state), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                manifest_path = root / "private-manifest.json"
+                manifest_path.write_text(
+                    json.dumps(bridge.seal_manifest(unsigned_manifest())),
+                    encoding="utf-8",
+                )
+                receipt_path = root / f"{commit_state}-receipt.json"
+                returned = {}
+
+                class Opener:
+                    def open(self, request, timeout):
+                        envelope = json.loads(request.data)
+                        response = {
+                            "schema": bridge.RESPONSE_SCHEMA,
+                            "status": "failed",
+                            "action": "readback",
+                            "request_id": envelope["request_id"],
+                            "result": None,
+                            "error": {
+                                "code": "transaction_failed",
+                                "message": f"private source {private_source} hash {private_hash}",
+                                "write_attempted": True,
+                                "commit_state": commit_state,
+                                "inspection": {
+                                    "parent_key": private_parent_key,
+                                    "source_path": private_source,
+                                    "manifest_sha256": private_hash,
+                                },
+                                "execution_profile": "single_attachment_import",
+                                "created_attachment_keys": ["SECRET01"],
+                            },
+                        }
+                        returned["response"] = response
+                        raise bridge.urllib.error.HTTPError(
+                            request.full_url,
+                            500,
+                            "bridge failure",
+                            {},
+                            io.BytesIO(json.dumps(response).encode("utf-8")),
+                        )
+
+                args = types.SimpleNamespace(
+                    command="readback",
+                    manifest=manifest_path,
+                    capability_file=root / "private-capability.json",
+                    receipt=receipt_path,
+                )
+                stderr = io.StringIO()
+                with mock.patch.object(bridge, "parse_args", return_value=args), mock.patch.object(
+                    bridge, "load_capability", return_value=capability
+                ), mock.patch.object(
+                    bridge.urllib.request, "build_opener", return_value=Opener()
+                ), contextlib.redirect_stderr(stderr):
+                    return_code = bridge.main()
+                self.assertNotEqual(return_code, 0)
+                self.assertEqual(json.loads(receipt_path.read_text(encoding="utf-8")), returned["response"])
+                self.assertEqual(stat.S_IMODE(receipt_path.stat().st_mode), 0o600)
+                stderr_payload = json.loads(stderr.getvalue())
+                self.assertEqual(
+                    stderr_payload,
+                    {
+                        "error_code": "transaction_failed",
+                        "commit_state": commit_state,
+                        "receipt": str(receipt_path.resolve()),
+                    },
+                )
+                for private_value in (
+                    private_hash,
+                    private_source,
+                    private_parent_key,
+                    "SECRET01",
+                    capability["key_id"],
+                    capability["capability_token"],
+                    str(manifest_path.resolve()),
+                    str(args.capability_file.resolve()),
+                ):
+                    self.assertNotIn(private_value, stderr.getvalue())
 
     def test_attachment_repair_compiler_preserves_exact_bindings(self) -> None:
         pdf = b"%PDF-1.7\nfixture\n"
@@ -283,6 +484,67 @@ class BridgeTests(unittest.TestCase):
         self.assertTrue(compiled["target"]["require_files_editable"])
         bridge.validate_manifest(compiled)
 
+    def test_attachment_repair_compiler_requires_one_selected_parent(self) -> None:
+        pdf = b"%PDF-1.7\nfixture\n"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pdf_path = root / "paper.pdf"
+            pdf_path.write_bytes(pdf)
+            entries = []
+            for key in ("PARENT01", "PARENT02"):
+                entries.append(
+                    {
+                        "action": "attach_missing_pdf",
+                        "parent": {
+                            "key": key,
+                            "version": 7,
+                            "item_type": "journalArticle",
+                            "title": f"Fixture {key}",
+                            "doi": "",
+                        },
+                        "expected_attachments": [],
+                        "source_pdf": {
+                            "path": str(pdf_path),
+                            "size_bytes": len(pdf),
+                            "sha256": "sha256:" + hashlib.sha256(pdf).hexdigest(),
+                            "magic": "%PDF-",
+                        },
+                    }
+                )
+            repair = {
+                "schema": "ZoteroAttachmentRepairManifest/v1",
+                "generated_at": "2026-08-06T00:00:00Z",
+                "target": {
+                    "group_id": 123,
+                    "library_id": 2,
+                    "library_name": "Fixture",
+                    "local_collection_id": 40,
+                    "collection_key": "ABCDEFGH",
+                    "collection_path": [{"key": "ABCDEFGH", "name": "Target"}],
+                },
+                "entries": entries,
+            }
+            repair["manifest_digest_sha256"] = "sha256:" + hashlib.sha256(
+                json.dumps(
+                    repair,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
+            source = root / "repair.json"
+            source.write_text(json.dumps(repair), encoding="utf-8")
+            with self.assertRaisesRegex(bridge.BridgeError, "--parent-key"):
+                bridge.compile_attachment_repair(source, "fixture-repair")
+            selected = bridge.compile_attachment_repair(
+                source,
+                "fixture-repair-parent02",
+                "PARENT02",
+            )
+            self.assertEqual([entry["parent"]["key"] for entry in selected["entries"]], ["PARENT02"])
+            with self.assertRaisesRegex(bridge.BridgeError, "selector"):
+                bridge.compile_attachment_repair(source, "fixture-repair-missing", "PARENT03")
+
     def test_deterministic_xpi_has_only_fixed_files_and_no_dynamic_code(self) -> None:
         builder = load_builder()
         with tempfile.TemporaryDirectory() as directory:
@@ -293,7 +555,25 @@ class BridgeTests(unittest.TestCase):
             self.assertEqual(digest1, digest2)
             with zipfile.ZipFile(first) as archive:
                 self.assertEqual(tuple(archive.namelist()), builder.FILES)
+                packed_manifest = json.loads(archive.read("manifest.json"))
                 source = archive.read("bootstrap.js").decode() + archive.read("bridge_core.js").decode()
+            updates = json.loads((PLUGIN_ROOT / "updates.json").read_text(encoding="utf-8"))
+            update = updates["addons"][builder.PLUGIN_ID]["updates"][0]
+        self.assertEqual(packed_manifest["applications"]["zotero"]["update_url"], builder.PLUGIN_UPDATE_URL)
+        self.assertEqual(update["version"], packed_manifest["version"])
+        self.assertEqual(update["update_hash"], f"sha256:{digest1}")
+        self.assertNotIn("/latest/", update["update_link"])
+        self.assertEqual(
+            update["applications"]["zotero"],
+            {
+                "strict_min_version": packed_manifest["applications"]["zotero"][
+                    "strict_min_version"
+                ],
+                "strict_max_version": packed_manifest["applications"]["zotero"][
+                    "strict_max_version"
+                ],
+            },
+        )
         self.assertNotIn("eval(", source)
         self.assertNotIn("new Function", source)
         self.assertNotIn("executeSQL", source)
@@ -310,7 +590,7 @@ class BridgeTests(unittest.TestCase):
             timeout=15,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("11 checks passed", result.stdout)
+        self.assertIn("28 checks passed", result.stdout)
 
     def test_membership_compiler_binds_live_parent_and_keyed_path(self) -> None:
         args = types.SimpleNamespace(
@@ -346,6 +626,56 @@ class BridgeTests(unittest.TestCase):
             "ensure_collection_membership",
         )
         bridge.validate_manifest(compiled)
+
+    def test_short_title_compiler_binds_and_refuses_live_drift(self) -> None:
+        args = types.SimpleNamespace(
+            group_id=123,
+            library_id=2,
+            library_name="Fixture",
+            local_collection_id=40,
+            collection_key="ABCDEFGH",
+            parent_key="PARENT01",
+            expected_parent_version=7,
+            expected_old_value="Old title",
+            new_short_title="Reviewed title",
+            base_url=bridge.BASE_URL,
+            transaction_id="short-title-fixture",
+        )
+        record = {
+            "version": 7,
+            "data": {
+                "key": "PARENT01",
+                "version": 7,
+                "itemType": "journalArticle",
+                "title": "Fixture parent",
+                "shortTitle": "Old title",
+                "DOI": "10.1/fixture",
+                "collections": ["ABCDEFGH"],
+            },
+        }
+        with mock.patch.object(
+            bridge,
+            "collection_contract",
+            return_value=([{"key": "ABCDEFGH", "name": "Target"}], {}),
+        ), mock.patch.object(bridge, "live_parent", return_value=record):
+            compiled = bridge.compile_short_title(args)
+        operation = compiled["entries"][0]["operations"][0]
+        self.assertEqual(operation["type"], "ensure_parent_short_title")
+        self.assertEqual(operation["library_id"], 2)
+        self.assertEqual(operation["parent_key"], "PARENT01")
+        self.assertEqual(operation["expected_parent_version"], 7)
+        self.assertEqual(operation["expected_old_value"], "Old title")
+        self.assertEqual(operation["new_short_title"], "Reviewed title")
+        bridge.validate_manifest(compiled)
+        drifted = json.loads(json.dumps(record))
+        drifted["data"]["shortTitle"] = "Concurrent edit"
+        with mock.patch.object(
+            bridge,
+            "collection_contract",
+            return_value=([{"key": "ABCDEFGH", "name": "Target"}], {}),
+        ), mock.patch.object(bridge, "live_parent", return_value=drifted):
+            with self.assertRaisesRegex(bridge.BridgeError, "old-value drift"):
+                bridge.compile_short_title(args)
 
     def test_note_migration_compiler_binds_live_parent_and_note_bytes(self) -> None:
         note_html = "<h1>检索标题</h1><p>经审核内容</p>"

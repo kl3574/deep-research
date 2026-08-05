@@ -33,13 +33,42 @@ TX_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 BASE_URL = "http://127.0.0.1:23119"
 OP_ORDER = {
     "ensure_collection_membership": 0,
-    "ensure_child_note": 1,
-    "ensure_pdf_attachment": 2,
+    "ensure_parent_short_title": 1,
+    "ensure_child_note": 2,
+    "ensure_pdf_attachment": 3,
+}
+RESPONSE_KEYS = {"schema", "status", "action", "request_id", "result", "error"}
+ERROR_KEYS = {
+    "code",
+    "message",
+    "write_attempted",
+    "commit_state",
+    "inspection",
+    "execution_profile",
+    "created_attachment_keys",
+}
+COMMIT_STATES = {
+    "not_started",
+    "rolled_back",
+    "committed",
+    "committed_unverified",
+    "partial_commit",
+    "unknown",
 }
 
 
 class BridgeError(RuntimeError):
     pass
+
+
+class BridgeResponseError(BridgeError):
+    """A validated structured error response returned by the bridge."""
+
+    def __init__(self, response: dict[str, Any]) -> None:
+        self.response = response
+        self.error_code = response["error"]["code"]
+        self.commit_state = response["error"]["commit_state"]
+        super().__init__("bridge returned a structured error response")
 
 
 def canonical_bytes(value: Any) -> bytes:
@@ -108,6 +137,13 @@ def normalize_doi(value: Any) -> str:
     if not isinstance(value, str):
         return ""
     return re.sub(r"^https?://(?:dx\.)?doi\.org/", "", value.strip().lower())
+
+
+def short_title(value: Any, label: str, *, nonempty: bool) -> str:
+    value = text(value, label, nonempty=nonempty, limit=4096)
+    if re.search(r"[\x00-\x1f\x7f]", value):
+        raise BridgeError(f"{label} contains control characters")
+    return value
 
 
 def identity_for_parent(parent: dict[str, Any], library_id: int) -> dict[str, Any]:
@@ -188,7 +224,12 @@ def validate_parent(value: Any, target: dict[str, Any]) -> None:
         raise BridgeError(f"parent {parent['key']} identity_sha256 is inconsistent")
 
 
-def validate_operation(value: Any, parent: dict[str, Any], label: str) -> str:
+def validate_operation(
+    value: Any,
+    parent: dict[str, Any],
+    target: dict[str, Any],
+    label: str,
+) -> str:
     if not isinstance(value, dict) or "type" not in value:
         raise BridgeError(f"{label} must contain type")
     operation_type = value["type"]
@@ -198,6 +239,32 @@ def validate_operation(value: Any, parent: dict[str, Any], label: str) -> str:
             raise BridgeError(f"{label}.expected_present must be false")
         if parent["expected_target_membership"] is not False:
             raise BridgeError(f"{label} disagrees with parent membership baseline")
+    elif operation_type == "ensure_parent_short_title":
+        exact_keys(
+            value,
+            {
+                "type",
+                "library_id",
+                "parent_key",
+                "expected_parent_version",
+                "expected_old_value",
+                "new_short_title",
+            },
+            label,
+        )
+        positive_int(value["library_id"], f"{label}.library_id")
+        item_key(value["parent_key"], f"{label}.parent_key")
+        positive_int(value["expected_parent_version"], f"{label}.expected_parent_version")
+        short_title(value["expected_old_value"], f"{label}.expected_old_value", nonempty=False)
+        new_value = short_title(value["new_short_title"], f"{label}.new_short_title", nonempty=True)
+        if new_value != new_value.strip():
+            raise BridgeError(f"{label}.new_short_title must be trimmed")
+        if value["library_id"] != target["library_id"]:
+            raise BridgeError(f"{label}.library_id disagrees with target")
+        if value["parent_key"] != parent["key"]:
+            raise BridgeError(f"{label}.parent_key disagrees with parent")
+        if value["expected_parent_version"] != parent["version"]:
+            raise BridgeError(f"{label}.expected_parent_version disagrees with parent")
     elif operation_type == "ensure_child_note":
         exact_keys(
             value,
@@ -296,24 +363,33 @@ def validate_manifest(manifest: Any, *, require_digest: bool = True) -> dict[str
         raise BridgeError("entries must be a non-empty bounded array")
     parent_keys: list[str] = []
     needs_files = False
+    operation_types: list[str] = []
     for index, entry in enumerate(entries):
         entry = exact_keys(entry, {"parent", "operations"}, f"entries[{index}]")
         validate_parent(entry["parent"], manifest["target"])
         parent_keys.append(entry["parent"]["key"])
         operations = entry["operations"]
-        if not isinstance(operations, list) or not operations or len(operations) > 3:
+        if not isinstance(operations, list) or not operations or len(operations) > 4:
             raise BridgeError(f"entries[{index}].operations must be non-empty and bounded")
         types = [
-            validate_operation(operation, entry["parent"], f"entries[{index}].operations[{op_index}]")
+            validate_operation(
+                operation,
+                entry["parent"],
+                manifest["target"],
+                f"entries[{index}].operations[{op_index}]",
+            )
             for op_index, operation in enumerate(operations)
         ]
         if len(types) != len(set(types)) or types != sorted(types, key=OP_ORDER.get):
             raise BridgeError(f"entries[{index}].operations must be unique and canonically ordered")
+        operation_types.extend(types)
         needs_files = needs_files or "ensure_pdf_attachment" in types
     if parent_keys != sorted(parent_keys) or len(parent_keys) != len(set(parent_keys)):
         raise BridgeError("entries must be parent-key-sorted and unique")
     if needs_files and manifest["target"]["require_files_editable"] is not True:
         raise BridgeError("PDF operations require target.require_files_editable=true")
+    if needs_files and any(value != "ensure_pdf_attachment" for value in operation_types):
+        raise BridgeError("PDF and database operations cannot share one transaction manifest")
     if require_digest:
         sha(manifest["manifest_sha256"], "manifest.manifest_sha256")
         unsigned = {key: value for key, value in manifest.items() if key != "manifest_sha256"}
@@ -346,6 +422,44 @@ def write_private_json(path: Path, value: Any) -> None:
         raise BridgeError(f"refusing to overwrite {path}: {exc}") from exc
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(data)
+
+
+def validate_bridge_response(value: Any, action: str, request_id: str) -> dict[str, Any]:
+    response = exact_keys(value, RESPONSE_KEYS, "bridge response")
+    if response["schema"] != RESPONSE_SCHEMA:
+        raise BridgeError("bridge response schema mismatch")
+    error = response["error"]
+    if error is None:
+        if response["action"] != action or response["request_id"] != request_id:
+            raise BridgeError("bridge response request binding mismatch")
+        if response["status"] == "failed" or not isinstance(response["result"], dict):
+            raise BridgeError("bridge success response shape mismatch")
+        text(response["status"], "bridge response status", limit=128)
+        return response
+    if response["status"] != "failed" or response["result"] is not None:
+        raise BridgeError("bridge error response shape mismatch")
+    if response["action"] is not None and response["action"] != action:
+        raise BridgeError("bridge error response action mismatch")
+    if response["request_id"] is not None and response["request_id"] != request_id:
+        raise BridgeError("bridge error response request mismatch")
+    error = exact_keys(error, ERROR_KEYS, "bridge response error")
+    code = text(error["code"], "bridge response error code", limit=128)
+    if not re.fullmatch(r"[a-z][a-z0-9_]{0,127}", code):
+        raise BridgeError("bridge response error code is invalid")
+    text(error["message"], "bridge response error message", limit=4096)
+    if not isinstance(error["write_attempted"], bool):
+        raise BridgeError("bridge response write_attempted is invalid")
+    if error["commit_state"] not in COMMIT_STATES:
+        raise BridgeError("bridge response commit_state is invalid")
+    if error["inspection"] is not None and not isinstance(error["inspection"], dict):
+        raise BridgeError("bridge response inspection is invalid")
+    if error["execution_profile"] not in {None, "none", "db_atomic", "single_attachment_import"}:
+        raise BridgeError("bridge response execution_profile is invalid")
+    if not isinstance(error["created_attachment_keys"], list):
+        raise BridgeError("bridge response created_attachment_keys is invalid")
+    for index, key_value in enumerate(error["created_attachment_keys"]):
+        item_key(key_value, f"bridge response created_attachment_keys[{index}]")
+    return response
 
 
 def api_get(path: str, base_url: str = BASE_URL) -> Any:
@@ -435,7 +549,11 @@ def now_iso() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def compile_attachment_repair(source: Path, transaction_id: str) -> dict[str, Any]:
+def compile_attachment_repair(
+    source: Path,
+    transaction_id: str,
+    parent_key: str | None = None,
+) -> dict[str, Any]:
     repair = read_json(source)
     if not isinstance(repair, dict) or repair.get("schema") != "ZoteroAttachmentRepairManifest/v1":
         raise BridgeError("attachment repair schema mismatch")
@@ -469,6 +587,7 @@ def compile_attachment_repair(source: Path, transaction_id: str) -> dict[str, An
         files=True,
     )
     entries: list[dict[str, Any]] = []
+    selected_parent_key = item_key(parent_key, "parent_key") if parent_key else None
     for row in repair.get("entries", []):
         if not isinstance(row, dict) or row.get("action") != "attach_missing_pdf":
             continue
@@ -476,6 +595,8 @@ def compile_attachment_repair(source: Path, transaction_id: str) -> dict[str, An
         source_pdf = row.get("source_pdf")
         if not isinstance(raw_parent, dict) or not isinstance(source_pdf, dict):
             raise BridgeError("attachment repair entry is malformed")
+        if selected_parent_key and raw_parent.get("key") != selected_parent_key:
+            continue
         parent = {
             "key": raw_parent.get("key"),
             "version": raw_parent.get("version"),
@@ -496,7 +617,13 @@ def compile_attachment_repair(source: Path, transaction_id: str) -> dict[str, An
         }
         entries.append({"parent": parent, "operations": [operation]})
     if not entries:
+        if selected_parent_key:
+            raise BridgeError("attachment repair parent-key selector did not match exactly one entry")
         raise BridgeError("attachment repair has no attach_missing_pdf operations")
+    if len(entries) != 1:
+        if selected_parent_key:
+            raise BridgeError("attachment repair parent-key selector did not match exactly one entry")
+        raise BridgeError("multi-entry attachment repair requires --parent-key")
     unsigned = {
         "schema": MANIFEST_SCHEMA,
         "transaction_id": transaction_id,
@@ -611,6 +738,63 @@ def compile_note_migration(source: Path, transaction_id: str, base_url: str) -> 
     )
 
 
+def compile_short_title(args: argparse.Namespace) -> dict[str, Any]:
+    path, _ = collection_contract(args.group_id, args.collection_key, args.base_url)
+    target = target_from_parts(
+        group_id=args.group_id,
+        library_id=args.library_id,
+        library_name=args.library_name,
+        collection_id=args.local_collection_id,
+        collection_key=args.collection_key,
+        collection_path=path,
+        files=False,
+    )
+    record = live_parent(args.group_id, args.parent_key, args.base_url)
+    data = record["data"]
+    if args.collection_key not in data.get("collections", []):
+        raise BridgeError(f"shortTitle parent {args.parent_key} is outside the target")
+    parent = parent_from_data(data, args.library_id, True)
+    expected_version = positive_int(
+        args.expected_parent_version,
+        "expected_parent_version",
+    )
+    expected_old = short_title(
+        args.expected_old_value,
+        "expected_old_value",
+        nonempty=False,
+    )
+    reviewed_new = short_title(
+        args.new_short_title,
+        "new_short_title",
+        nonempty=True,
+    )
+    if reviewed_new != reviewed_new.strip():
+        raise BridgeError("new_short_title must be trimmed")
+    if parent["version"] != expected_version:
+        raise BridgeError(f"shortTitle parent {args.parent_key} version drift")
+    if str(data.get("shortTitle", "")) != expected_old:
+        raise BridgeError(f"shortTitle parent {args.parent_key} old-value drift")
+    if expected_old == reviewed_new:
+        raise BridgeError(f"shortTitle parent {args.parent_key} already has the reviewed value")
+    operation = {
+        "type": "ensure_parent_short_title",
+        "library_id": args.library_id,
+        "parent_key": parent["key"],
+        "expected_parent_version": expected_version,
+        "expected_old_value": expected_old,
+        "new_short_title": reviewed_new,
+    }
+    return seal_manifest(
+        {
+            "schema": MANIFEST_SCHEMA,
+            "transaction_id": args.transaction_id,
+            "generated_at": now_iso(),
+            "target": target,
+            "entries": [{"parent": parent, "operations": [operation]}],
+        }
+    )
+
+
 def load_capability(path: Path) -> dict[str, Any]:
     path = path.expanduser().resolve()
     try:
@@ -693,14 +877,17 @@ def bridge_request(capability: dict[str, Any], action: str, payload: dict[str, A
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         try:
-            detail = json.loads(body)
-        except json.JSONDecodeError:
-            detail = body[:500]
-        raise BridgeError(f"bridge HTTP {exc.code}: {detail}") from exc
+            result = validate_bridge_response(json.loads(body), action, base["request_id"])
+        except (BridgeError, json.JSONDecodeError) as contract_error:
+            raise BridgeError(f"bridge HTTP {exc.code} returned an invalid error response") from contract_error
+        if result["error"] is None:
+            raise BridgeError(f"bridge HTTP {exc.code} returned a non-error response") from exc
+        raise BridgeResponseError(result) from exc
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         raise BridgeError(f"bridge request failed: {exc}") from exc
-    if not isinstance(result, dict) or result.get("schema") != RESPONSE_SCHEMA or result.get("action") != action:
-        raise BridgeError("bridge response contract mismatch")
+    result = validate_bridge_response(result, action, base["request_id"])
+    if result["error"] is not None:
+        raise BridgeResponseError(result)
     return result
 
 
@@ -728,6 +915,7 @@ def parse_args() -> argparse.Namespace:
     repair.add_argument("source", type=Path)
     repair.add_argument("output", type=Path)
     repair.add_argument("--transaction-id", required=True)
+    repair.add_argument("--parent-key")
 
     notes = sub.add_parser("compile-note-migration")
     notes.add_argument("source", type=Path)
@@ -745,6 +933,20 @@ def parse_args() -> argparse.Namespace:
     membership.add_argument("--collection-key", required=True)
     membership.add_argument("--parent-key", action="append", required=True)
     membership.add_argument("--base-url", default=BASE_URL)
+
+    short_title_parser = sub.add_parser("compile-short-title")
+    short_title_parser.add_argument("output", type=Path)
+    short_title_parser.add_argument("--transaction-id", required=True)
+    short_title_parser.add_argument("--group-id", type=int, required=True)
+    short_title_parser.add_argument("--library-id", type=int, required=True)
+    short_title_parser.add_argument("--library-name", required=True)
+    short_title_parser.add_argument("--local-collection-id", type=int, required=True)
+    short_title_parser.add_argument("--collection-key", required=True)
+    short_title_parser.add_argument("--parent-key", required=True)
+    short_title_parser.add_argument("--expected-parent-version", type=int, required=True)
+    short_title_parser.add_argument("--expected-old-value", required=True)
+    short_title_parser.add_argument("--new-short-title", required=True)
+    short_title_parser.add_argument("--base-url", default=BASE_URL)
 
     probe = sub.add_parser("probe")
     probe.add_argument("--capability-file", type=Path, required=True)
@@ -772,7 +974,7 @@ def main() -> int:
             print(json.dumps({"status": "valid", "manifest_sha256": manifest["manifest_sha256"]}))
             return 0
         if args.command == "compile-attachment-repair":
-            result = compile_attachment_repair(args.source, args.transaction_id)
+            result = compile_attachment_repair(args.source, args.transaction_id, args.parent_key)
             write_private_json(args.output, result)
             print(json.dumps({"status": "compiled", "entries": len(result["entries"]), "manifest_sha256": result["manifest_sha256"]}))
             return 0
@@ -783,6 +985,11 @@ def main() -> int:
             return 0
         if args.command == "compile-membership":
             result = compile_membership(args)
+            write_private_json(args.output, result)
+            print(json.dumps({"status": "compiled", "entries": len(result["entries"]), "manifest_sha256": result["manifest_sha256"]}))
+            return 0
+        if args.command == "compile-short-title":
+            result = compile_short_title(args)
             write_private_json(args.output, result)
             print(json.dumps({"status": "compiled", "entries": len(result["entries"]), "manifest_sha256": result["manifest_sha256"]}))
             return 0
@@ -823,6 +1030,45 @@ def main() -> int:
         }
         print(json.dumps(summary, ensure_ascii=False))
         return 0
+    except BridgeResponseError as exc:
+        receipt_arg = getattr(args, "receipt", None)
+        if receipt_arg is None:
+            print(
+                json.dumps(
+                    {"error_code": exc.error_code, "commit_state": exc.commit_state},
+                    ensure_ascii=False,
+                ),
+                file=sys.stderr,
+            )
+            return 3
+        receipt_path = receipt_arg.expanduser().resolve()
+        try:
+            write_private_json(receipt_path, exc.response)
+        except BridgeError:
+            print(
+                json.dumps(
+                    {
+                        "error_code": "receipt_write_failed",
+                        "commit_state": exc.commit_state,
+                        "receipt": str(receipt_path),
+                    },
+                    ensure_ascii=False,
+                ),
+                file=sys.stderr,
+            )
+            return 2
+        print(
+            json.dumps(
+                {
+                    "error_code": exc.error_code,
+                    "commit_state": exc.commit_state,
+                    "receipt": str(receipt_path),
+                },
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        return 3
     except BridgeError as exc:
         print(f"bridge error: {exc}", file=sys.stderr)
         return 2

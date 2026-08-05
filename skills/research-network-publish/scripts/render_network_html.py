@@ -161,6 +161,49 @@ def _scan_credentials(value: Any, location: str = "input") -> None:
             raise ContractError(f"credential-shaped value is forbidden at {location}")
 
 
+def _validate_source_contract(sources: Sequence[Any]) -> None:
+    _validate_unique_records(sources, "source_id", "sources", ())
+    for index, row in enumerate(sources):
+        assert isinstance(row, dict)
+        label = f"sources[{index}]"
+        membership = row.get("corpus_membership")
+        if membership is not None and membership not in {"current", "historical"}:
+            raise ContractError(
+                f"{label}.corpus_membership must be current or historical"
+            )
+        if row.get("role") != "zotero_corpus":
+            continue
+        if membership not in {"current", "historical"}:
+            raise ContractError(
+                f"{label}.corpus_membership is required for Zotero sources"
+            )
+        if membership == "historical":
+            continue
+        _require_text(row, "title", f"{label} current Zotero source")
+        for key in ("doi", "date", "year"):
+            if not isinstance(row.get(key), str):
+                raise ContractError(
+                    f"{label} current Zotero source.{key} must be a string"
+                )
+        creators = row.get("creators")
+        if not isinstance(creators, list) or not all(
+            isinstance(creator, dict)
+            and isinstance(creator.get("name"), str)
+            and bool(creator["name"].strip())
+            for creator in creators
+        ):
+            raise ContractError(
+                f"{label} current Zotero source.creators must be named objects"
+            )
+        authors = row.get("authors")
+        if not isinstance(authors, list) or not all(
+            isinstance(author, str) and bool(author.strip()) for author in authors
+        ):
+            raise ContractError(
+                f"{label} current Zotero source.authors must be strings"
+            )
+
+
 def validate_network(network: Mapping[str, Any]) -> None:
     if network.get("schema") != "KnowledgeNetwork/v1":
         raise ContractError("network.schema must equal KnowledgeNetwork/v1")
@@ -203,7 +246,7 @@ def validate_network(network: Mapping[str, Any]) -> None:
     if not isinstance(sources, list):
         raise ContractError("network.sources must be an array when present")
     if sources:
-        _validate_unique_records(sources, "source_id", "sources", ())
+        _validate_source_contract(sources)
     _validate_digest(network, "network")
     _scan_credentials(network, "network")
 
@@ -319,6 +362,14 @@ def _first_value(row: Mapping[str, Any], keys: Sequence[str], mode: str) -> str:
     return ""
 
 
+def _source_is_current(row: Mapping[str, Any]) -> bool:
+    membership = row.get("corpus_membership")
+    if membership is not None:
+        return membership == "current"
+    status = str(row.get("status") or "active").casefold()
+    return status not in {"deprecated", "historical", "inactive", "superseded"}
+
+
 def build_projection(
     network: Mapping[str, Any],
     research_map: Mapping[str, Any] | None = None,
@@ -331,6 +382,7 @@ def build_projection(
     raw_relations = sorted(network["relations"], key=lambda row: str(row["relation_id"]))
     raw_gaps = sorted(network["gaps"], key=lambda row: str(row["gap_id"]))
     raw_sources = sorted(network.get("sources", []), key=lambda row: str(row["source_id"]))
+    current_source_rows = [row for row in raw_sources if _source_is_current(row)]
     node_map = _ordinal_map((str(row["node_id"]) for row in raw_nodes), "N")
     relation_map = _ordinal_map((str(row["relation_id"]) for row in raw_relations), "R")
     gap_map = _ordinal_map((str(row["gap_id"]) for row in raw_gaps), "G")
@@ -397,22 +449,35 @@ def build_projection(
         )
 
     sources = []
-    for index, row in enumerate(raw_sources, 1):
+    for row in current_source_rows:
         raw_id = str(row["source_id"])
-        title = _first_value(row, ("title", "canonical_title", "label", "citation"), mode)
+        title = _first_value(
+            row,
+            ("title", "canonical_title", "label", "citation", "canonical_identity"),
+            mode,
+        )
         metadata = []
-        for key in ("authors", "year", "venue", "doi", "url", "tier"):
+        for key, label in (
+            ("authors", "Authors"),
+            ("creators", "Creators"),
+            ("date", "Date"),
+            ("year", "Year"),
+            ("venue", "Venue"),
+            ("doi", "DOI"),
+            ("url", "URL"),
+            ("tier", "Tier"),
+        ):
             value = _display_value(row.get(key), mode)
             if value:
-                metadata.append(f"{key}: {value}")
+                metadata.append(f"{label}: {value}")
         sources.append(
             {
                 "id": visible(raw_id, source_map),
-                "title": title or f"Source {index}",
+                "title": title or visible(raw_id, source_map),
                 "metadata": " | ".join(metadata),
             }
         )
-    if not sources:
+    if not raw_sources:
         for node in nodes:
             if node["kind"].lower() == "source":
                 sources.append({"id": node["id"], "title": node["label"], "metadata": ""})
@@ -579,6 +644,8 @@ def build_projection(
         else _text(network["snapshot_id"], mode),
         "completion_status": _text(completion["status"], mode),
         "source_count": len(sources),
+        "source_ledger_count": len(raw_sources),
+        "historical_source_count": len(raw_sources) - len(current_source_rows),
         "privacy_note": "Internal identifiers and sensitive corpus metadata are withheld."
         if mode == PUBLIC_MODE
         else "Exact stable IDs and locators retained; credentials and note/full-text fields omitted.",
@@ -747,7 +814,7 @@ header { padding:clamp(2.2rem,7vw,5.8rem) clamp(1rem,6vw,5rem) 2.2rem;
 .kicker { font:700 .75rem/1.2 ui-monospace,monospace; letter-spacing:.18em;
   text-transform:uppercase; color:var(--accent); }
 h1 { max-width:18ch; margin:.35rem 0 1rem; font-size:clamp(2.5rem,7vw,6.2rem);
-  line-height:.94; letter-spacing:-.045em; }
+  line-height:.94; letter-spacing:-.045em; text-wrap:balance; }
 h2 { margin:0 0 1rem; font-size:clamp(1.7rem,4vw,3.2rem); line-height:1; }
 h3 { font-size:1.05rem; }
 .lede { max-width:68ch; color:var(--muted); font-size:clamp(1rem,2vw,1.25rem); }
@@ -838,7 +905,7 @@ footer { padding:2rem 1rem 4rem; text-align:center; color:var(--muted); }
   <h3>Network view</h3>{_graph_svg(projection['nodes'], projection['relations'])}
   <h3>Relation ledger</h3>{_relation_table(projection['relations'])}
 </section>
-<section id="sources"><h2>Sources</h2><p class="section-intro">Presentation-safe source identities used by the rendered evidence relations.</p>
+<section id="sources"><h2>Sources</h2><p class="section-intro">Current presentation-safe bibliographic sources. Superseded historical rows remain counted in provenance but are not rendered as active source cards.</p>
   <div class="grid">{_cards(projection['sources'], (('id','ID'),('title','Source'),('metadata','Bibliography')))}</div>
 </section>
 <section id="coverage-gaps-conflicts"><h2>Coverage, gaps, and conflicts</h2>

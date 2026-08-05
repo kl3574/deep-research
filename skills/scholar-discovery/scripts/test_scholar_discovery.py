@@ -1273,7 +1273,22 @@ class ScholarDiscoveryTest(unittest.TestCase):
             )
         )
 
+    def test_manual_optional_queries_do_not_consume_autonomous_query_budget(self):
+        request = request_fixture()
+        request["routes"]["automatic"] = ["crossref"]
+        request["routes"]["google_scholar"] = "manual_optional"
+        request["budgets"]["max_queries"] = 1
 
+        plan = compile_plan(request)
+        automatic = [
+            row for row in plan["queries"] if row["execution"] == "documented_api"
+        ]
+        manual = [
+            row for row in plan["queries"] if row["execution"] == "user_manual_export"
+        ]
+        self.assertEqual(len(automatic), 1)
+        self.assertEqual(len(manual), len(request["query_seeds"]))
+        self.assertTrue(plan["truncation"]["query_budget_reached"])
 
 if __name__ == "__main__":
     unittest.main()

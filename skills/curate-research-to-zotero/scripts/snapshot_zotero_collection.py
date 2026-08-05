@@ -18,6 +18,7 @@ import urllib.request
 
 
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+MAX_PAGINATION_PAGES = 10_000
 NOTE_SCHEMA_RE = re.compile(r"""data-schema-version=["']([^"']+)["']""")
 
 
@@ -67,8 +68,9 @@ def api_get(
 
 def get_all(base_url: str, path: str) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
+    seen_full_pages: set[str] = set()
     start = 0
-    while True:
+    for _page_number in range(MAX_PAGINATION_PAGES):
         page = api_get(
             base_url,
             path,
@@ -76,10 +78,16 @@ def get_all(base_url: str, path: str) -> list[dict[str, Any]]:
         )
         if not isinstance(page, list):
             raise ValueError(f"{path}: expected array")
+        if len(page) == 100:
+            page_digest = digest_value(page)
+            if page_digest in seen_full_pages:
+                raise ValueError(f"{path}: repeated full page")
+            seen_full_pages.add(page_digest)
         output.extend(item for item in page if isinstance(item, dict))
         if len(page) < 100:
             return output
         start += len(page)
+    raise ValueError(f"{path}: pagination page limit exceeded")
 
 
 def data_of(item: dict[str, Any]) -> dict[str, Any]:

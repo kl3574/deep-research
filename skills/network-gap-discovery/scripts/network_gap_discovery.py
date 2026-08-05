@@ -230,8 +230,12 @@ INTERNAL_QUERY_PREFIXES = {
     "gap:",
     "relation:",
     "node:",
+    "claim:",
+    "derived:",
     "gap-",
     "rel-",
+    "claim-",
+    "clm-",
     "gaph:",
     "kgh-",
     "entity:",
@@ -265,7 +269,16 @@ QUERY_STOP_WORDS = {
     "benchmark",
 }
 SEMANTIC_QUERY_MAX_WORDS = 12
-QUERY_TERM_BLOCKLIST = {"claims_property"}
+QUERY_TERM_BLOCKLIST = {
+    "claims_property",
+    "evidence",
+    "needed",
+    "potential",
+    "probe",
+    "signal",
+    "suggested",
+    "targeted",
+}
 GAP_REASON_TERM_BLOCKLIST = {
     "an",
     "and",
@@ -279,6 +292,7 @@ GAP_REASON_TERM_BLOCKLIST = {
     "in",
     "locally",
     "missing",
+    "needed",
     "of",
     "open",
     "slot",
@@ -287,6 +301,7 @@ GAP_REASON_TERM_BLOCKLIST = {
     "unresolved",
     "which",
 }
+QUERY_TOKEN_RE = re.compile(r"[^\W_][\w.:+-]*", re.UNICODE)
 
 PROBE_FAMILIES = [
     {
@@ -855,13 +870,13 @@ def _query_has_internal_marker(value: str) -> bool:
     if any(marker in lower for marker in INTERNAL_QUERY_BLOCKLIST):
         return True
     if re.search(
-        r"\b(?:gap|relation|node|unmet_declared_gate|completion\.)[:_-][A-Za-z0-9_-]+",
+        r"\b(?:gap|relation|node|claim|derived|unmet_declared_gate|completion\.)[:_-][A-Za-z0-9_-]+",
         lower,
     ):
         return True
     if re.search(r"\bcompletion\.gate_checks\.[a-z0-9_]+\b", lower):
         return True
-    for token in re.findall(r"[a-zA-Z0-9][a-zA-Z0-9._+-]*", lower):
+    for token in QUERY_TOKEN_RE.findall(lower):
         if token in INTERNAL_QUERY_FIELD_NAMES:
             return True
         if _query_token_is_internal(token):
@@ -875,7 +890,10 @@ def _query_token_is_internal(token: str) -> bool:
         return True
     if any(lower.startswith(prefix) for prefix in INTERNAL_QUERY_PREFIXES):
         return True
-    if re.fullmatch(r"(?:g|rel|kgh|gaph|entity)[-_][a-zA-Z0-9._+-]+", lower):
+    if re.fullmatch(
+        r"(?:g|rel|kgh|gaph|entity|claim|derived)[-_:][a-zA-Z0-9._+-]+",
+        lower,
+    ):
         return True
     if re.fullmatch(r"[a-z0-9_]+(?:\.[a-z0-9_]+){1,}", lower):
         return True
@@ -883,7 +901,7 @@ def _query_token_is_internal(token: str) -> bool:
 
 
 def _query_semantic_token_candidates(value: str) -> list[str]:
-    tokens = re.findall(r"[a-zA-Z0-9][a-zA-Z0-9._+-]*", value.lower())
+    tokens = QUERY_TOKEN_RE.findall(value.lower())
     output: list[str] = []
     for token in tokens:
         if token in QUERY_TERM_BLOCKLIST:
@@ -928,7 +946,7 @@ def _normalize_terms(values: list[str]) -> str:
 
 
 def _strip_internal_query_tokens(value: str) -> str:
-    tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9._+-]*", value)
+    tokens = QUERY_TOKEN_RE.findall(value)
     return " ".join(
         token for token in tokens if not _query_token_is_internal(token)
     )
@@ -1547,6 +1565,9 @@ def validate_probe(value: Any) -> dict[str, Any]:
 def signal_hypothesis_signature(signal: dict[str, Any]) -> str:
     kind = signal.get("kind")
     if kind == "explicit_open_gap":
+        semantic_label = signal.get("semantic_label")
+        if isinstance(semantic_label, str) and semantic_label.strip():
+            return semantic_label.strip()
         reason = signal.get("reason")
         if isinstance(reason, str) and reason.strip():
             return reason.strip()
@@ -1574,6 +1595,7 @@ def generate_hypotheses_from_probe(
     )
     for offset, signal in enumerate(selected_signals):
         signature = signal_hypothesis_signature(signal)
+        semantic_label = str(signal.get("semantic_label") or signature).strip()
         hypothesis_id = f"KGH-{offset + 1:03d}"
         tier = str(signal["tier"])
         if tier == "isolate":
@@ -1613,7 +1635,7 @@ def generate_hypotheses_from_probe(
             grounds_ref = signal["refs"][0]
         else:
             grounds_ref = signal["refs"][0]
-        grounds = [{"ref_id": grounds_ref, "statement": signal["reason"]}]
+        grounds = [{"ref_id": grounds_ref, "statement": semantic_label}]
         for ground in grounds:
             validate_hypothesis_reference(ground["ref_id"], index, "hypothesis.grounds")
 
@@ -1623,7 +1645,8 @@ def generate_hypotheses_from_probe(
             "target_kind": target_kind,
             "target_signature": target_signature,
             "scope_and_time_bounds": "snapshot-local explicit contract scope",
-            "hypothesis": f"Potential missing evidence gap suggested by probe signal: {signal['reason']}",
+            "semantic_label": semantic_label,
+            "hypothesis": semantic_label,
             "grounds": grounds,
             "warrant": (
                 "This is a deterministic candidate tied to explicit open-structure evidence "
@@ -2069,7 +2092,7 @@ def emit_search_requests(
         request = {
             "schema": REQUEST_SCHEMA,
             "request_id": request_id,
-            "paper_need": hypothesis["hypothesis"],
+            "paper_need": hypothesis.get("semantic_label", hypothesis["hypothesis"]),
             "intent": "topic_set",
             "effort": "diligent" if hypothesis["decision_impact"] == "high" else "fast",
             "criteria": {
@@ -2096,7 +2119,7 @@ def emit_search_requests(
             "budgets": {
                 "max_rounds": 3,
                 "max_queries": min(
-                    30, max(6, len(search_test["queries"]) * (len(automatic) + 1))
+                    30, max(6, len(search_test["queries"]) * len(automatic))
                 ),
                 "max_candidates": 100,
                 "timeout_seconds": 900,

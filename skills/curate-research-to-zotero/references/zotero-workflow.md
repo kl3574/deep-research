@@ -19,9 +19,20 @@ in the desktop UI, then repeat the readback gate.
 For existing-parent membership, note, and PDF mutations, prefer the constrained
 `$zotero-declarative-bridge` plugin after separate code review and visible
 installation. It uses Zotero's official plugin and JavaScript APIs but exposes
-only three manifest operations behind a private capability, HMAC, single-use
-preview, transaction repreflight, and readback. It does not expose arbitrary
-JavaScript, edit SQLite, or obtain sync credentials.
+exactly four manifest operations: add an existing parent to the approved
+collection, create one missing child note, update one existing child note, or
+attach one missing PDF to an existing parent. These operations remain behind a
+private capability, HMAC, single-use preview, transaction repreflight where the
+public Zotero API permits it, and readback. The bridge does not expose arbitrary
+JavaScript, edit SQLite, obtain sync credentials, create bibliographic parents,
+or mutate bibliographic metadata.
+
+`PaperKnowledgeNote/v2` is only a child-note content contract. It never
+authorizes a parent bibliographic `shortTitle` mutation. An independently
+reviewed, version-bound sealed bibliographic-metadata manifest can authorize an
+explicit `shortTitle` change through a separately supported apply/readback path;
+that authority must not be inferred from a note projection or routed through
+one of the bridge's four operations.
 
 When that reviewed plugin is unavailable, existing-note updates and approved
 child-note creation can use Zotero Desktop's official

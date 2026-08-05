@@ -34,10 +34,10 @@ def scenario_fixture():
         "currentness": "Sources checked through 2026-08-05",
         "risk": "Poor sampling wastes expensive simulations",
         "zotero_target": {
-            "group_id": 6588343,
-            "library_name": "wolfs",
-            "collection_key": "KHQKFIWX",
-            "collection_path": ["形貌仿真", "形貌反问题", "DoE采样"],
+            "group_id": 1234567,
+            "library_name": "Example Research Library",
+            "collection_key": "COLL0001",
+            "collection_path": ["Example", "Research", "DoE"],
         },
         "knowledge_dimensions": [
             "initial_design",

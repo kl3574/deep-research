@@ -3338,6 +3338,123 @@ def _latest_gap_records(gaps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [latest[gap_id] for gap_id in sorted(latest)]
 
 
+def _export_creator_metadata(creator: dict[str, Any]) -> dict[str, str] | None:
+    role = _normalized_text(str(creator.get("creatorType") or ""))
+    given = _normalized_text(str(creator.get("firstName") or ""))
+    family = _normalized_text(str(creator.get("lastName") or ""))
+    literal = _normalized_text(str(creator.get("name") or ""))
+    name = literal or " ".join(part for part in (given, family) if part)
+    if not any((role, given, family, name)):
+        return None
+    output: dict[str, str] = {}
+    if role:
+        output["role"] = role
+    if given:
+        output["given"] = given
+    if family:
+        output["family"] = family
+    if name:
+        output["name"] = name
+    return output
+
+
+def _export_parent_bibliography(parent: dict[str, Any]) -> dict[str, Any]:
+    date = _normalized_text(str(parent.get("date") or ""))
+    year_match = re.search(r"(?<!\d)([12]\d{3})(?!\d)", date)
+    creators: list[dict[str, str]] = []
+    authors: list[str] = []
+    for raw_creator in parent.get("creators", []):
+        if not isinstance(raw_creator, dict):
+            continue
+        creator = _export_creator_metadata(raw_creator)
+        if creator is None:
+            continue
+        creators.append(creator)
+        if creator.get("role", "").casefold() == "author" and creator.get("name"):
+            authors.append(str(creator["name"]))
+    return {
+        "title": _normalized_text(str(parent.get("title") or "")),
+        "doi": _normalized_doi(str(parent.get("DOI") or "")),
+        "date": date,
+        "year": year_match.group(1) if year_match else "",
+        "creators": creators,
+        "authors": authors,
+    }
+
+
+def _verified_export_zotero_metadata(
+    state: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    snapshot_path = state.get("corpus_snapshot_path")
+    if not isinstance(snapshot_path, str) or not snapshot_path.strip():
+        raise ValueError("bound Zotero snapshot path missing")
+    snapshot, file_digest = _read_zotero_snapshot_with_digest(Path(snapshot_path))
+
+    identity_digest = _zotero_snapshot_identity_digest(snapshot)
+    state_digest = _zotero_snapshot_state_digest(snapshot)
+    bindings = (
+        (
+            "file digest",
+            state.get("corpus_snapshot_file_sha256"),
+            file_digest,
+        ),
+        (
+            "identity digest",
+            state.get("corpus_snapshot_identity_sha256"),
+            identity_digest,
+        ),
+        (
+            "state digest",
+            state.get("corpus_snapshot_state_sha256"),
+            state_digest,
+        ),
+        (
+            "contract digest",
+            state.get("corpus_snapshot_digest"),
+            state_digest,
+        ),
+    )
+    for label, bound, observed in bindings:
+        if bound != observed:
+            raise ValueError(f"bound Zotero snapshot {label} mismatch during export")
+
+    metadata: dict[str, dict[str, Any]] = {}
+    expected_current_ids: list[str] = []
+    for parent in _snapshot_parents_sorted(snapshot["parents"]):
+        parent_hash = _snapshot_parent_identity_hash(parent)
+        source_id = _parent_source_id(parent, parent_hash)
+        expected_current_ids.append(source_id)
+        metadata[source_id] = _export_parent_bibliography(parent)
+    if expected_current_ids != _corpus_snapshot_current_source_ids(state):
+        raise ValueError("bound Zotero snapshot membership mismatch during export")
+    return metadata
+
+
+def _export_sources(
+    state: dict[str, Any], sources: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    has_current_membership = "corpus_snapshot_current_source_ids" in state
+    current_ids = set(_corpus_snapshot_current_source_ids(state))
+    zotero_bound = any(row.get("role") == "zotero_corpus" for row in sources)
+    zotero_metadata = _verified_export_zotero_metadata(state) if zotero_bound else {}
+
+    exported: list[dict[str, Any]] = []
+    for source in sorted(sources, key=lambda row: str(row.get("record_id") or "")):
+        source_id = str(source.get("source_id") or "")
+        is_current = source_id in current_ids if has_current_membership else True
+        output = dict(source)
+        output["corpus_membership"] = "current" if is_current else "historical"
+        if is_current and source.get("role") == "zotero_corpus":
+            bibliography = zotero_metadata.get(source_id)
+            if bibliography is None:
+                raise ValueError(
+                    f"current Zotero source missing verified bibliography: {source_id}"
+                )
+            output.update(bibliography)
+        exported.append(output)
+    return exported
+
+
 def _export_current_sources(
     state: dict[str, Any], sources: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
@@ -3425,7 +3542,11 @@ def _export_nodes(
             {
                 "node_id": f"source:{source_id}",
                 "kind": "source",
-                "label": str(source.get("canonical_identity") or source_id),
+                "label": str(
+                    source.get("title")
+                    or source.get("canonical_identity")
+                    or source_id
+                ),
                 "status": "active" if source_id in current_ids else "deprecated",
                 "confidence": (
                     "unknown" if source.get("read_depth") == "metadata" else "high"
@@ -3500,8 +3621,9 @@ def _projection_provenance_complete(
 
 def _export_relations(
     current_sources: list[dict[str, Any]],
-    evidence: list[dict[str, Any]],
+    records: dict[str, list[dict[str, Any]]],
     corpus_node_id: str,
+    node_ids: set[str],
 ) -> list[dict[str, Any]]:
     relations: list[dict[str, Any]] = []
     for source in current_sources:
@@ -3523,7 +3645,9 @@ def _export_relations(
         "qualifies": "qualified",
         "not_tested": "unresolved",
     }
-    for row in sorted(evidence, key=lambda item: str(item.get("evidence_id") or "")):
+    for row in sorted(
+        records["evidence"], key=lambda item: str(item.get("evidence_id") or "")
+    ):
         relations.append(
             {
                 "relation_id": f"evidence:{row['evidence_id']}",
@@ -3531,6 +3655,31 @@ def _export_relations(
                 "to_id": f"source:{row['source_id']}",
                 "predicate": str(row["polarity"]),
                 "status": status_map[str(row["polarity"])],
+                "confidence": "high",
+                "provenance": [
+                    {
+                        "source_id": f"source:{row['source_id']}",
+                        "locator": str(row["exact_locator"]),
+                    }
+                ],
+            }
+        )
+    backed_claims, _, _ = _partition_evidence_backed_records(records)
+    for claim, row in backed_claims:
+        claim_id = str(claim["claim_id"])
+        entity_id = str(claim["entity_id"])
+        if (
+            f"claim:{claim_id}" not in node_ids
+            or f"entity:{entity_id}" not in node_ids
+        ):
+            continue
+        relations.append(
+            {
+                "relation_id": f"claim-entity:{claim_id}",
+                "from_id": f"claim:{claim_id}",
+                "to_id": f"entity:{entity_id}",
+                "predicate": "about",
+                "status": "supported",
                 "confidence": "high",
                 "provenance": [
                     {
@@ -3702,13 +3851,18 @@ def _export_change_history(
 def _knowledge_network_export(
     paths: Paths, state: dict[str, Any], records: dict[str, list[dict[str, Any]]]
 ) -> dict[str, Any]:
-    raw_sources = sorted(records["sources"], key=lambda row: str(row.get("record_id")))
-    current_sources = _export_current_sources(state, raw_sources)
-    nodes, corpus_node_id, projection_omissions = _export_nodes(
-        paths, raw_sources, current_sources, records
+    ledger_sources = sorted(
+        records["sources"], key=lambda row: str(row.get("record_id"))
     )
-    relations = _export_relations(current_sources, records["evidence"], corpus_node_id)
+    export_sources = _export_sources(state, ledger_sources)
+    current_sources = _export_current_sources(state, export_sources)
+    nodes, corpus_node_id, projection_omissions = _export_nodes(
+        paths, export_sources, current_sources, records
+    )
     node_ids = {str(node["node_id"]) for node in nodes}
+    relations = _export_relations(
+        current_sources, records, corpus_node_id, node_ids
+    )
     gaps = _export_gaps(records["gaps"], node_ids, corpus_node_id)
     status = _derive_status_summary(paths, state, records)
     open_gap_ids = sorted(
@@ -3754,7 +3908,7 @@ def _knowledge_network_export(
         }
     ).split(":", 1)[1]
     first_source_id = str(current_sources[0]["source_id"])
-    zotero_bound = any(row.get("role") == "zotero_corpus" for row in raw_sources)
+    zotero_bound = any(row.get("role") == "zotero_corpus" for row in ledger_sources)
     payload: dict[str, Any] = {
         "schema": "KnowledgeNetwork/v1",
         "network_id": paths.network_id,
@@ -3789,7 +3943,7 @@ def _knowledge_network_export(
             "blocking_gap_ids": status["open_high_priority_explicit_gap_ids"],
             "gate_checks": gate_checks,
         },
-        "sources": raw_sources,
+        "sources": export_sources,
         "claims": sorted(
             records["claims"], key=lambda row: str(row.get("record_id"))
         ),

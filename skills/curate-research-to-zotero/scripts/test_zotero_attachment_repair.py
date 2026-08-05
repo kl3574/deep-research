@@ -32,11 +32,11 @@ class ZoteroAttachmentRepairTests(unittest.TestCase):
             "retrieved_at": "2026-08-05T00:00:00Z",
             "collection": {
                 "group_id": 8,
-                "collection_key": "TARGET01",
+                "collection_key": "COLL0001",
                 "collection_version": 9,
                 "collection_path": [
                     {"key": "ROOT0001", "name": "root", "version": 1},
-                    {"key": "TARGET01", "name": "target", "version": 9},
+                    {"key": "COLL0001", "name": "target", "version": 9},
                 ],
             },
             "parents": [
@@ -48,7 +48,7 @@ class ZoteroAttachmentRepairTests(unittest.TestCase):
                     "title": "Example",
                     "children": [
                         {
-                            "key": "REMOTE01",
+                            "key": "ATT00001",
                             "version": 2,
                             "item_type": "attachment",
                             "content_type": "application/pdf",
@@ -105,7 +105,7 @@ class ZoteroAttachmentRepairTests(unittest.TestCase):
             library_id=2,
             library_name="group",
             local_collection_id=40,
-            collection_key="TARGET01",
+            collection_key="COLL0001",
             collection_path="root/target",
         )
 
@@ -134,7 +134,7 @@ class ZoteroAttachmentRepairTests(unittest.TestCase):
                 library_id=2,
                 library_name="group",
                 local_collection_id=40,
-                collection_key="TARGET01",
+                collection_key="COLL0001",
                 collection_path="root/target",
             )
 
@@ -164,18 +164,33 @@ class ZoteroAttachmentRepairTests(unittest.TestCase):
                 library_id=2,
                 library_name="group",
                 local_collection_id=40,
-                collection_key="TARGET01",
+                collection_key="COLL0001",
                 collection_path="root/target",
             )
 
     def test_apply_render_is_explicit_and_report_is_append_only(self) -> None:
         manifest = self.write_manifest()
         report = self.directory / "apply-report.json"
-        rendered = MODULE.render_runner(manifest, apply=True, report_path=report)
+        with self.assertRaisesRegex(MODULE.ContractError, "exactly one parent entry"):
+            MODULE.render_runner(manifest, apply=True, report_path=report)
+
+        repair_payload = json.loads(self.repair.read_text(encoding="utf-8"))
+        repair_payload["records"] = repair_payload["records"][:1]
+        self.repair.write_text(json.dumps(repair_payload), encoding="utf-8")
+        single_manifest = self.directory / "single-manifest.json"
+        MODULE.write_json_exclusive(single_manifest, self.build())
+        rendered = MODULE.render_runner(single_manifest, apply=True, report_path=report)
         self.assertIn('"apply":true', rendered)
+        self.assertIn("await Zotero.Attachments.importFromFile({", rendered)
+        self.assertNotIn("Zotero.DB.executeTransaction", rendered)
+        self.assertNotIn('"rolled_back"', rendered)
+        self.assertLess(
+            rendered.index("await Zotero.Attachments.importFromFile({"),
+            rendered.index("const readbackItem = await repairReadbackCreated("),
+        )
         report.write_text("{}", encoding="utf-8")
         with self.assertRaisesRegex(MODULE.ContractError, "append-only"):
-            MODULE.render_runner(manifest, apply=True, report_path=report)
+            MODULE.render_runner(single_manifest, apply=True, report_path=report)
 
     def test_javascript_core_mock_scenarios(self) -> None:
         node = shutil.which("node")
@@ -189,7 +204,7 @@ class ZoteroAttachmentRepairTests(unittest.TestCase):
             timeout=30,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertEqual(json.loads(completed.stdout), {"passed": 7})
+        self.assertEqual(json.loads(completed.stdout), {"passed": 8})
 
 
 if __name__ == "__main__":

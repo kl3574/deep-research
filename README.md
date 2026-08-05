@@ -1,6 +1,7 @@
 # deep-research
 
-一套面向 Codex agent 的可审计深度调研技能，覆盖九个正交能力：
+一套面向 Codex agent 的可审计深度调研技能，覆盖九个核心能力和一个
+可选的受约束 Zotero 执行能力：
 
 ```text
 研究问题
@@ -17,7 +18,7 @@
 
 “深度”不是堆积来源，而是把时间和模型开销放在真正控制结论的瓶颈上；“可信”不是固定来源排行榜，而是版本、范围、局部适配和失败边界都能被持续验收。
 
-## 九个默认技能与一个实验执行器
+## 九个核心技能与一个受约束执行器
 
 | 技能 | 职责 | 典型输入 | 核心产物 |
 | --- | --- | --- | --- |
@@ -35,11 +36,12 @@
 手工检索与导出导入；自主检索使用有正式接口的学术数据源，不能抓取 Scholar
 结果页或绕过 CAPTCHA。
 
-实验性配套执行器 `$zotero-declarative-bridge` 只负责已审核 manifest 的
-existing-parent collection membership、子笔记与 PDF 附件事务。其 `0.1.1`
-离线协议测试通过，但 Zotero `9.0.6` loader 在本次真实测试中拒绝插件；它未
-激活且执行了 `0` 次写入，因此不属于默认 Codex 安装集，也不得作为可用交付
-路径宣传。详情见 [v0.6.0 release notes](docs/releases/v0.6.0.md)。
+可选配套执行器 `$zotero-declarative-bridge` 只负责已审核 manifest 的
+existing-parent collection membership、书目 `shortTitle`、子笔记与单附件
+事务。`0.1.5` 已在 Zotero `9.0.6` 中完成真实激活、受约束 probe、正向回读和
+目标集合成员关系负向回读；真实写入由 `0.1.4` 完成后再由 `0.1.5` 回验，未为
+证明版本号而重复导入 PDF。它仍是显式 opt-in，不扩大研究、选源、全文理解或
+Zotero 内容决策职责。详情见 [v0.6.1 release notes](docs/releases/v0.6.1.md)。
 
 设计取舍与高质量外部方案的一手证据对照见
 [外部同类系统审计](docs/analogous-systems-review.md)。审计区分报告生成、科学
@@ -68,7 +70,7 @@ RAG、主动筛选、研究知识图谱与完整 Zotero 读写闭环，避免把
 ## 安装
 
 ```bash
-git clone --branch v0.6.0 --depth 1 https://github.com/kl3574/deep-research.git
+git clone --branch v0.6.1 --depth 1 https://github.com/kl3574/deep-research.git
 cd deep-research
 mkdir -p ~/.codex/skills
 stamp="$(date +%Y%m%d%H%M%S)"
@@ -80,9 +82,16 @@ for skill in deep-research learn-from-papers research-knowledge-network network-
 done
 ```
 
-默认循环故意不安装 `zotero-declarative-bridge`。只有兼容 Zotero loader 的
-激活、probe、preview、apply 与 readback 在隔离夹具上全部通过后，才能另行
-评估其安装；离线 XPI 构建或单元测试不是启用证据。
+默认循环故意不安装 `zotero-declarative-bridge`。需要本地 Zotero 受约束写入
+时，可在确认运行版本和目标库后另行复制：
+
+```bash
+cp -a skills/zotero-declarative-bridge ~/.codex/skills/zotero-declarative-bridge
+```
+
+技能安装不等于 Zotero 插件安装。插件必须使用 release 中的 packed XPI，通过
+Zotero 可见的 Add-ons UI 安装，并重新执行 capability、probe 与 readback 门；
+离线 XPI 构建或单元测试仍不是启用证据。
 
 固定 tag、保留旧安装备份并复制实体目录，避免开发分支漂移或重复技能根。
 重启 Codex 会话后技能才会被重新发现。
@@ -246,6 +255,8 @@ SQLite；本地私有审计清单可以记录目标 ID/key，但不得提交到�
 
 真实前向测试见
 [稀疏动力学识别与参数校准](evals/real-world/sparse-dynamics-2026-07-29.md)。
+DoE/代理模型、真实 Zotero 交付、知识网络缺口发现与发布闭环见
+[DoE 与代理模型真实场景](evals/real-world/doe-surrogate-2026-08-06.md)。
 可复现实验审计可直接运行：
 
 ```bash

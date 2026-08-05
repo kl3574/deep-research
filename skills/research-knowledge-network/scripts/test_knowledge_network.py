@@ -2398,6 +2398,28 @@ class KnowledgeNetworkTest(unittest.TestCase):
         self.assertEqual(payload["schema"], "KnowledgeNetwork/v1")
         for ledger in ("sources", "claims", "evidence", "relations", "gaps", "events"):
             self.assertIn(ledger, payload)
+        claim_entity_relation = next(
+            relation
+            for relation in payload["relations"]
+            if relation["relation_id"] == "claim-entity:claim-contract"
+        )
+        self.assertEqual(
+            claim_entity_relation,
+            {
+                "relation_id": "claim-entity:claim-contract",
+                "from_id": "claim:claim-contract",
+                "to_id": "entity:entity-contract",
+                "predicate": "about",
+                "status": "supported",
+                "confidence": "high",
+                "provenance": [
+                    {
+                        "source_id": "source:source-contract",
+                        "locator": "PDF p.4 | Eq. (7)",
+                    }
+                ],
+            },
+        )
 
         validator = load_deep_validator()
         self.assertEqual(validator.validate_knowledge_network(payload), [])
@@ -2448,6 +2470,141 @@ class KnowledgeNetworkTest(unittest.TestCase):
             any("sha256 mismatch" in error for error in digest_errors),
             digest_errors,
         )
+
+    def test_export_enriches_current_zotero_sources_and_marks_history(self):
+        parents_v1 = [
+            {
+                "key": "BIBLIO01",
+                "version": 1,
+                "item_type": "journalArticle",
+                "title": "Original Bibliographic Parent",
+                "date": "2025",
+                "DOI": "https://doi.org/10.1000/BIBLIO",
+                "ISBN": "",
+                "creators": [
+                    {
+                        "creatorType": "author",
+                        "firstName": "Ada",
+                        "lastName": "Lovelace",
+                    }
+                ],
+            },
+            {
+                "key": "BIBLIO02",
+                "version": 1,
+                "item_type": "journalArticle",
+                "title": "Removed Bibliographic Parent",
+                "date": "2024",
+                "DOI": "10.1000/removed-biblio",
+                "ISBN": "",
+                "creators": [],
+            },
+        ]
+        snapshot_path, digest = self.make_zotero_snapshot(
+            self.network_id, parents_v1, collection_version=1
+        )
+        self.init_network_with_snapshot(self.network_id, snapshot_path, digest)
+        ingested = invoke(
+            self.root,
+            self.network_id,
+            ["ingest-zotero-snapshot", "--snapshot", str(snapshot_path)],
+        )
+        self.assertEqual(ingested[0], 0, ingested[2])
+
+        parents_v2 = [
+            {
+                "key": "BIBLIO01",
+                "version": 2,
+                "item_type": "journalArticle",
+                "title": "Revised Bibliographic Parent",
+                "date": "2026-08-06",
+                "DOI": "DOI:10.1000/BIBLIO",
+                "ISBN": "",
+                "creators": [
+                    {
+                        "creatorType": "author",
+                        "firstName": "Ada",
+                        "lastName": "Lovelace",
+                    },
+                    {
+                        "creatorType": "editor",
+                        "firstName": "Grace",
+                        "lastName": "Hopper",
+                    },
+                ],
+            }
+        ]
+        snapshot_path, _ = self.make_zotero_snapshot(
+            self.network_id, parents_v2, collection_version=2
+        )
+        refreshed = invoke(
+            self.root,
+            self.network_id,
+            [
+                "ingest-zotero-snapshot",
+                "--snapshot",
+                str(snapshot_path),
+                "--allow-refresh",
+            ],
+        )
+        self.assertEqual(refreshed[0], 0, refreshed[2])
+
+        ledger_path = self.root / "networks" / self.network_id / "sources.jsonl"
+        ledger_before = ledger_path.read_bytes()
+        first_output = self.root / "zotero-enriched-a.json"
+        second_output = self.root / "zotero-enriched-b.json"
+        for output_path in (first_output, second_output):
+            exported = invoke(
+                self.root,
+                self.network_id,
+                ["export", "--output", str(output_path)],
+            )
+            self.assertEqual(exported[0], 0, exported[2])
+        self.assertEqual(ledger_path.read_bytes(), ledger_before)
+        self.assertEqual(first_output.read_bytes(), second_output.read_bytes())
+
+        payload = json.loads(first_output.read_text(encoding="utf-8"))
+        current = [
+            row
+            for row in payload["sources"]
+            if row["corpus_membership"] == "current"
+        ]
+        historical = [
+            row
+            for row in payload["sources"]
+            if row["corpus_membership"] == "historical"
+        ]
+        self.assertEqual(len(payload["sources"]), 3)
+        self.assertEqual(len(current), 1)
+        self.assertEqual(len(historical), 2)
+        self.assertEqual(current[0]["title"], "Revised Bibliographic Parent")
+        self.assertEqual(current[0]["doi"], "10.1000/biblio")
+        self.assertEqual(current[0]["date"], "2026-08-06")
+        self.assertEqual(current[0]["year"], "2026")
+        self.assertEqual(current[0]["authors"], ["Ada Lovelace"])
+        self.assertEqual(
+            current[0]["creators"],
+            [
+                {
+                    "role": "author",
+                    "given": "Ada",
+                    "family": "Lovelace",
+                    "name": "Ada Lovelace",
+                },
+                {
+                    "role": "editor",
+                    "given": "Grace",
+                    "family": "Hopper",
+                    "name": "Grace Hopper",
+                },
+            ],
+        )
+        current_node = next(
+            node
+            for node in payload["nodes"]
+            if node["node_id"] == f"source:{current[0]['source_id']}"
+        )
+        self.assertEqual(current_node["label"], "Revised Bibliographic Parent")
 
     def test_export_omits_unsupported_claim_and_reports_incomplete_provenance(self):
         self.init_network(self.network_id, required_dimension=[], required_benchmark=[])

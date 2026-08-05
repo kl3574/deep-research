@@ -10,6 +10,7 @@ import tempfile
 import threading
 import unittest
 import urllib.parse
+from unittest import mock
 
 import snapshot_zotero_collection as snapshotter
 
@@ -172,6 +173,65 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(api["collection"], api_slash["collection"])
         self.assertEqual(api["parents"], api_slash["parents"])
         self.assertEqual(api["state_sha256"], api_slash["state_sha256"])
+
+    def test_get_all_paginates_101_top_parents_and_children_without_loss(self) -> None:
+        top_path = "/api/groups/1234567/collections/COLL0001/items/top"
+        child_path = "/api/groups/1234567/items/P0000000/children"
+        datasets = {
+            top_path: [
+                {"key": f"P{index:07d}", "data": {}}
+                for index in range(101)
+            ],
+            child_path: [
+                {"key": f"C{index:07d}", "data": {}}
+                for index in range(101)
+            ],
+        }
+        starts = {top_path: [], child_path: []}
+
+        def fake_api_get(
+            _base_url: str, path: str, params: dict[str, object] | None = None
+        ) -> object:
+            self.assertIsNotNone(params)
+            assert params is not None
+            start = int(params["start"])
+            limit = int(params["limit"])
+            starts[path].append(start)
+            return datasets[path][start : start + limit]
+
+        with mock.patch.object(snapshotter, "api_get", side_effect=fake_api_get):
+            top = snapshotter.get_all(self.base_url, top_path)
+            children = snapshotter.get_all(self.base_url, child_path)
+
+        for path, observed in ((top_path, top), (child_path, children)):
+            expected_keys = [item["key"] for item in datasets[path]]
+            observed_keys = [item["key"] for item in observed]
+            self.assertEqual(expected_keys, observed_keys)
+            self.assertEqual(101, len(set(observed_keys)))
+            self.assertEqual([0, 100], starts[path])
+
+    def test_get_all_rejects_a_repeated_full_page(self) -> None:
+        path = "/api/groups/1234567/collections/COLL0001/items/top"
+        full_page = [
+            {"key": f"R{index:07d}", "data": {}}
+            for index in range(100)
+        ]
+        starts: list[int] = []
+
+        def fake_api_get(
+            _base_url: str, _path: str, params: dict[str, object] | None = None
+        ) -> object:
+            self.assertIsNotNone(params)
+            assert params is not None
+            starts.append(int(params["start"]))
+            if len(starts) > 2:
+                raise AssertionError("pagination loop guard did not stop repeated page")
+            return full_page
+
+        with mock.patch.object(snapshotter, "api_get", side_effect=fake_api_get):
+            with self.assertRaisesRegex(ValueError, "repeated full page"):
+                snapshotter.get_all(self.base_url, path)
+        self.assertEqual([0, 100], starts)
 
     def test_private_writer_and_base_url_guards(self) -> None:
         value = snapshotter.build_snapshot(

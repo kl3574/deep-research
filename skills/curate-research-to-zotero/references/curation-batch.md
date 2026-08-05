@@ -39,15 +39,17 @@ refresh a fingerprint inside an approved batch.
 | --- | --- | --- |
 | `create_parent` | `import_zotero_bundle` | one new target parent |
 | `metadata_only_create` | `import_zotero_bundle` | one parent, no full-text claim |
-| `reuse_existing_parent_add_collection` | `desktop_membership_transaction` | no new parent; add membership |
-| `create_missing_note` | `prepare_note_migration` | create one child note |
-| `update_existing_note` | `prepare_note_migration` | update one child note |
-| `attach_missing_pdf` | `desktop_attachment_transaction` | attach without creating a parent |
+| `reuse_existing_parent_add_collection` | `zotero_declarative_bridge` | no new parent; add membership |
+| `create_missing_note` | `zotero_declarative_bridge` | create one child note |
+| `update_existing_note` | `zotero_declarative_bridge` | update one child note |
+| `attach_missing_pdf` | `zotero_declarative_bridge` | attach without creating a parent |
 | `no_op_verified` | `readback_only` | no mutation |
 | any `blocked_*` | `none` | no mutation |
 
-The current toolset does not implement the two Desktop handlers above. Until a
-manifest-bound handler exists, use `blocked_unsupported_operation`. An existing
+The reviewed bridge implements exactly four bounded manifest operations for the
+four existing-parent decisions above: collection membership, child-note
+creation, child-note update, and missing-PDF attachment. It does not create
+bibliographic parents or mutate parent bibliographic metadata. An existing
 parent outside the target can only be
 `reuse_existing_parent_add_collection` or
 `blocked_unsupported_operation`; it must never become `create_parent`.
@@ -75,6 +77,12 @@ An actionable entry is golden only when:
 
 Metadata-only can be golden for metadata ingestion; it is never
 `golden_fulltext`.
+
+`PaperKnowledgeNote/v2` authorizes only its deterministic child-note projection
+and never a parent bibliographic `shortTitle` edit. A `shortTitle` change can be
+authorized by a separate, independently reviewed, version-bound sealed
+bibliographic-metadata manifest with its own apply/readback contract; note
+content and `CurationBatch/v1` decisions must not imply that authority.
 
 The native bundle for `metadata_only_create` sets
 `access_level=metadata_only`, omits `pdf`, supplies a nonempty

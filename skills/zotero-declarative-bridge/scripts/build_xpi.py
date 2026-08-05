@@ -13,7 +13,66 @@ from pathlib import Path
 
 FILES = ("manifest.json", "bridge_core.js", "bootstrap.js")
 PLUGIN_ID = "zotero-declarative-bridge@deep-research.local"
-PLUGIN_VERSION = "0.1.1"
+PLUGIN_VERSION = "0.1.5"
+REPOSITORY_RELEASE_VERSION = "0.6.1"
+RELEASE_TAG = f"v{REPOSITORY_RELEASE_VERSION}"
+XPI_FILENAME = f"zotero-declarative-bridge-{PLUGIN_VERSION}.xpi"
+XPI_SHA256 = "10c0e06c7a7fa85afe73b3a9c49d518d7777513a1d55cb01eb8ed8182d1db76b"
+PLUGIN_UPDATE_URL = (
+    "https://raw.githubusercontent.com/kl3574/deep-research/main/skills/"
+    "zotero-declarative-bridge/assets/zotero-plugin/updates.json"
+)
+EXPECTED_UPDATE_LINK = (
+    f"https://github.com/kl3574/deep-research/releases/download/{RELEASE_TAG}/"
+    f"{XPI_FILENAME}"
+)
+EXPECTED_UPDATE_HASH = f"sha256:{XPI_SHA256}"
+
+
+def validate_update_manifest(plugin_root: Path, manifest: dict[str, object]) -> str:
+    update_path = plugin_root / "updates.json"
+    try:
+        update_manifest = json.loads(update_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid external update manifest: {exc}") from exc
+    if not isinstance(update_manifest, dict) or set(update_manifest) != {"addons"}:
+        raise ValueError("external update manifest must contain only an addons object")
+    addons = update_manifest["addons"]
+    if not isinstance(addons, dict) or set(addons) != {PLUGIN_ID}:
+        raise ValueError("external update manifest must contain only the reviewed plugin ID")
+    addon = addons[PLUGIN_ID]
+    if not isinstance(addon, dict) or set(addon) != {"updates"}:
+        raise ValueError("external update manifest plugin entry must contain only updates")
+    updates = addon["updates"]
+    if not isinstance(updates, list):
+        raise ValueError("external update manifest updates must be a list")
+    if any(not isinstance(entry, dict) for entry in updates):
+        raise ValueError("external update manifest update entries must be objects")
+    matches = [entry for entry in updates if entry.get("version") == PLUGIN_VERSION]
+    if len(matches) != 1:
+        raise ValueError("external update manifest must contain one current version")
+    entry = matches[0]
+    app = manifest["applications"]["zotero"]
+    expected = {
+        "version": PLUGIN_VERSION,
+        "update_link": EXPECTED_UPDATE_LINK,
+        "update_hash": EXPECTED_UPDATE_HASH,
+        "applications": {
+            "zotero": {
+                "strict_min_version": app["strict_min_version"],
+                "strict_max_version": app["strict_max_version"],
+            }
+        },
+    }
+    if set(entry) != set(expected):
+        raise ValueError("external update manifest current entry fields do not match the release contract")
+    if entry["update_link"] != EXPECTED_UPDATE_LINK:
+        raise ValueError("external update manifest release tag and asset do not match the release contract")
+    if entry["update_hash"] != EXPECTED_UPDATE_HASH:
+        raise ValueError("external update manifest XPI hash does not match the release contract")
+    if entry["applications"] != expected["applications"]:
+        raise ValueError("external update manifest compatibility does not match the plugin manifest")
+    return entry["update_hash"]
 
 
 def build(output: Path, plugin_root: Path) -> str:
@@ -29,8 +88,11 @@ def build(output: Path, plugin_root: Path) -> str:
         raise ValueError(f"plugin version must be {PLUGIN_VERSION}")
     if app.get("id") != PLUGIN_ID:
         raise ValueError("plugin ID mismatch")
+    if app.get("update_url") != PLUGIN_UPDATE_URL:
+        raise ValueError("plugin update URL must match the reviewed public HTTPS manifest")
     if app.get("strict_min_version") != "9.0" or app.get("strict_max_version") != "9.0.*":
         raise ValueError("plugin compatibility must remain pinned to Zotero 9.0.*")
+    expected_hash = validate_update_manifest(plugin_root, manifest)
     bootstrap = (plugin_root / "bootstrap.js").read_text(encoding="utf-8")
     for hook in ("function startup(", "function shutdown(", "function install(", "function uninstall("):
         if hook not in bootstrap:
@@ -46,7 +108,11 @@ def build(output: Path, plugin_root: Path) -> str:
             info.external_attr = (0o100644 & 0xFFFF) << 16
             archive.writestr(info, data)
     os.chmod(output, 0o600)
-    return hashlib.sha256(output.read_bytes()).hexdigest()
+    digest = hashlib.sha256(output.read_bytes()).hexdigest()
+    if f"sha256:{digest}" != expected_hash:
+        output.unlink()
+        raise ValueError("built XPI hash does not match the external update manifest")
+    return digest
 
 
 def main() -> int:

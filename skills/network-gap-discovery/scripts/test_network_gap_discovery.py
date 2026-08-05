@@ -2857,6 +2857,47 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "onboarding_required"):
             validate_patch_v2(unonboarded, network)
 
+    def test_real_gap_queries_preserve_semantic_label_and_drop_internal_template_terms(self):
+        network = doe_surrogate_noise_network_fixture(single_source_count=0, isolate_count=0)
+        semantic_label = "形貌反问题的 adaptive DoE sampling 与 surrogate uncertainty calibration"
+        network["gaps"][0]["description"] = semantic_label
+        network["gaps"][0]["reason"] = (
+            "Targeted evidence needed for claim:rank_correlation_fulltext"
+        )
+        attach_network_content_sha256(network)
+
+        hypotheses = generate_hypotheses_from_probe(scan_network(network), network)
+        hypothesis = next(
+            row
+            for row in hypotheses["hypotheses"]
+            if row["grounds"][0]["ref_id"] == "gap:morphology_specific_benchmark"
+        )
+        self.assertEqual(hypothesis["semantic_label"], semantic_label)
+
+        request_set = emit_search_requests(hypotheses, network)
+        request = next(
+            row
+            for row in request_set["requests"]
+            if row["gap_hypothesis_id"] == hypothesis["hypothesis_id"]
+        )
+        self.assertEqual(request["paper_need"], semantic_label)
+        provider_queries = " ".join(
+            seed["query"] for seed in request["query_seeds"]
+        ).lower()
+        self.assertIn("形貌反问题", provider_queries)
+        for forbidden in (
+            "claim:",
+            "rank_correlation_fulltext",
+            "targeted",
+            "needed",
+            "probe",
+            "signal",
+        ):
+            self.assertNotIn(forbidden, provider_queries)
+        self.assertNotEqual(
+            request["query_seeds"][0]["query"],
+            request["query_seeds"][1]["query"],
+        )
 
 if __name__ == "__main__":
     unittest.main()

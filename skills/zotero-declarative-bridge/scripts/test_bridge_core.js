@@ -51,6 +51,27 @@ assert.deepStrictEqual(
   core.classifyMembership({expected_present: false}, true),
   {decision: "satisfied"},
 );
+const baselineMembershipEntry = {
+  parent: {expected_target_membership: true},
+  operations: [{type: "ensure_parent_short_title"}],
+};
+assert.strictEqual(
+  core.readbackMembershipSatisfied(baselineMembershipEntry, true, [{decision: "satisfied"}]),
+  true,
+);
+assert.strictEqual(
+  core.readbackMembershipSatisfied(baselineMembershipEntry, false, [{decision: "satisfied"}]),
+  false,
+);
+const ensuredMembershipEntry = baseManifest().entries[0];
+assert.strictEqual(
+  core.readbackMembershipSatisfied(ensuredMembershipEntry, true, [{decision: "satisfied"}]),
+  true,
+);
+assert.strictEqual(
+  core.readbackMembershipSatisfied(ensuredMembershipEntry, false, [{decision: "satisfied"}]),
+  false,
+);
 const noteOperation = {
   note_key: null,
   expected_child_note_keys: [],
@@ -81,4 +102,76 @@ assert.throws(
   () => core.classifyAttachment(pdfOperation, [{key: "NEWPDF01", version: 1, content_type: "application/pdf", link_mode: "imported_file", readable_pdf: true, sha256: pdfOperation.source_sha256, direct_collection_count: 1}]),
   /direct collection membership/,
 );
-process.stdout.write("bridge_core: 11 checks passed\n");
+assert.throws(
+  () => core.classifyAttachment(pdfOperation, [
+    {key: "NEWPDF01", version: 1, content_type: "application/pdf", link_mode: "imported_file", readable_pdf: true, sha256: pdfOperation.source_sha256, direct_collection_count: 0},
+    {key: "NEWPDF02", version: 1, content_type: "application/pdf", link_mode: "imported_file", readable_pdf: true, sha256: pdfOperation.source_sha256, direct_collection_count: 0},
+  ]),
+  /multiple matching PDF attachments/,
+);
+const shortTitleOperation = {
+  type: "ensure_parent_short_title",
+  library_id: 2,
+  parent_key: "PARENT01",
+  expected_parent_version: 7,
+  expected_old_value: "Old title",
+  new_short_title: "Reviewed title",
+};
+assert.deepStrictEqual(
+  core.classifyShortTitle(shortTitleOperation, {library_id: 2, parent_key: "PARENT01", item_version: 7, value: "Old title"}),
+  {decision: "needs_write"},
+);
+assert.deepStrictEqual(
+  core.classifyShortTitle(shortTitleOperation, {library_id: 2, parent_key: "PARENT01", item_version: 99, value: "Reviewed title"}),
+  {decision: "satisfied"},
+);
+assert.throws(
+  () => core.classifyShortTitle(shortTitleOperation, {library_id: 2, parent_key: "PARENT01", item_version: 8, value: "Old title"}),
+  /parent-version drift/,
+);
+assert.throws(
+  () => core.classifyShortTitle(shortTitleOperation, {library_id: 2, parent_key: "PARENT01", item_version: 7, value: "Concurrent edit"}),
+  /old-value drift/,
+);
+const shortTitleManifest = baseManifest();
+shortTitleManifest.entries[0].parent.expected_target_membership = true;
+shortTitleManifest.entries[0].operations = [shortTitleOperation];
+assert.strictEqual(core.validateManifest(shortTitleManifest), true);
+shortTitleManifest.entries[0].operations[0].library_id = 3;
+assert.throws(() => core.validateManifest(shortTitleManifest), /disagrees with target/);
+const fullPDFOperation = {
+  type: "ensure_pdf_attachment",
+  source_path: "/tmp/fixture.pdf",
+  source_size_bytes: 17,
+  source_sha256: "sha256:" + "d".repeat(64),
+  source_magic: "%PDF-",
+  expected_attachments: [],
+};
+const attachmentManifest = baseManifest();
+attachmentManifest.target.require_files_editable = true;
+attachmentManifest.entries[0].parent.expected_target_membership = true;
+attachmentManifest.entries[0].operations = [fullPDFOperation];
+assert.strictEqual(core.validateManifest(attachmentManifest), true);
+const mixedManifest = baseManifest();
+mixedManifest.target.require_files_editable = true;
+mixedManifest.entries[0].operations.push(fullPDFOperation);
+assert.throws(() => core.validateManifest(mixedManifest), /cannot share/);
+assert.deepStrictEqual(core.planWrites([]), {
+  mode: "none",
+  operation_count: 0,
+  attachment_operation_count: 0,
+  database_operation_count: 0,
+});
+assert.strictEqual(core.planWrites([{
+  entry: {operations: [fullPDFOperation]},
+  decisions: [{decision: "needs_write"}],
+}]).mode, "single_attachment_import");
+assert.strictEqual(core.planWrites([{
+  entry: {operations: [{type: "ensure_parent_short_title"}]},
+  decisions: [{decision: "needs_write"}],
+}]).mode, "db_atomic");
+assert.throws(() => core.planWrites([
+  {entry: {operations: [fullPDFOperation]}, decisions: [{decision: "needs_write"}]},
+  {entry: {operations: [fullPDFOperation]}, decisions: [{decision: "needs_write"}]},
+]), /multiple PDF attachment mutations/);
+process.stdout.write("bridge_core: 28 checks passed\n");

@@ -247,6 +247,7 @@ var ZoteroDeclarativeBridge = (() => {
       version: Number(parent.version),
       item_type: String(parent.itemType),
       title: String(parent.getField("title") || ""),
+      short_title: String(parent.getField("shortTitle") || ""),
       doi: ZoteroDeclarativeBridgeCore.normalizeDOI(String(parent.getField("DOI") || "")),
       target_membership: parent.getCollections().includes(target.collection.id),
     };
@@ -281,6 +282,26 @@ var ZoteroDeclarativeBridge = (() => {
       if (operation.type === "ensure_collection_membership") {
         decisions.push({...ZoteroDeclarativeBridgeCore.classifyMembership(operation, live.observedParent.target_membership), type: operation.type});
       }
+      else if (operation.type === "ensure_parent_short_title") {
+        const fieldID = Zotero.ItemFields.getID("shortTitle");
+        if (!fieldID || !Zotero.ItemFields.isValidForType(fieldID, live.parent.itemTypeID)) {
+          throw new ProtocolError("shortTitle is invalid for the parent item type", 409, "parent_drift");
+        }
+        try {
+          decisions.push({
+            ...ZoteroDeclarativeBridgeCore.classifyShortTitle(operation, {
+              library_id: target.observed.library_id,
+              parent_key: live.observedParent.key,
+              item_version: live.observedParent.version,
+              value: live.observedParent.short_title,
+            }),
+            type: operation.type,
+          });
+        }
+        catch (error) {
+          throw new ProtocolError(error.message, 409, "parent_drift");
+        }
+      }
       else if (operation.type === "ensure_child_note") {
         if (await sha256Text(operation.new_html) !== operation.new_sha256) throw new ProtocolError("new note hash mismatch", 409, "source_drift");
         decisions.push({...ZoteroDeclarativeBridgeCore.classifyNote(operation, live.noteStates), type: operation.type});
@@ -306,6 +327,7 @@ var ZoteroDeclarativeBridge = (() => {
       parent_key: row.entry.parent.key,
       parent_version: row.live.observedParent.version,
       target_membership: row.live.observedParent.target_membership,
+      short_title: row.live.observedParent.short_title,
       child_notes: row.live.noteStates,
       attachments: row.live.attachmentStates,
       operations: row.decisions,
@@ -324,22 +346,39 @@ var ZoteroDeclarativeBridge = (() => {
     }
   }
 
-  async function preflight(manifest) {
+  async function preflight(manifest, enforceReadbackMembership = false) {
     await validateManifestDigest(manifest);
     const target = await resolveTarget(manifest.target);
     const rows = [];
     for (const entry of manifest.entries) rows.push(await classifyEntry(entry, target));
-    const publicState = {target: target.observed, entries: rows.map(publicEntry)};
+    const rowSatisfied = row => row.allSatisfied && (
+      !enforceReadbackMembership
+      || ZoteroDeclarativeBridgeCore.readbackMembershipSatisfied(
+        row.entry,
+        row.live.observedParent.target_membership,
+        row.decisions,
+      )
+    );
+    let writePlan;
+    try { writePlan = ZoteroDeclarativeBridgeCore.planWrites(rows); }
+    catch (error) { throw new ProtocolError(error.message, 409, "unsafe_write_plan"); }
+    const publicState = {
+      target: target.observed,
+      execution_profile: writePlan.mode,
+      write_plan: writePlan,
+      entries: rows.map(row => ({...publicEntry(row), all_satisfied: rowSatisfied(row)})),
+    };
     return {
       target,
       rows,
       publicState,
       stateSHA256: await sha256Value(publicState),
-      allSatisfied: rows.every(row => row.allSatisfied),
+      allSatisfied: rows.every(rowSatisfied),
     };
   }
 
   async function applyRows(preflightResult) {
+    const createdAttachmentKeys = [];
     for (const row of preflightResult.rows) {
       for (let index = 0; index < row.entry.operations.length; index++) {
         const operation = row.entry.operations[index];
@@ -348,6 +387,14 @@ var ZoteroDeclarativeBridge = (() => {
         if (operation.type === "ensure_collection_membership") {
           row.live.parent.addToCollection(preflightResult.target.collection.id);
           await row.live.parent.save({skipDateModifiedUpdate: true});
+        }
+        else if (operation.type === "ensure_parent_short_title") {
+          const fieldID = Zotero.ItemFields.getID("shortTitle");
+          if (!fieldID || !Zotero.ItemFields.isValidForType(fieldID, row.live.parent.itemTypeID)) {
+            throw new ProtocolError("shortTitle is invalid for the parent item type", 409, "parent_drift");
+          }
+          row.live.parent.setField("shortTitle", operation.new_short_title);
+          await row.live.parent.save();
         }
         else if (operation.type === "ensure_child_note") {
           if (operation.note_key) {
@@ -372,9 +419,11 @@ var ZoteroDeclarativeBridge = (() => {
             contentType: "application/pdf",
           });
           if (!attachment || !attachment.key) throw new Error("attachment import returned no item key");
+          createdAttachmentKeys.push(attachment.key);
         }
       }
     }
+    return createdAttachmentKeys;
   }
 
   async function dispatch(envelope) {
@@ -386,7 +435,13 @@ var ZoteroDeclarativeBridge = (() => {
         plugin_version: STATE.pluginVersion,
         zotero_version: Zotero.version,
         endpoint: ENDPOINT,
-        operations: ["ensure_collection_membership", "ensure_child_note", "ensure_pdf_attachment"],
+        operations: ["ensure_collection_membership", "ensure_parent_short_title", "ensure_child_note", "ensure_pdf_attachment"],
+        execution_profiles: {
+          db_atomic: ["ensure_collection_membership", "ensure_parent_short_title", "ensure_child_note"],
+          single_attachment_import: ["ensure_pdf_attachment"],
+        },
+        mixed_operations: false,
+        attachment_batch: false,
         arbitrary_javascript: false,
         sqlite_access: false,
       };
@@ -399,7 +454,7 @@ var ZoteroDeclarativeBridge = (() => {
       throw new ProtocolError("payload keys differ");
     }
     const manifest = envelope.payload.manifest;
-    const before = await preflight(manifest);
+    const before = await preflight(manifest, action === "readback");
     if (action === "readback") {
       return {
         status: before.allSatisfied ? "verified" : "not_applied",
@@ -452,13 +507,17 @@ var ZoteroDeclarativeBridge = (() => {
       };
     }
     let writeAttempted = false;
+    let createdAttachmentKeys = [];
+    const executionProfile = before.publicState.execution_profile;
     try {
-      writeAttempted = true;
-      await Zotero.DB.executeTransaction(async () => {
+      const repeatAndApply = async () => {
         const repeated = await preflight(manifest);
         if (repeated.stateSHA256 !== before.stateSHA256) throw new ProtocolError("state changed at transaction start", 409, "transaction_drift");
-        await applyRows(repeated);
-      });
+        writeAttempted = true;
+        createdAttachmentKeys = await applyRows(repeated);
+      };
+      if (executionProfile === "single_attachment_import") await repeatAndApply();
+      else await Zotero.DB.executeTransaction(repeatAndApply);
       const after = await preflight(manifest);
       if (!after.allSatisfied) throw new ProtocolError("committed readback mismatch", 500, "readback_mismatch");
       return {
@@ -467,6 +526,8 @@ var ZoteroDeclarativeBridge = (() => {
         state_sha256: after.stateSHA256,
         write_attempted: true,
         commit_state: "committed",
+        execution_profile: executionProfile,
+        created_attachment_keys: createdAttachmentKeys,
         state: after.publicState,
       };
     }
@@ -476,7 +537,23 @@ var ZoteroDeclarativeBridge = (() => {
       try {
         inspection = await preflight(manifest);
         const satisfied = inspection.rows.filter(row => row.allSatisfied).length;
-        commitState = satisfied === 0 ? "rolled_back" : satisfied === inspection.rows.length ? "committed" : "partial_commit";
+        if (!writeAttempted) {
+          commitState = "not_started";
+        }
+        else if (executionProfile === "single_attachment_import") {
+          commitState = inspection.allSatisfied
+            ? "committed"
+            : createdAttachmentKeys.length
+              ? "committed_unverified"
+              : "unknown";
+        }
+        else {
+          commitState = inspection.stateSHA256 === before.stateSHA256
+            ? "rolled_back"
+            : satisfied === inspection.rows.length
+              ? "committed"
+              : "partial_commit";
+        }
       }
       catch (_inspectionError) {}
       const wrapped = new ProtocolError(
@@ -487,6 +564,8 @@ var ZoteroDeclarativeBridge = (() => {
       wrapped.writeAttempted = writeAttempted;
       wrapped.commitState = commitState;
       wrapped.inspection = inspection ? inspection.publicState : null;
+      wrapped.executionProfile = executionProfile;
+      wrapped.createdAttachmentKeys = createdAttachmentKeys;
       throw wrapped;
     }
   }
@@ -514,6 +593,8 @@ var ZoteroDeclarativeBridge = (() => {
           write_attempted: protocol.writeAttempted === true,
           commit_state: protocol.commitState || "not_started",
           inspection: protocol.inspection || null,
+          execution_profile: protocol.executionProfile || null,
+          created_attachment_keys: protocol.createdAttachmentKeys || [],
         },
       );
     }

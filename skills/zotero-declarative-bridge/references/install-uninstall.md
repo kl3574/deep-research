@@ -15,10 +15,21 @@ The XPI must contain only `manifest.json`, `bridge_core.js`, and `bootstrap.js`
 at its root. Inspect them before installation. The manifest is compatible only
 with Zotero `9.0.*`; a newer minor/major requires review and retest.
 
+`applications.zotero.update_url` is a Zotero runtime loader gate even when a
+generic WebExtension schema treats it as optional. It must point to the public
+external `updates.json`, whose current entry binds the versioned GitHub Release
+XPI with `update_hash`. `updates.json` is not packaged inside the XPI. Before a
+release or installation, verify the public URL returns that JSON, its asset URL
+returns the exact XPI, and Zotero's own `loadManifestFromFile` reports the
+expected ID/version with no `additionalErrors`. A successful loader preflight
+does not prove bootstrap activation, capability creation, or mutation behavior.
+For repository release `v0.6.1`, the exact plugin asset contract is
+`zotero-declarative-bridge-0.1.5.xpi` with SHA-256 `10c0e06c7a7fa85afe73b3a9c49d518d7777513a1d55cb01eb8ed8182d1db76b`.
+
 ## Install through Zotero Desktop (preferred)
 
-1. In Zotero Desktop, open **Tools -> Add-ons**.
-2. Choose **Install Add-on From File** and select the inspected XPI.
+1. In Zotero Desktop, open **Tools -> Plugins**.
+2. Drag the inspected XPI into the Plugins window and confirm installation.
 3. Confirm the add-on ID is `zotero-declarative-bridge@deep-research.local`.
 4. Find `zotero-declarative-bridge-capability.json` in the active Zotero
    profile. Verify its containing directory is user-only and the file mode is
@@ -29,32 +40,20 @@ with Zotero `9.0.*`; a newer minor/major requires review and retest.
 This is Zotero's documented packed-XPI route:
 <https://www.zotero.org/support/plugins>.
 
-## Packed-XPI profile fallback
+## No profile-copy or source-proxy fallback
 
-Use this only when the UI route is inaccessible and the user explicitly
-authorizes profile installation. Close Zotero first, preserve any same-ID
-state, and run:
+The packed XPI has no supported profile-copy fallback. A filesystem copy is not
+evidence that Zotero registered or activated it. `install_packed_xpi.py` now
+fails closed and directs the operator to the visible Plugins UI.
 
-```bash
-python scripts/install_packed_xpi.py /absolute/reviewed.xpi \
-  --profile /absolute/active/profile \
-  --receipt /absolute/private-install-receipt.json \
-  --backup-dir /absolute/private-backup
-```
+The stable skill does not ship a source-proxy installer and does not change
+profile discovery, automatic-disablement, registry, or cache preferences.
+Those changes have security and recovery implications and belong in separately
+reviewed developer tooling, not the transaction executor installed for normal
+use.
 
-The helper accepts only the fixed three-file XPI and Zotero `9.0.*`, verifies
-the unique default profile, refuses a listening Zotero process, and atomically
-writes `extensions/zotero-declarative-bridge@deep-research.local.xpi`. It does
-not edit `extensions.json`, preferences, or SQLite.
-
-Never place an unpacked directory at the bare plugin-ID path. Zotero's source
-development route uses a **text proxy file** named by the plugin ID whose
-contents are the source directory path; it is not a same-named directory. That
-route also requires loader-cache preference handling and belongs in an isolated
-development profile, not this production workflow. See
-<https://www.zotero.org/support/dev/client_coding/plugin_development>.
-
-After restart require all three gates before any transaction preview:
+After visible installation require all three gates before any transaction
+preview:
 
 1. The extension registry or Plugins window shows the exact ID/version as
    active and compatible.
@@ -68,24 +67,19 @@ loader rejects, disables, or removes it, preserve the loader log and stop.
 ## Upgrade
 
 Build the new XPI, record its SHA-256, inspect the diff, install it through the
-Plugins manager or the explicitly authorized packed-XPI fallback, and rerun all
-three activation gates. Startup rotates the capability token, so an old
-capability descriptor or preview receipt cannot authorize the new process.
+Plugins manager, and rerun all three activation gates. Startup rotates the
+capability token, so an old capability descriptor or preview receipt cannot
+authorize the new process.
 
 ## Uninstall
 
 1. Do not begin a new preview or apply.
-2. Remove/disable the add-on in **Tools -> Add-ons**.
+2. Remove/disable the add-on in **Tools -> Plugins**.
 3. Confirm authenticated `probe` no longer succeeds and the endpoint returns
    `404` (or Zotero is not listening).
 4. Confirm the capability file was removed. If Zotero crashed, delete only the
    stale regular file at the documented profile path after Zotero is closed;
    never follow a symlink.
-
-For a packed-profile rollback, close Zotero and move only the exact same-ID XPI
-to the private evidence/backup location. Restart and confirm registry removal,
-endpoint absence, and capability removal. Never repair uninstallation by
-editing `extensions.json` or SQLite.
 
 Shutdown unregisters only the exact endpoint constructor installed by this
 plugin and removes only the capability file whose key ID matches the current

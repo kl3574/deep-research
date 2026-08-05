@@ -6,8 +6,9 @@ var ZoteroDeclarativeBridgeCore = (() => {
   const TX_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
   const OP_ORDER = new Map([
     ["ensure_collection_membership", 0],
-    ["ensure_child_note", 1],
-    ["ensure_pdf_attachment", 2],
+    ["ensure_parent_short_title", 1],
+    ["ensure_child_note", 2],
+    ["ensure_pdf_attachment", 3],
   ]);
 
   function assertion(condition, message) {
@@ -105,11 +106,28 @@ var ZoteroDeclarativeBridgeCore = (() => {
     assertion(typeof parent.expected_target_membership === "boolean", "parent membership baseline must be boolean");
   }
 
-  function validateOperation(operation, parent, label) {
+  function validateOperation(operation, parent, target, label) {
     assertion(operation && typeof operation === "object" && typeof operation.type === "string", `${label} is invalid`);
     if (operation.type === "ensure_collection_membership") {
       exactKeys(operation, ["type", "expected_present"], label);
       assertion(operation.expected_present === false && parent.expected_target_membership === false, `${label} membership baseline is invalid`);
+    }
+    else if (operation.type === "ensure_parent_short_title") {
+      exactKeys(operation, [
+        "type", "library_id", "parent_key", "expected_parent_version",
+        "expected_old_value", "new_short_title",
+      ], label);
+      positiveInt(operation.library_id, `${label}.library_id`);
+      key(operation.parent_key, `${label}.parent_key`);
+      positiveInt(operation.expected_parent_version, `${label}.expected_parent_version`);
+      text(operation.expected_old_value, `${label}.expected_old_value`, true, 4096);
+      text(operation.new_short_title, `${label}.new_short_title`, false, 4096);
+      assertion(!/[\x00-\x1f\x7f]/.test(operation.expected_old_value), `${label}.expected_old_value contains control characters`);
+      assertion(!/[\x00-\x1f\x7f]/.test(operation.new_short_title), `${label}.new_short_title contains control characters`);
+      assertion(operation.new_short_title === operation.new_short_title.trim(), `${label}.new_short_title must be trimmed`);
+      assertion(operation.library_id === target.library_id, `${label}.library_id disagrees with target`);
+      assertion(operation.parent_key === parent.key, `${label}.parent_key disagrees with parent`);
+      assertion(operation.expected_parent_version === parent.version, `${label}.expected_parent_version disagrees with parent`);
     }
     else if (operation.type === "ensure_child_note") {
       exactKeys(operation, [
@@ -168,21 +186,43 @@ var ZoteroDeclarativeBridgeCore = (() => {
     validateTarget(manifest.target);
     assertion(Array.isArray(manifest.entries) && manifest.entries.length > 0 && manifest.entries.length <= 100, "entries are invalid");
     const parentKeys = [];
-    let needsFiles = false;
+    let attachmentOperations = 0;
+    let databaseOperations = 0;
     manifest.entries.forEach((entry, index) => {
       exactKeys(entry, ["parent", "operations"], `entries[${index}]`);
       validateParent(entry.parent);
       parentKeys.push(entry.parent.key);
-      assertion(Array.isArray(entry.operations) && entry.operations.length > 0 && entry.operations.length <= 3, `entries[${index}].operations are invalid`);
-      const types = entry.operations.map((operation, opIndex) => validateOperation(operation, entry.parent, `entries[${index}].operations[${opIndex}]`));
+      assertion(Array.isArray(entry.operations) && entry.operations.length > 0 && entry.operations.length <= 4, `entries[${index}].operations are invalid`);
+      const types = entry.operations.map((operation, opIndex) => validateOperation(operation, entry.parent, manifest.target, `entries[${index}].operations[${opIndex}]`));
       assertion(new Set(types).size === types.length, `entries[${index}] has duplicate operations`);
       assertion(stableStringify(types) === stableStringify([...types].sort((a, b) => OP_ORDER.get(a) - OP_ORDER.get(b))), `entries[${index}] operation order is not canonical`);
-      needsFiles ||= types.includes("ensure_pdf_attachment");
+      attachmentOperations += types.filter(type => type === "ensure_pdf_attachment").length;
+      databaseOperations += types.filter(type => type !== "ensure_pdf_attachment").length;
     });
     assertion(stableStringify(parentKeys) === stableStringify([...parentKeys].sort()) && new Set(parentKeys).size === parentKeys.length, "entries are not parent-key-sorted and unique");
-    assertion(!needsFiles || manifest.target.require_files_editable === true, "PDF operations require files editability");
+    assertion(!attachmentOperations || manifest.target.require_files_editable === true, "PDF operations require files editability");
+    assertion(!(attachmentOperations && databaseOperations), "PDF and database operations cannot share one transaction manifest");
     sha(manifest.manifest_sha256, "manifest.manifest_sha256");
     return true;
+  }
+
+  function planWrites(rows) {
+    const pendingTypes = [];
+    for (const row of rows) {
+      row.decisions.forEach((decision, index) => {
+        if (decision.decision === "needs_write") pendingTypes.push(row.entry.operations[index].type);
+      });
+    }
+    const attachmentCount = pendingTypes.filter(type => type === "ensure_pdf_attachment").length;
+    const databaseCount = pendingTypes.length - attachmentCount;
+    assertion(!(attachmentCount && databaseCount), "live write plan mixes PDF and database operations");
+    assertion(attachmentCount <= 1, "live write plan contains multiple PDF attachment mutations");
+    return {
+      mode: pendingTypes.length === 0 ? "none" : attachmentCount ? "single_attachment_import" : "db_atomic",
+      operation_count: pendingTypes.length,
+      attachment_operation_count: attachmentCount,
+      database_operation_count: databaseCount,
+    };
   }
 
   function liveKeys(items) {
@@ -192,6 +232,24 @@ var ZoteroDeclarativeBridgeCore = (() => {
   function classifyMembership(operation, present) {
     assertion(operation.expected_present === false, "membership operation baseline is invalid");
     return {decision: present ? "satisfied" : "needs_write"};
+  }
+
+  function readbackMembershipSatisfied(entry, present, decisions) {
+    assertion(typeof present === "boolean", "readback membership must be boolean");
+    assertion(Array.isArray(entry.operations) && Array.isArray(decisions), "readback membership inputs are invalid");
+    assertion(entry.operations.length === decisions.length, "readback decisions do not align with operations");
+    const membershipIndex = entry.operations.findIndex(operation => operation.type === "ensure_collection_membership");
+    if (membershipIndex === -1) return present === entry.parent.expected_target_membership;
+    return present === true && decisions[membershipIndex].decision === "satisfied";
+  }
+
+  function classifyShortTitle(operation, observed) {
+    assertion(observed.library_id === operation.library_id, "shortTitle library drift");
+    assertion(observed.parent_key === operation.parent_key, "shortTitle parent-key drift");
+    if (observed.value === operation.new_short_title) return {decision: "satisfied"};
+    assertion(observed.item_version === operation.expected_parent_version, "shortTitle parent-version drift");
+    assertion(observed.value === operation.expected_old_value, "shortTitle old-value drift");
+    return {decision: "needs_write"};
   }
 
   function classifyNote(operation, notes) {
@@ -229,6 +287,7 @@ var ZoteroDeclarativeBridgeCore = (() => {
     const different = readable.filter(item => item.sha256 !== operation.source_sha256);
     assertion(misfiledSame.length === 0, "a matching PDF has direct collection membership");
     assertion(different.length === 0, "a different readable PDF already exists");
+    assertion(same.length <= 1, "multiple matching PDF attachments already exist");
     if (same.length) {
       return {decision: "satisfied", attachment_keys: same.map(item => item.key).sort(), duplicate_count: Math.max(0, same.length - 1)};
     }
@@ -249,8 +308,11 @@ var ZoteroDeclarativeBridgeCore = (() => {
     classifyAttachment,
     classifyMembership,
     classifyNote,
+    classifyShortTitle,
     normalizeDOI,
     parentIdentity,
+    planWrites,
+    readbackMembershipSatisfied,
     stableStringify,
     validateManifest,
   };

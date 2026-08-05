@@ -87,11 +87,12 @@ var AttachmentRepairCore = (() => {
       .filter(item => item.invalid_local_file === true)
       .map(item => item.key)
       .sort();
-    if (sameHash.length) {
+    assertion(sameHash.length <= 1, "multiple readable PDFs with the source hash already exist");
+    if (sameHash.length === 1) {
       return {
         decision: "no_op_same_hash",
         sameHashKeys: sameHash.map(item => item.key).sort(),
-        duplicateCount: Math.max(0, sameHash.length - 1),
+        duplicateCount: 0,
         invalidLocalKeys,
       };
     }
@@ -103,12 +104,10 @@ var AttachmentRepairCore = (() => {
     };
   }
 
-  function classifyTransactionOutcome(plannedParentKeys, presentByParent, inspectionFailed) {
+  function classifyImportOutcome(plannedParentKeys, presentByParent, inspectionFailed) {
+    assertion(plannedParentKeys.length === 1, "import outcome requires exactly one planned parent");
     if (inspectionFailed) return "unknown";
-    const present = plannedParentKeys.filter(key => presentByParent[key] === true).length;
-    if (present === 0) return "rolled_back";
-    if (present === plannedParentKeys.length) return "committed";
-    return "partial_commit";
+    return presentByParent[plannedParentKeys[0]] === true ? "committed" : "unknown";
   }
 
   function verifyReadback(expected, observed) {
@@ -124,7 +123,7 @@ var AttachmentRepairCore = (() => {
 
   return {
     classifyLiveAttachments,
-    classifyTransactionOutcome,
+    classifyImportOutcome,
     verifyFileBinding,
     verifyParent,
     verifyReadback,

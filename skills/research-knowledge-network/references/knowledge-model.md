@@ -71,7 +71,10 @@ This skill models a local, auditable graph with explicit provenance boundaries:
 - `snapshot` preserves the lossless internal envelope and every ledger row.
 - `export` produces `KnowledgeNetwork/v1` for the strict deep-research consumer.
 - Source/entity/claim rows become contract nodes. Evidence rows become
-  provenance-bearing relations; verified corpus membership supplies structural
+  provenance-bearing relations. Each evidence-backed claim's validated
+  `entity_id` becomes a deterministic `claim --about--> entity` structural
+  relation using the same reviewed evidence locator; this does not infer
+  entity-to-entity semantics. Verified corpus membership supplies structural
   relations even before papers are deep-read.
 - Claims and entities without evidence are not assigned arbitrary fallback
   provenance. They are listed in `projection_omissions`, make

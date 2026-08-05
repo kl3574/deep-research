@@ -546,6 +546,8 @@ def render_runner(
 ) -> str:
     manifest_path = require_absolute_regular_file(str(manifest_path), "manifest path")
     raw, payload, summary = load_and_validate_manifest(manifest_path)
+    if apply and len(payload["entries"]) != 1:
+        raise ContractError("Desktop fallback apply requires exactly one parent entry")
     if report_path is None:
         mode = "apply" if apply else "preview"
         report_path = manifest_path.parent / f"zotero_attachment_repair_{mode}_report.json"

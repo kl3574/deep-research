@@ -33,17 +33,28 @@ def network_fixture() -> dict:
             "network_id": "KN-PRIVATE-001",
             "snapshot_id": "KN-PRIVATE-001-S001",
             "corpus_snapshot": {
-                "target_ref": "/home/alice/Zotero/storage/AB12CD34",
+                "target_ref": "/home/tester/Zotero/storage/ITEM0001",
                 "inventory_digest": "a" * 64,
             },
             "sources": [
                 {
                     "source_id": "source:SRC-PRIVATE",
+                    "role": "zotero_corpus",
+                    "corpus_membership": "current",
                     "title": "A verified source",
                     "authors": ["Ada Example"],
-                    "year": 2024,
+                    "creators": [
+                        {
+                            "role": "author",
+                            "given": "Ada",
+                            "family": "Example",
+                            "name": "Ada Example",
+                        }
+                    ],
+                    "date": "2024-05-01",
+                    "year": "2024",
                     "doi": "10.1000/example",
-                    "item_key": "AB12CD34",
+                    "item_key": "ITEM0001",
                     "note_body": "DO NOT PUBLISH THIS NOTE BODY",
                     "fulltext": "DO NOT PUBLISH THIS FULL TEXT",
                 }
@@ -82,7 +93,7 @@ def network_fixture() -> dict:
                     "provenance": [
                         {
                             "source_id": "source:SRC-PRIVATE",
-                            "locator": "/home/alice/papers/source.pdf p. 4; Zotero item: AB12CD34",
+                            "locator": "/home/tester/papers/source.pdf p. 4; Zotero item: ITEM0001",
                         }
                     ],
                 },
@@ -186,8 +197,8 @@ class RenderNetworkHtmlTests(unittest.TestCase):
         projection = renderer.build_projection(network, map_fixture(), renderer.PUBLIC_MODE)
         document = renderer.render_document(projection)
         renderer.assert_output_privacy(document, renderer.PUBLIC_MODE)
-        self.assertNotIn("/home/alice", document)
-        self.assertNotIn("AB12CD34", document)
+        self.assertNotIn("/home/tester", document)
+        self.assertNotIn("ITEM0001", document)
         self.assertNotIn(network["content_sha256"], document)
         self.assertNotIn("DO NOT PUBLISH THIS NOTE BODY", document)
         self.assertNotIn("DO NOT PUBLISH THIS FULL TEXT", document)
@@ -200,6 +211,46 @@ class RenderNetworkHtmlTests(unittest.TestCase):
         network = seal(network)
         with self.assertRaisesRegex(renderer.ContractError, "credential-shaped key"):
             renderer.build_projection(network, None, renderer.PRIVATE_MODE)
+
+    def test_current_bibliography_excludes_historical_source_cards(self) -> None:
+        network = network_fixture()
+        network["sources"].append(
+            {
+                "source_id": "source:SRC-HISTORICAL",
+                "role": "zotero_corpus",
+                "corpus_membership": "historical",
+                "title": "Superseded source must not render",
+                "authors": ["Historical Author"],
+                "year": "1999",
+                "doi": "10.1000/historical",
+            }
+        )
+        network = seal(network)
+
+        projection = renderer.build_projection(network, None, renderer.PUBLIC_MODE)
+        self.assertEqual(len(projection["sources"]), 1)
+        self.assertEqual(projection["sources"][0]["title"], "A verified source")
+        self.assertIn("Authors: Ada Example", projection["sources"][0]["metadata"])
+        self.assertIn("Date: 2024-05-01", projection["sources"][0]["metadata"])
+        self.assertIn("DOI: 10.1000/example", projection["sources"][0]["metadata"])
+        self.assertEqual(projection["provenance"]["source_count"], 1)
+        self.assertEqual(projection["provenance"]["source_ledger_count"], 2)
+        self.assertEqual(projection["provenance"]["historical_source_count"], 1)
+
+        document = renderer.render_document(projection)
+        self.assertIn("A verified source", document)
+        self.assertNotIn("Source 1", document)
+        self.assertNotIn("Superseded source must not render", document)
+        self.assertNotIn("10.1000/historical", document)
+
+    def test_current_zotero_source_requires_explicit_bibliography(self) -> None:
+        network = network_fixture()
+        network["sources"][0].pop("title")
+        network = seal(network)
+        with self.assertRaisesRegex(
+            renderer.ContractError, "current Zotero source.title"
+        ):
+            renderer.build_projection(network, None, renderer.PUBLIC_MODE)
 
     def test_render_is_deterministic(self) -> None:
         network = network_fixture()
@@ -228,6 +279,7 @@ class RenderNetworkHtmlTests(unittest.TestCase):
             self.assertIn(f'id="{section_id}"', document)
         self.assertIn('name="viewport"', document)
         self.assertIn("@media (max-width:700px)", document)
+        self.assertIn("text-wrap:balance", document)
         self.assertIn("<svg", document)
         self.assertIn("<script>", document)
         self.assertNotIn("cdn.", document.lower())

@@ -232,6 +232,19 @@ async function repairReadbackCreated(created, entry, targetContext) {
     },
     observed,
   );
+  const live = await repairParentAndAttachments(entry, targetContext);
+  const classification = AttachmentRepairCore.classifyLiveAttachments(
+    entry.action,
+    entry.expected_attachments,
+    live.attachments,
+    entry.source_pdf.sha256,
+  );
+  repairAssertion(
+    classification.decision === "no_op_same_hash"
+      && classification.sameHashKeys.length === 1
+      && classification.sameHashKeys[0] === String(attachment.key),
+    "immediate readback did not confirm exactly one bound PDF attachment",
+  );
   return {
     parentKey: entry.parent.key,
     attachmentKey: String(attachment.key),
@@ -246,7 +259,7 @@ async function repairReadbackCreated(created, entry, targetContext) {
   };
 }
 
-async function repairInspectTransaction(rows, manifest) {
+async function repairInspectImportOutcome(rows, manifest) {
   const presentByParent = {};
   let inspectionFailed = false;
   for (const row of rows) {
@@ -254,9 +267,14 @@ async function repairInspectTransaction(rows, manifest) {
     try {
       const targetContext = await repairResolveTarget(manifest.target);
       const live = await repairParentAndAttachments(entry, targetContext);
-      presentByParent[entry.parent.key] = live.attachments.some(
-        item => item.readable_pdf === true && item.sha256 === entry.source_pdf.sha256,
+      const classification = AttachmentRepairCore.classifyLiveAttachments(
+        entry.action,
+        entry.expected_attachments,
+        live.attachments,
+        entry.source_pdf.sha256,
       );
+      presentByParent[entry.parent.key] = classification.decision === "no_op_same_hash"
+        && classification.sameHashKeys.length === 1;
     }
     catch (_error) {
       inspectionFailed = true;
@@ -265,7 +283,7 @@ async function repairInspectTransaction(rows, manifest) {
   }
   const planned = rows.map(row => row.entry.parent.key);
   return {
-    outcome: AttachmentRepairCore.classifyTransactionOutcome(
+    outcome: AttachmentRepairCore.classifyImportOutcome(
       planned,
       presentByParent,
       inspectionFailed,
@@ -281,7 +299,6 @@ async function runAttachmentRepair() {
   let preflight = [];
   let readyRows = [];
   let writeAttempted = false;
-  let transactionCommitted = false;
   let created = [];
   try {
     repairAssertion(CONFIG && typeof CONFIG === "object", "runner configuration missing");
@@ -301,6 +318,12 @@ async function runAttachmentRepair() {
         && manifest.summary.metadata_only_skip === CONFIG.expectedMetadataSkipCount,
       "manifest summary binding mismatch",
     );
+    if (CONFIG.apply) {
+      repairAssertion(
+        Array.isArray(manifest.entries) && manifest.entries.length === 1,
+        "Desktop fallback apply requires exactly one parent entry",
+      );
+    }
     phase = "verify_bound_inputs";
     await repairVerifyBoundInputs(manifest);
     phase = "verify_target";
@@ -345,39 +368,37 @@ async function runAttachmentRepair() {
         readback: [],
       };
     }
-    phase = "transaction_repreflight";
+    repairAssertion(readyRows.length === 1, "Desktop fallback apply supports one attachment import");
+    phase = "write_repreflight";
+    targetContext = await repairResolveTarget(manifest.target);
+    const repeated = await repairPreflightAll(manifest, targetContext);
+    const firstDecisions = preflight.map(row => [row.entry.parent.key, row.classification.decision]);
+    const repeatedDecisions = repeated.map(row => [row.entry.parent.key, row.classification.decision]);
+    repairAssertion(
+      JSON.stringify(firstDecisions) === JSON.stringify(repeatedDecisions),
+      "preflight decisions changed immediately before import",
+    );
+    const repeatedReady = repeated.filter(
+      row => row.classification.decision === "ready_to_attach",
+    );
+    repairAssertion(repeatedReady.length === 1, "exactly one attachment must remain ready to import");
+    const row = repeatedReady[0];
+    phase = "import_attachment";
     writeAttempted = true;
-    await Zotero.DB.executeTransaction(async () => {
-      targetContext = await repairResolveTarget(manifest.target);
-      const repeated = await repairPreflightAll(manifest, targetContext);
-      const firstDecisions = preflight.map(row => [row.entry.parent.key, row.classification.decision]);
-      const repeatedDecisions = repeated.map(row => [row.entry.parent.key, row.classification.decision]);
-      repairAssertion(
-        JSON.stringify(firstDecisions) === JSON.stringify(repeatedDecisions),
-        "preflight decisions changed at transaction start",
-      );
-      phase = "import_attachments";
-      for (const row of repeated.filter(item => item.classification.decision === "ready_to_attach")) {
-        const attachment = await Zotero.Attachments.importFromFile({
-          file: row.entry.source_pdf.path,
-          libraryID: manifest.target.library_id,
-          parentItemID: row.parentID,
-        });
-        repairAssertion(attachment && attachment.key, "attachment import returned no item key");
-        created.push({
-          parentKey: row.entry.parent.key,
-          attachmentKey: String(attachment.key),
-        });
-      }
+    const attachment = await Zotero.Attachments.importFromFile({
+      file: row.entry.source_pdf.path,
+      libraryID: manifest.target.library_id,
+      parentItemID: row.parentID,
     });
-    transactionCommitted = true;
-    phase = "committed_readback";
-    const readback = [];
-    for (const createdItem of created) {
-      const entry = manifest.entries.find(item => item.parent.key === createdItem.parentKey);
-      readback.push(await repairReadbackCreated(createdItem, entry, targetContext));
-    }
-    repairAssertion(readback.length === readyRows.length, "readback count mismatch");
+    repairAssertion(attachment && attachment.key, "attachment import returned no item key");
+    const createdItem = {
+      parentKey: row.entry.parent.key,
+      attachmentKey: String(attachment.key),
+    };
+    created = [createdItem];
+    phase = "immediate_readback";
+    const readbackItem = await repairReadbackCreated(createdItem, row.entry, targetContext);
+    const readback = [readbackItem];
     return {
       schema: "ZoteroAttachmentRepairReport/v1",
       status: "completed",
@@ -403,24 +424,16 @@ async function runAttachmentRepair() {
     if (writeAttempted && readyRows.length) {
       try {
         const manifestText = await Zotero.File.getContentsAsync(CONFIG.manifestPath, "UTF-8");
-        inspection = await repairInspectTransaction(readyRows, JSON.parse(manifestText));
+        inspection = await repairInspectImportOutcome(readyRows, JSON.parse(manifestText));
       }
       catch (_inspectionError) {
         inspection = {outcome: "unknown", presentByParent: {}};
       }
     }
-    const commitState = transactionCommitted
-      ? "committed"
-      : inspection
-        ? inspection.outcome
-        : "not_started";
+    const commitState = inspection ? inspection.outcome : "not_started";
     return {
       schema: "ZoteroAttachmentRepairReport/v1",
-      status: commitState === "partial_commit"
-        ? "partial_commit"
-        : transactionCommitted
-          ? "readback_failed"
-          : "failed",
+      status: commitState === "committed" ? "readback_failed" : "failed",
       mode: CONFIG && CONFIG.apply ? "apply" : "preview",
       phase,
       startedAt,
@@ -428,9 +441,9 @@ async function runAttachmentRepair() {
       target,
       preflight: preflight.map(repairPublicPreflight),
       writeAttempted,
-      writePerformed: commitState === "committed" || commitState === "partial_commit",
+      writePerformed: commitState === "committed",
       commitState,
-      transactionInspection: inspection,
+      writeInspection: inspection,
       createdItemKeysObservedBeforeFailure: created.map(item => item.attachmentKey),
       error: plainRepairError(error),
     };
