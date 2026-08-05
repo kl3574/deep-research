@@ -29,6 +29,8 @@ REVIEWED_EVIDENCE_SCHEMA = "ReviewedEvidence/v1"
 PAPER_READING_REPORT_SET_SCHEMA = "PaperReadingReportSet/v1"
 PAPER_READING_REPORT_SCHEMA = "PaperReadingReport/v1"
 PAPER_READING_REPORT_SET_V2_SCHEMA = "PaperReadingReportSet/v2"
+PAPER_UNDERSTANDING_GAP_SCHEMA = "PaperUnderstandingGap/v1"
+UNDERSTANDING_NETWORK_PROJECTION_SCHEMA = "UnderstandingNetworkProjection/v1"
 PATCH_SCHEMA = "NetworkPatchProposal/v2"
 PATCH_V1_SCHEMA = "NetworkPatchProposal/v1"
 PATCH_SCHEMA_VERSION = "2.0"
@@ -62,6 +64,72 @@ EPISTEMIC_RELATION_VOCABULARY = [
     "refutes",
     "not_tested",
 ]
+
+PAPER_UNDERSTANDING_GAP_TO_PROJECTION = {
+    "missing_input_format": "workflow",
+    "missing_data_flow": "workflow",
+    "missing_derivation_step": "math",
+    "missing_algorithm_detail": "algorithm",
+    "missing_applicability_boundary": "applicability",
+    "missing_conclusion_scope": "conclusion",
+}
+PAPER_UNDERSTANDING_GAP_TYPES = set(PAPER_UNDERSTANDING_GAP_TO_PROJECTION)
+PAPER_UNDERSTANDING_GAP_FIELD_PREFIXES = {
+    "missing_input_format": ("workflow.graph.nodes",),
+    "missing_data_flow": ("workflow.data_flow", "workflow.graph.operations"),
+    "missing_derivation_step": (
+        "mathematical_principles.derivation_steps",
+        "mathematical_principles.principles",
+    ),
+    "missing_algorithm_detail": (
+        "algorithmic_principles.objective",
+        "algorithmic_principles.state_variables",
+        "algorithmic_principles.ordered_steps",
+        "algorithmic_principles.invariants",
+        "algorithmic_principles.failure_modes",
+        "algorithmic_principles.algorithms",
+    ),
+    "missing_applicability_boundary": (
+        "applicability.applies_when",
+        "applicability.does_not_apply_when",
+    ),
+    "missing_conclusion_scope": (
+        "conclusion.statement",
+        "conclusion.confidence",
+        "conclusion.confidence_rationale",
+    ),
+}
+PAPER_UNDERSTANDING_GAP_FIELD_PATTERNS = {
+    "missing_input_format": re.compile(
+        r"workflow\.graph\.nodes(?:\[[0-9]+\])?\.format"
+    ),
+    "missing_data_flow": re.compile(
+        r"workflow\.(?:data_flow(?:\[[0-9]+\])?|graph\.operations"
+        r"(?:\[[0-9]+\])?(?:\.(?:consumes|produces)(?:\[[0-9]+\])?)?)"
+    ),
+    "missing_derivation_step": re.compile(
+        r"mathematical_principles\.(?:derivation_steps(?:\[[0-9]+\])?|"
+        r"principles\[[0-9]+\]\.derivation_steps(?:\[[0-9]+\])?)"
+    ),
+    "missing_algorithm_detail": re.compile(
+        r"algorithmic_principles\.(?:objective|state_variables|ordered_steps|"
+        r"invariants|failure_modes|algorithms)(?:\[[0-9]+\])?"
+        r"(?:\.[A-Za-z_][A-Za-z0-9_]*(?:\[[0-9]+\])?)*"
+    ),
+    "missing_applicability_boundary": re.compile(
+        r"applicability\.(?:applies_when|does_not_apply_when)(?:\[[0-9]+\])?"
+    ),
+    "missing_conclusion_scope": re.compile(
+        r"conclusion\.(?:statement|confidence|confidence_rationale)"
+    ),
+}
+SENSITIVE_EXTERNAL_QUERY_PATTERNS = (
+    re.compile(r"(?:^|\s)(?:/(?:home|root|Users)/|~/|[A-Za-z]:[\\/])"),
+    re.compile(r"\b(?:file://|ghp_|github_pat_|sk-|xox[baprs]-)[A-Za-z0-9_./-]+", re.I),
+    re.compile(r"\b(?:api[_ -]?key|access[_ -]?token|authorization|cookie)\s*[:=]", re.I),
+    re.compile(r"\b(?=[A-Z0-9]{8}\b)(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*[0-9])[A-Z0-9]{8}\b"),
+    re.compile(r"\b[0-9a-f]{32,64}\b", re.I),
+)
 
 ACTION_FOR_TARGET_KIND = {
     "node": "propose_node",
@@ -344,6 +412,16 @@ def canonical_reading_report_digest(document: dict[str, Any]) -> str:
     return sha256_json(normalized)
 
 
+def canonical_paper_understanding_gap_digest(document: dict[str, Any]) -> str:
+    """Hash a gap observation without its content-derived identity fields."""
+    normalized = {
+        key: value
+        for key, value in document.items()
+        if key not in {"gap_id", "gap_digest"}
+    }
+    return sha256_json(normalized)
+
+
 def canonical_evidence_passage_digest(document: dict[str, Any]) -> str:
     normalized = {
         key: value
@@ -429,6 +507,252 @@ def ensure_sha256(value: Any, label: str) -> str:
     if not SHA256_RE.fullmatch(text):
         raise ContractError(f"{label} must be 64 lowercase hex characters")
     return text
+
+
+def _path_has_prefix(path: str, prefix: str) -> bool:
+    return path == prefix or path.startswith(f"{prefix}.") or path.startswith(
+        f"{prefix}["
+    )
+
+
+def _validate_understanding_gap_field(gap_type: str, value: Any, label: str) -> str:
+    path = require_string(value, label)
+    prefixes = PAPER_UNDERSTANDING_GAP_FIELD_PREFIXES[gap_type]
+    if not any(_path_has_prefix(path, prefix) for prefix in prefixes):
+        raise ContractError(
+            f"{label} must use an allowed {gap_type} field prefix: {sorted(prefixes)}"
+        )
+    if not PAPER_UNDERSTANDING_GAP_FIELD_PATTERNS[gap_type].fullmatch(path):
+        raise ContractError(f"{label} is not a supported {gap_type} field path")
+    return path
+
+
+def _require_external_query_safe(value: Any, label: str) -> str:
+    text = require_string(value, label)
+    if _query_has_internal_marker(text):
+        raise ContractError(f"{label} must not contain internal IDs or field names")
+    if any(pattern.search(text) for pattern in SENSITIVE_EXTERNAL_QUERY_PATTERNS):
+        raise ContractError(f"{label} must not contain secrets, private paths, or keys")
+    return text
+
+
+def validate_paper_understanding_gap(value: Any) -> dict[str, Any]:
+    """Validate a missing-detail observation without interpreting paper semantics.
+
+    The referenced PaperUnderstanding and adapter projection are opaque here. Their
+    content-addressed validation/projection records are provenance, not input for a
+    second semantic reading pass in this skill.
+    """
+    gap = require_dict(value, "paper understanding gap")
+    expected_keys = {
+        "schema",
+        "gap_id",
+        "gap_digest",
+        "gap_type",
+        "projection_type",
+        "missing_field",
+        "question",
+        "search_terms",
+        "provenance",
+        "novelty_claimed",
+    }
+    if set(gap) != expected_keys:
+        raise ContractError(
+            "paper understanding gap must contain exactly "
+            f"{sorted(expected_keys)}"
+        )
+    if gap.get("schema") != PAPER_UNDERSTANDING_GAP_SCHEMA:
+        raise ContractError(
+            "paper understanding gap.schema must equal "
+            f"{PAPER_UNDERSTANDING_GAP_SCHEMA}"
+        )
+
+    gap_type = require_string(gap.get("gap_type"), "paper understanding gap.gap_type")
+    if gap_type not in PAPER_UNDERSTANDING_GAP_TYPES:
+        raise ContractError(
+            "paper understanding gap.gap_type must be one of "
+            f"{sorted(PAPER_UNDERSTANDING_GAP_TYPES)}"
+        )
+    projection_type = require_string(
+        gap.get("projection_type"), "paper understanding gap.projection_type"
+    )
+    if projection_type != PAPER_UNDERSTANDING_GAP_TO_PROJECTION[gap_type]:
+        raise ContractError(
+            "paper understanding gap.projection_type is incompatible with gap_type"
+        )
+    missing_field = _validate_understanding_gap_field(
+        gap_type,
+        gap.get("missing_field"),
+        "paper understanding gap.missing_field",
+    )
+    _require_external_query_safe(
+        gap.get("question"), "paper understanding gap.question"
+    )
+    if gap.get("novelty_claimed") is not False:
+        raise ContractError("paper understanding gap.novelty_claimed must be false")
+
+    terms = require_dict(gap.get("search_terms"), "paper understanding gap.search_terms")
+    if set(terms) != {"must", "should", "must_not"}:
+        raise ContractError(
+            "paper understanding gap.search_terms must contain exactly "
+            "must, should, and must_not"
+        )
+    for key in ("must", "should", "must_not"):
+        entries = require_string_list(
+            terms.get(key),
+            f"paper understanding gap.search_terms.{key}",
+            nonempty=key == "must",
+        )
+        if len(entries) != len(set(entries)):
+            raise ContractError(
+                f"paper understanding gap.search_terms.{key} must be unique"
+            )
+        for index, entry in enumerate(entries):
+            _require_external_query_safe(
+                entry, f"paper understanding gap.search_terms.{key}[{index}]"
+            )
+
+    provenance = require_dict(
+        gap.get("provenance"), "paper understanding gap.provenance"
+    )
+    if set(provenance) != {
+        "understanding_binding",
+        "projection_ref",
+        "basis_refs",
+    }:
+        raise ContractError(
+            "paper understanding gap.provenance must contain exactly "
+            "understanding_binding, projection_ref, and basis_refs"
+        )
+
+    understanding_binding = require_dict(
+        provenance.get("understanding_binding"),
+        "paper understanding gap.provenance.understanding_binding",
+    )
+    if set(understanding_binding) != {
+        "understanding_id",
+        "understanding_digest",
+        "validation_record_id",
+        "validation_record_digest",
+    }:
+        raise ContractError(
+            "understanding_binding must contain exactly understanding_id, "
+            "understanding_digest, validation_record_id, and validation_record_digest"
+        )
+    require_string(
+        understanding_binding.get("understanding_id"),
+        "understanding_binding.understanding_id",
+    )
+    ensure_sha256(
+        understanding_binding.get("understanding_digest"),
+        "understanding_binding.understanding_digest",
+    )
+    if understanding_binding.get("understanding_id") != (
+        "paper-understanding-" + understanding_binding["understanding_digest"][:16]
+    ):
+        raise ContractError(
+            "understanding_binding.understanding_id does not match understanding_digest"
+        )
+    validation_record_digest = ensure_sha256(
+        understanding_binding.get("validation_record_digest"),
+        "understanding_binding.validation_record_digest",
+    )
+    if understanding_binding.get("validation_record_id") != (
+        "paper-understanding-validation-" + validation_record_digest[:16]
+    ):
+        raise ContractError(
+            "understanding_binding.validation_record_id does not match "
+            "validation_record_digest"
+        )
+
+    projection_ref = require_dict(
+        provenance.get("projection_ref"),
+        "paper understanding gap.provenance.projection_ref",
+    )
+    if set(projection_ref) != {
+        "schema",
+        "projection_id",
+        "projection_digest",
+        "projection_type",
+        "payload_digest",
+    }:
+        raise ContractError(
+            "projection_ref must contain exactly schema, projection_id, "
+            "projection_digest, projection_type, and payload_digest"
+        )
+    if projection_ref.get("schema") != UNDERSTANDING_NETWORK_PROJECTION_SCHEMA:
+        raise ContractError(
+            "projection_ref.schema must equal "
+            f"{UNDERSTANDING_NETWORK_PROJECTION_SCHEMA}"
+        )
+    require_string(projection_ref.get("projection_id"), "projection_ref.projection_id")
+    ensure_sha256(
+        projection_ref.get("projection_digest"), "projection_ref.projection_digest"
+    )
+    if projection_ref.get("projection_id") != (
+        "understanding-projection-" + projection_ref["projection_digest"][:16]
+    ):
+        raise ContractError("projection_ref.projection_id does not match projection_digest")
+    if projection_ref.get("projection_type") != projection_type:
+        raise ContractError("projection_ref.projection_type does not match gap")
+    payload_digest = ensure_sha256(
+        projection_ref.get("payload_digest"), "projection_ref.payload_digest"
+    )
+
+    basis_refs = provenance.get("basis_refs")
+    if not isinstance(basis_refs, list) or not basis_refs:
+        raise ContractError(
+            "paper understanding gap.provenance.basis_refs must be a non-empty list"
+        )
+    seen_basis: set[tuple[str, str, str, str]] = set()
+    covers_missing_field = False
+    for index, raw_basis in enumerate(basis_refs):
+        basis = require_dict(
+            raw_basis, f"paper understanding gap.provenance.basis_refs[{index}]"
+        )
+        if set(basis) != {
+            "ref_type",
+            "projection_type",
+            "source_path",
+            "payload_digest",
+        }:
+            raise ContractError(
+                "paper understanding gap basis refs must contain exactly ref_type, "
+                "projection_type, source_path, and payload_digest"
+            )
+        if basis.get("ref_type") != "understanding_projection_path":
+            raise ContractError("paper understanding gap basis ref_type is invalid")
+        if basis.get("projection_type") != projection_type:
+            raise ContractError("paper understanding gap basis projection_type mismatch")
+        basis_path = _validate_understanding_gap_field(
+            gap_type,
+            basis.get("source_path"),
+            f"paper understanding gap.provenance.basis_refs[{index}].source_path",
+        )
+        if ensure_sha256(
+            basis.get("payload_digest"),
+            f"paper understanding gap.provenance.basis_refs[{index}].payload_digest",
+        ) != payload_digest:
+            raise ContractError("paper understanding gap basis payload_digest mismatch")
+        basis_key = (
+            basis["ref_type"],
+            basis["projection_type"],
+            basis_path,
+            basis["payload_digest"],
+        )
+        if basis_key in seen_basis:
+            raise ContractError("paper understanding gap basis refs must be unique")
+        seen_basis.add(basis_key)
+        covers_missing_field = covers_missing_field or basis_path == missing_field
+    if not covers_missing_field:
+        raise ContractError("paper understanding gap basis refs must bind missing_field")
+
+    gap_digest = ensure_sha256(gap.get("gap_digest"), "paper understanding gap.gap_digest")
+    if gap_digest != canonical_paper_understanding_gap_digest(gap):
+        raise ContractError("paper understanding gap.gap_digest is invalid")
+    if gap.get("gap_id") != f"understanding-gap-{gap_digest[:16]}":
+        raise ContractError("paper understanding gap.gap_id is invalid")
+    return gap
 
 
 def request_digest(request: dict[str, Any]) -> str:
@@ -4553,6 +4877,8 @@ def validate_any(value: Any, network: dict[str, Any] | None = None) -> dict[str,
         return validate_paper_reading_report_set(value, network=network)
     if schema == PAPER_READING_REPORT_SET_V2_SCHEMA:
         return validate_paper_reading_report_set_v2(value, network=network)
+    if schema == PAPER_UNDERSTANDING_GAP_SCHEMA:
+        return validate_paper_understanding_gap(value)
     raise ContractError(f"unsupported schema: {schema!r}")
 
 

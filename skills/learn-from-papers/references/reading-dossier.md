@@ -158,3 +158,22 @@ cryptographic paper identity. `decisive` means only protocol-eligible under the
 declared trust policy. A finalized dossier report is still not accepted into a
 research knowledge network: explicit RKN governance acceptance remains mandatory
 before any graph mutation.
+
+## Deep-understanding bridge from dossier
+
+`PaperReadingDossier/v1` supports evidence reconstruction and claim-level governance.
+For non-network handoff, generate `PaperUnderstanding/v1` from a validated understanding draft when route output is `evidence` or `reconstruction`.
+
+Use `project-note-input` only when the deep-understanding object is complete:
+- this is the dedicated command layer in `scripts/paper_understanding.py` (`create`, `validate`, `audit`, `project-note-input`);
+- `project-note-input` is the only schema-safe path to `PaperUnderstandingNoteInput/v1`;
+- `project-note-input` requires `source_binding.reading_depth != "map"`, resolved
+  applicability, all five live artifact paths, and exact equality between the
+  supplied validation record and deterministic live regeneration.
+
+Run `project-note-input` only for downstream machines that explicitly ingest
+`PaperUnderstandingNoteInput/v1`; do not replace these records with Markdown edits.
+
+`map` readings can still produce dossier records and audit traces, but they remain
+non-projectable to note-input and should be recorded as terminal coverage when used
+as basis for downstream automation.

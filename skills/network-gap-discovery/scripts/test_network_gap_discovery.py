@@ -8,7 +8,9 @@ from pathlib import Path
 from network_gap_discovery import (
     ACTION_FOR_TARGET_KIND,
     ContractError,
+    PAPER_UNDERSTANDING_GAP_TO_PROJECTION,
     TARGET_KINDS,
+    canonical_paper_understanding_gap_digest,
     consume_reviewed_evidence,
     consume_results,
     emit_search_requests,
@@ -21,6 +23,7 @@ from network_gap_discovery import (
     validate_hypotheses,
     validate_paper_reading_report_set,
     validate_paper_reading_report_set_v2,
+    validate_paper_understanding_gap,
     validate_patch_v1 as validate_patch,
     validate_patch_v2,
     validate_request_set,
@@ -49,6 +52,59 @@ def attach_network_content_sha256(network):
         {key: value for key, value in network.items() if key != "content_sha256"}
     )
     return network
+
+
+def paper_understanding_gap_fixture(gap_type="missing_input_format"):
+    missing_fields = {
+        "missing_input_format": "workflow.graph.nodes[0].format",
+        "missing_data_flow": "workflow.data_flow[0]",
+        "missing_derivation_step": "mathematical_principles.derivation_steps[0]",
+        "missing_algorithm_detail": "algorithmic_principles.ordered_steps[0]",
+        "missing_applicability_boundary": "applicability.does_not_apply_when[0]",
+        "missing_conclusion_scope": "conclusion.statement",
+    }
+    payload_digest = "d" * 64
+    gap = {
+        "schema": "PaperUnderstandingGap/v1",
+        "gap_id": "",
+        "gap_digest": "",
+        "gap_type": gap_type,
+        "projection_type": PAPER_UNDERSTANDING_GAP_TO_PROJECTION[gap_type],
+        "missing_field": missing_fields[gap_type],
+        "question": f"Which source passage resolves {gap_type}?",
+        "search_terms": {
+            "must": ["system identification"],
+            "should": ["primary source"],
+            "must_not": ["unrelated acronym"],
+        },
+        "provenance": {
+            "understanding_binding": {
+                "understanding_id": "paper-understanding-aaaaaaaaaaaaaaaa",
+                "understanding_digest": "a" * 64,
+                "validation_record_id": "paper-understanding-validation-bbbbbbbbbbbbbbbb",
+                "validation_record_digest": "b" * 64,
+            },
+            "projection_ref": {
+                "schema": "UnderstandingNetworkProjection/v1",
+                "projection_id": "understanding-projection-cccccccccccccccc",
+                "projection_digest": "c" * 64,
+                "projection_type": PAPER_UNDERSTANDING_GAP_TO_PROJECTION[gap_type],
+                "payload_digest": payload_digest,
+            },
+            "basis_refs": [
+                {
+                    "ref_type": "understanding_projection_path",
+                    "projection_type": PAPER_UNDERSTANDING_GAP_TO_PROJECTION[gap_type],
+                    "source_path": missing_fields[gap_type],
+                    "payload_digest": payload_digest,
+                }
+            ],
+        },
+        "novelty_claimed": False,
+    }
+    gap["gap_digest"] = canonical_paper_understanding_gap_digest(gap)
+    gap["gap_id"] = f"understanding-gap-{gap['gap_digest'][:16]}"
+    return gap
 
 
 def network_fixture():
@@ -989,6 +1045,110 @@ def patch_v2_fixture(network):
 
 
 class NetworkGapDiscoveryTest(unittest.TestCase):
+    def test_paper_understanding_gap_accepts_exact_six_gap_types(self):
+        for gap_type in PAPER_UNDERSTANDING_GAP_TO_PROJECTION:
+            with self.subTest(gap_type=gap_type):
+                gap = paper_understanding_gap_fixture(gap_type)
+                self.assertIs(validate_paper_understanding_gap(gap), gap)
+
+    def test_paper_understanding_gap_rejects_wrong_projection_and_tampering(self):
+        mismatch = paper_understanding_gap_fixture("missing_input_format")
+        mismatch["projection_type"] = "math"
+        mismatch["gap_digest"] = canonical_paper_understanding_gap_digest(mismatch)
+        mismatch["gap_id"] = f"understanding-gap-{mismatch['gap_digest'][:16]}"
+        with self.assertRaisesRegex(ContractError, "incompatible"):
+            validate_paper_understanding_gap(mismatch)
+
+        tampered = paper_understanding_gap_fixture("missing_derivation_step")
+        tampered["question"] = "A different unresolved question"
+        with self.assertRaisesRegex(ContractError, "gap_digest"):
+            validate_paper_understanding_gap(tampered)
+
+    def test_paper_understanding_gap_rejects_cross_domain_fields_and_unbound_basis(self):
+        cross_domain = paper_understanding_gap_fixture("missing_data_flow")
+        cross_domain["missing_field"] = "conclusion.invented"
+        cross_domain["provenance"]["basis_refs"][0]["source_path"] = (
+            "conclusion.invented"
+        )
+        cross_domain["gap_digest"] = canonical_paper_understanding_gap_digest(
+            cross_domain
+        )
+        cross_domain["gap_id"] = (
+            f"understanding-gap-{cross_domain['gap_digest'][:16]}"
+        )
+        with self.assertRaisesRegex(ContractError, "field prefix"):
+            validate_paper_understanding_gap(cross_domain)
+
+        unbound = paper_understanding_gap_fixture("missing_derivation_step")
+        unbound["provenance"]["basis_refs"][0]["source_path"] = (
+            "mathematical_principles.principles[0].derivation_steps[0]"
+        )
+        unbound["gap_digest"] = canonical_paper_understanding_gap_digest(unbound)
+        unbound["gap_id"] = f"understanding-gap-{unbound['gap_digest'][:16]}"
+        with self.assertRaisesRegex(ContractError, "bind missing_field"):
+            validate_paper_understanding_gap(unbound)
+
+    def test_paper_understanding_gap_rejects_private_query_material(self):
+        for unsafe in (
+            "/private/user/paper.pdf",
+            "Zotero key ABCD1234",
+            "github_pat_secretvalue",
+            "gap:INTERNAL-1",
+        ):
+            with self.subTest(unsafe=unsafe):
+                gap = paper_understanding_gap_fixture("missing_conclusion_scope")
+                gap["search_terms"]["must"] = [unsafe]
+                gap["gap_digest"] = canonical_paper_understanding_gap_digest(gap)
+                gap["gap_id"] = f"understanding-gap-{gap['gap_digest'][:16]}"
+                with self.assertRaisesRegex(
+                    ContractError, "secrets, private paths, or keys|internal IDs"
+                ):
+                    validate_paper_understanding_gap(gap)
+
+    def test_paper_understanding_gap_requires_validated_opaque_provenance(self):
+        invalid = paper_understanding_gap_fixture("missing_conclusion_scope")
+        invalid["provenance"]["understanding_binding"].pop(
+            "validation_record_digest"
+        )
+        invalid["gap_digest"] = canonical_paper_understanding_gap_digest(invalid)
+        invalid["gap_id"] = f"understanding-gap-{invalid['gap_digest'][:16]}"
+        with self.assertRaisesRegex(ContractError, "validation_record_digest"):
+            validate_paper_understanding_gap(invalid)
+
+        novelty = paper_understanding_gap_fixture("missing_algorithm_detail")
+        novelty["novelty_claimed"] = True
+        novelty["gap_digest"] = canonical_paper_understanding_gap_digest(novelty)
+        novelty["gap_id"] = f"understanding-gap-{novelty['gap_digest'][:16]}"
+        with self.assertRaisesRegex(ContractError, "novelty_claimed"):
+            validate_paper_understanding_gap(novelty)
+
+    def test_paper_understanding_gap_rejects_rehashed_arbitrary_upstream_ids(self):
+        mutations = (
+            (
+                ("understanding_binding", "understanding_id"),
+                "paper-understanding-arbitrary",
+                "understanding_id does not match",
+            ),
+            (
+                ("understanding_binding", "validation_record_id"),
+                "paper-understanding-validation-arbitrary",
+                "validation_record_id does not match",
+            ),
+            (
+                ("projection_ref", "projection_id"),
+                "understanding-projection-arbitrary",
+                "projection_id does not match",
+            ),
+        )
+        for (container, field), value, message in mutations:
+            with self.subTest(field=field):
+                gap = paper_understanding_gap_fixture("missing_data_flow")
+                gap["provenance"][container][field] = value
+                gap["gap_digest"] = canonical_paper_understanding_gap_digest(gap)
+                gap["gap_id"] = f"understanding-gap-{gap['gap_digest'][:16]}"
+                with self.assertRaisesRegex(ContractError, message):
+                    validate_paper_understanding_gap(gap)
+
     def test_accepts_canonical_learn_from_papers_report_set_example(self):
         example = (
             Path(__file__).resolve().parents[2]

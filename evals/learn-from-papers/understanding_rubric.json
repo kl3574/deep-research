@@ -1,0 +1,235 @@
+{
+  "schema": "PaperUnderstandingSemanticRubric/v1",
+  "paper_id": "synthetic_wsr_paper",
+  "paper_path": "evals/learn-from-papers/fixtures/synthetic_wsr_paper.md",
+  "canonical_title": "Universal Weak-Form Sparse Recovery under Mixed Noise",
+  "thresholds": {
+    "minimum_dimension_score": 0.6,
+    "minimum_semantic_score": 0.8
+  },
+  "applicability": {
+    "applies_marker_groups": [
+      ["deterministic", "确定性"],
+      ["Gaussian", "高斯"],
+      ["measurement noise", "measurement-noise", "测量噪声", "观测噪声"],
+      ["20%"]
+    ],
+    "exclusion_marker_groups": [
+      ["process noise", "process-noise", "过程噪声"],
+      ["hidden state", "hidden-state", "隐状态", "隐藏状态"],
+      ["irregular sampling", "不规则采样", "非规则采样"],
+      ["above 20%", "over 20%", "30%", "超过20%", "高于20%"],
+      ["long-time", "long time", "长时间", "长期"],
+      ["stochastic", "随机动力学", "随机系统"]
+    ]
+  },
+  "workflow": {
+    "minimum_nodes": 8,
+    "minimum_operations": 5,
+    "node_marker_groups": [
+      ["trajectory", "轨迹"],
+      ["sample time", "time sample", "采样时间", "时间采样"],
+      ["test function", "检验函数", "测试函数"],
+      ["library", "候选函数库", "函数库"],
+      ["weak form", "weak-form", "integral", "弱形式", "积分"],
+      ["least squares", "least-squares", "coefficient", "最小二乘", "系数"],
+      ["threshold", "support", "阈值", "支撑集"],
+      ["rollout", "NRMSE", "滚动预测", "轨迹外推"]
+    ],
+    "operation_marker_groups": [
+      ["integrate", "weak form", "weak-form", "积分", "弱形式"],
+      ["library", "design matrix", "函数库", "设计矩阵"],
+      ["least squares", "least-squares", "argmin", "最小二乘", "最小化"],
+      ["threshold", "阈值"],
+      ["rollout", "evaluate", "NRMSE", "滚动预测", "评估"]
+    ],
+    "format_placeholders": ["", "unknown", "unspecified", "n/a", "unreported", "not reported", "未知", "未指定", "未说明", "未报告", "不详"],
+    "format_bound_gap_values": ["unreported", "not reported", "未报告", "未说明"],
+    "format_gap_markers": ["format", "serialization", "encoding", "格式", "序列化", "编码"]
+  },
+  "mathematics": {
+    "minimum_assumptions": 4,
+    "minimum_derivation_steps": 4,
+    "assumption_marker_groups": [
+      ["deterministic", "确定性"],
+      ["Gaussian measurement noise", "高斯测量噪声", "高斯观测噪声"],
+      ["after integration", "积分后"],
+      ["conditional on the selected support", "conditional on selected support", "以所选支撑集为条件", "条件于所选支撑集", "所选支撑集条件下"],
+      ["selection uncertainty", "选择不确定性", "模型选择不确定性"]
+    ],
+    "derivation_marker_groups": [
+      ["test function", "weak form", "weak-form", "检验函数", "弱形式"],
+      ["G", "design matrix", "library", "设计矩阵", "函数库"],
+      ["argmin", "least squares", "least-squares", "最小二乘", "最小化"],
+      ["threshold", "lambda", "阈值", "λ"],
+      ["covariance", "selection uncertainty", "协方差", "选择不确定性"]
+    ]
+  },
+  "algorithm": {
+    "minimum_ordered_steps": 4,
+    "minimum_algorithm_steps": 4,
+    "step_marker_groups": [
+      ["test function", "weak form", "weak-form", "检验函数", "弱形式"],
+      ["library", "design matrix", "函数库", "设计矩阵"],
+      ["least squares", "least-squares", "argmin", "最小二乘", "最小化"],
+      ["threshold", "lambda", "阈值", "λ"],
+      ["rollout", "NRMSE", "evaluate", "滚动预测", "评估"]
+    ],
+    "invariant_marker_groups": [
+      ["{1, x, x^2, x^3}", "{1,x,x^2,x^3}", "[1, x, x^2, x^3]", "[1,x,x^2,x^3]", "函数库{1,x,x^2,x^3}", "候选库{1,x,x^2,x^3}", "函数库[1,x,x^2,x^3]", "候选库[1,x,x^2,x^3]"],
+      ["|theta_j| < lambda", "threshold", "低于阈值", "阈值规则"]
+    ],
+    "missing_detail_groups": [
+      ["quadrature node", "QUADRATURE_NODES", "求积节点", "积分节点"],
+      ["lambda grid", "LAMBDA_GRID", "threshold grid", "λ网格", "lambda网格", "阈值网格"],
+      ["solver tolerance", "solver tolerances", "absolute and relative tolerances", "absolute/relative tolerances", "SOLVER_TOL", "求解器容差", "求解容差", "求解器绝对容差", "求解器相对容差", "求解器绝对/相对容差", "绝对与相对容差"],
+      ["random seeds", "SEEDS", "随机种子"],
+      ["tie-breaking", "ties are broken", "ties", "平局规则", "平局处理", "并列处理"]
+    ],
+    "stopping_unknown_markers": ["not reported", "unresolved", "unspecified", "未报告", "未说明", "未指定", "未解决"],
+    "stopping_concept_markers": ["stopping", "termination", "convergence", "tie-breaking", "停止", "终止", "收敛", "平局处理"]
+  },
+  "conclusion": {
+    "supported_marker_groups": [
+      ["deterministic", "确定性"],
+      ["measurement noise", "measurement-noise", "测量噪声", "观测噪声"],
+      ["20%"]
+    ],
+    "limitation_marker_groups": [
+      ["process noise", "process-noise", "过程噪声"],
+      ["30%"],
+      ["long-time", "long time", "长时间", "长期"],
+      ["statistically indistinguishable", "statistical", "统计上不可区分", "统计学", "统计"]
+    ]
+  },
+  "title": {
+    "applicability_marker_groups": [
+      ["deterministic", "确定性"],
+      ["measurement noise", "measurement-noise", "测量噪声", "观测噪声"],
+      ["20%"]
+    ],
+    "conclusion_marker_groups": [
+      ["limited", "bounded", "有限", "仅适用", "边界内"],
+      ["unsupported", "not supported", "不支持", "未获支持", "证据不足"]
+    ]
+  },
+  "evidence": {
+    "required_locators": [
+      "p. 2, §2, para 1",
+      "Eq. (2)",
+      "p. 2, §2.2, para 1",
+      "p. 2, §2.3, para 3",
+      "p. 3, Table 1",
+      "p. 3, Table 2",
+      "p. 3, §3.2, para 1",
+      "p. 4, §4.2, para 1",
+      "p. 5, §5.1, para 1",
+      "p. 5, Supplement S1"
+    ]
+  },
+  "abstention": {
+    "not_tested_marker_groups": [
+      ["long-time", "long time", "长时间", "长期"],
+      ["statistically indistinguishable", "statistical", "统计上不可区分", "统计学", "统计"],
+      ["exact", "five random seeds", "private assets", "精确", "五个随机种子", "私有资产"]
+    ]
+  },
+  "hard_gates": {
+    "negation_markers": [
+      "not supported",
+      "unsupported",
+      "not established",
+      "does not establish",
+      "no evidence",
+      "not tested",
+      "cannot be verified",
+      "refuted",
+      "fails",
+      "不支持",
+      "未获支持",
+      "证据不足",
+      "未建立",
+      "未检验",
+      "未测试",
+      "无证据",
+      "无法验证",
+      "被否定",
+      "被反驳",
+      "失败",
+      "未报告",
+      "未说明",
+      "未指定",
+      "未解决",
+      "缺失",
+      "省略"
+    ],
+    "overclaims": [
+      {
+        "name": "mixed_noise_overclaim",
+        "patterns": [
+          "\\buniversal(?:ly)?\\b.{0,50}\\bmixed[- ]noise\\b",
+          "\\bmixed[- ]noise\\b.{0,50}\\brobust",
+          "(?:普适|通用|普遍).{0,30}混合噪声",
+          "混合噪声.{0,30}(?:稳健|鲁棒)"
+        ],
+        "limitation_marker_groups": [["mixed noise", "mixed-noise", "混合噪声"], ["unsupported", "not supported", "refuted", "不支持", "未获支持", "被否定"]]
+      },
+      {
+        "name": "process_noise_overclaim",
+        "patterns": [
+          "\\b(?:robust|works?|recovers?|supported?)\\b.{0,50}\\bprocess[- ]noise\\b",
+          "\\bprocess[- ]noise\\b.{0,50}\\b(?:robust|supported?|recovery)\\b",
+          "(?:稳健|鲁棒|有效|支持|恢复).{0,30}过程噪声",
+          "过程噪声.{0,30}(?:稳健|鲁棒|有效|支持|恢复)"
+        ],
+        "limitation_marker_groups": [["process noise", "process-noise", "过程噪声"], ["unsupported", "not supported", "refuted", "misspecification", "不支持", "未获支持", "被否定", "错设"]]
+      },
+      {
+        "name": "thirty_percent_overclaim",
+        "patterns": [
+          "\\b(?:robust|reliable|supported?|recovers?)\\b.{0,35}\\b30%",
+          "\\b30%\\b.{0,35}\\b(?:robust|reliable|supported?|recovery)\\b",
+          "(?:稳健|鲁棒|可靠|支持|恢复).{0,20}30%",
+          "30%.{0,20}(?:稳健|鲁棒|可靠|支持|恢复)"
+        ],
+        "limitation_marker_groups": [["30%"], ["unsupported", "not supported", "fails", "1/5", "不支持", "未获支持", "失败"]]
+      },
+      {
+        "name": "long_time_overclaim",
+        "patterns": [
+          "\\b(?:preserves?|faithful|recovers?)\\b.{0,50}\\blong[- ]time",
+          "\\blong[- ]time\\b.{0,50}\\b(?:preserved|supported|faithful)\\b",
+          "(?:保持|保留|恢复).{0,30}(?:长期|长时间).{0,15}吸引子",
+          "(?:长期|长时间).{0,20}吸引子.{0,20}(?:保持|支持|忠实)"
+        ],
+        "limitation_marker_groups": [["long-time", "long time", "长期", "长时间"], ["unsupported", "not supported", "not tested", "no evidence", "不支持", "未获支持", "未检验", "无证据"]]
+      },
+      {
+        "name": "statistical_overclaim",
+        "patterns": ["\\bstatistically indistinguishable\\b", "统计(?:学|上)?(?:不可区分|无显著差异)"],
+        "limitation_marker_groups": [["statistically indistinguishable", "statistical", "统计上不可区分", "统计学", "统计"], ["unsupported", "not supported", "not tested", "no uncertainty", "不支持", "未获支持", "未检验", "无不确定性信息"]]
+      }
+    ],
+    "fabricated_value_patterns": [
+      "quadrature(?:_nodes| node count| nodes?)\\s*(?:=|is|of|:)\\s*\\d+",
+      "(?:lambda_grid|lambda grid|threshold grid)\\s*(?:=|is|:)\\s*\\[?\\s*[0-9]",
+      "(?:solver_tol|solver tolerance|solver tolerances)\\s*(?:=|is|:)\\s*[0-9]",
+      "(?:random seeds?|seeds?)\\s*(?:=|are|:)\\s*\\[?\\s*\\d",
+      "(?:ties? are broken by|tie[- ]breaking\\s*(?:=|is|uses))",
+      "(?:求积|积分)节点(?:数)?\\s*(?:=|为|:)\\s*\\d+",
+      "(?:lambda|λ|阈值)(?:网格)?\\s*(?:=|为|:)\\s*\\[?\\s*[0-9]",
+      "求解器?容差\\s*(?:=|为|:)\\s*[0-9]",
+      "随机种子\\s*(?:=|为|:)\\s*\\[?\\s*\\d",
+      "(?:平局|并列)(?:规则|处理)?\\s*(?:=|为|:|采用)"
+    ],
+    "depth": {
+      "minimum_nodes": 8,
+      "minimum_operations": 5,
+      "minimum_math_derivation_steps": 4,
+      "minimum_algorithm_ordered_steps": 4,
+      "minimum_algorithm_item_steps": 4,
+      "minimum_claims": 7,
+      "minimum_unique_locators": 10
+    }
+  }
+}

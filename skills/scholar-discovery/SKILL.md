@@ -18,6 +18,16 @@ manifestations, fuse heterogeneous rankings, and emit
 `ScholarDiscoveryResult/v1`. Read [contracts.md](references/contracts.md) before
 creating machine-readable input.
 
+For `PaperUnderstandingGap/v1`, use `compile-understanding-gap`. The compiler
+maps exactly six missing-detail types to fixed confirm/refute query intent,
+preserves the complete content-addressed gap and provenance in the request, and
+cannot emit a resolved value, derivation, algorithm step, boundary, or
+conclusion. Returned papers remain discovery candidates only.
+
+Never place `missing_field`, projection basis paths, private filesystem paths,
+tokens, Zotero keys, digests, or internal graph IDs into provider queries. The
+compiler uses only validated human concepts and its fixed per-gap vocabulary.
+
 ## Workflow
 
 1. Capture `paper_need`, intent, effort, must/should/must-not criteria, hard
@@ -45,6 +55,12 @@ creating machine-readable input.
 7. Send Tier-A papers to `$learn-from-papers`. Return the discovery result to
    `$deep-research`; use `$curate-research-to-zotero` only after identity and
    acquisition review. This skill never writes either destination.
+
+When the input is a paper-understanding gap, search only for evidence capable
+of resolving the named missing detail. Do not read candidate snippets as the
+answer and do not mutate the embedded gap. A later `$learn-from-papers` pass
+must inspect and validate any candidate before a new understanding artifact can
+supersede the unresolved one.
 
 ## Google Scholar boundary
 

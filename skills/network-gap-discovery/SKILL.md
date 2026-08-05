@@ -25,9 +25,26 @@ benchmark profile, completeness statement, or schema constraint. Topological
 isolates, low degree, analogy, embeddings, co-occurrence, and empty searches can
 only generate `implicit_candidate` hypotheses.
 
+Likewise, a missing detail in one paper projection is `unresolved`, not evidence
+that the method or field lacks that detail. A `PaperUnderstandingGap/v1` is not
+a novelty claim and cannot enter a patch directly.
+
 Use `scripts/network_gap_discovery.py` for structural scans, contract
 validation, transparent prioritization, scholar-request emission, and patch
 proposal validation. Read [contracts.md](references/contracts.md) first.
+
+A separately validated `UnderstandingNetworkProjection/v1` may expose an
+unresolved paper-detail observation as `PaperUnderstandingGap/v1`. This skill
+recognizes only `missing_input_format`, `missing_data_flow`,
+`missing_derivation_step`, `missing_algorithm_detail`,
+`missing_applicability_boundary`, and `missing_conclusion_scope`. It binds the
+upstream artifact/projection digests and records a search need; it does not fill
+the missing value or reinterpret the paper.
+
+Only human-safe concepts may enter `question` or `search_terms`; reject private
+paths, secrets/tokens, Zotero keys, content digests, and internal graph IDs.
+`missing_field` is typed local provenance and must never be copied into an
+external query.
 
 ## Autonomous bounded loop
 

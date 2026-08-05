@@ -4,6 +4,13 @@ This is the Zotero projection of the canonical paper card and claim ledger from
 `$learn-from-papers`. It is a retrieval surface, not an independent source of
 truth.
 
+This document describes the legacy structured-note layout. A reviewed
+`PaperUnderstandingNoteInput/v1` uses the stricter deterministic
+[`PaperKnowledgeNote/v2`](paper-knowledge-note-v2.md) pyramid projection. The
+shared validator dispatches by `data-note-contract="PaperKnowledgeNote/v2"`.
+Neither layout authorizes changing a parent item's bibliographic `title` or
+`shortTitle`.
+
 ## Root and section contract
 
 Use one root and one title:

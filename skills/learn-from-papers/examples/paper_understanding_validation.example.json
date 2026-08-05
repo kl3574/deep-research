@@ -1,0 +1,30 @@
+{
+  "checks": [
+    {
+      "check_id": "closed_schema",
+      "status": "passed"
+    },
+    {
+      "check_id": "content_address",
+      "status": "passed"
+    },
+    {
+      "check_id": "cross_references",
+      "status": "passed"
+    },
+    {
+      "check_id": "source_binding",
+      "status": "passed"
+    }
+  ],
+  "record_digest": "4b60ff4c546ea8560a88d89424bc71fc4e32f87f4326bdd3a581ee0026a91af2",
+  "record_id": "paper-understanding-validation-4b60ff4c546ea856",
+  "schema": "PaperUnderstandingValidation/v1",
+  "schema_version": "1.0",
+  "source_binding_verified": true,
+  "status": "passed",
+  "understanding_digest": "ca6653f5bc6421a82d5b5e3c848b9cf4f9ce270bf30560ecc3f0d413da858222",
+  "understanding_id": "paper-understanding-ca6653f5bc6421a8",
+  "validator_name": "learn-from-papers.paper-understanding",
+  "validator_version": "1.0"
+}

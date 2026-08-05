@@ -24,6 +24,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 from verify_note_html import validate_note
+from paper_knowledge_note import (
+    ContractError as ProjectionContractError,
+    validate_projection_html_readback,
+)
 
 
 LOCAL_BASE = "http://127.0.0.1:23119"
@@ -936,6 +940,68 @@ def verify_target_match(selected: dict[str, object], target: dict[str, Any]) -> 
         )
 
 
+def verify_projection_gate_entry(
+    entry: dict[str, object],
+    *,
+    staged_html: str,
+    status: str,
+    note_key: str,
+) -> None:
+    _errors, _warnings, summary = validate_note(staged_html)
+    is_projection = summary.get("note_contract") == "PaperKnowledgeNote/v2"
+    projection_fields = {
+        "projection_manifest",
+        "projection_manifest_path",
+        "projection_source_path",
+        "projection_source_sha256",
+    }
+    present = projection_fields.intersection(entry)
+    if not is_projection:
+        if present:
+            raise ValueError(
+                f"{note_key}: non-projection note contains projection gate fields"
+            )
+        return
+    if present != projection_fields:
+        raise ValueError(f"{note_key}: PaperKnowledgeNote/v2 projection gate is incomplete")
+
+    source_bytes = _read_bytes_for_manifest(
+        entry["projection_source_path"], "projection_source_path", note_key
+    )
+    source_sha256 = entry["projection_source_sha256"]
+    if (
+        not isinstance(source_sha256, str)
+        or not SHA256_PATTERN.fullmatch(source_sha256)
+        or sha256_bytes(source_bytes) != source_sha256
+    ):
+        raise ValueError(f"{note_key}: projection source HTML hash changed")
+    try:
+        source_html = source_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"{note_key}: projection source HTML is not UTF-8") from exc
+
+    manifest_bytes = _read_bytes_for_manifest(
+        entry["projection_manifest_path"], "projection_manifest_path", note_key
+    )
+    try:
+        disk_manifest = json.loads(manifest_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{note_key}: projection manifest is unreadable") from exc
+    embedded_manifest = entry["projection_manifest"]
+    if disk_manifest != embedded_manifest:
+        raise ValueError(f"{note_key}: projection manifest differs from staged binding")
+    try:
+        validate_projection_html_readback(
+            embedded_manifest,
+            projection_source_html=source_html,
+            staged_html=staged_html,
+            require_exact_staged_hash=status != "unchanged_verified",
+            require_upstream_provenance=True,
+        )
+    except ProjectionContractError as exc:
+        raise ValueError(f"{note_key}: projection manifest gate failed: {exc}") from exc
+
+
 def load_entries(manifest_path: Path, requested_keys: set[str]) -> tuple[dict[str, object], list[dict[str, object]]]:
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict) or not isinstance(payload.get("entries"), list):
@@ -1129,6 +1195,12 @@ def load_entries(manifest_path: Path, requested_keys: set[str]) -> tuple[dict[st
             raise ValueError(
                 f"{note_key}: live validator did not bind schema 9 to the PDF hash"
             )
+        verify_projection_gate_entry(
+            entry,
+            staged_html=new_html,
+            status=str(status),
+            note_key=note_key,
+        )
         if note_key in seen_keys:
             raise ValueError(f"duplicate note_key in staged entries: {note_key}")
         seen_keys.add(note_key)
@@ -1224,6 +1296,15 @@ def verify_local_entry(
     errors, warnings, summary = validate_note(new_html)
     if errors:
         raise RuntimeError(f"{note_key}: staged note validation failed: {errors}")
+    try:
+        verify_projection_gate_entry(
+            entry,
+            staged_html=new_html,
+            status=str(entry.get("status")),
+            note_key=note_key,
+        )
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
     local = {
         "note_key": note_key,
         "parent_key": parent_key,

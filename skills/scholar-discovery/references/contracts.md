@@ -43,6 +43,32 @@
 `routes.automatic` must never contain `google_scholar`. The request is bounded
 targeted discovery unless a separate review protocol governs screening.
 
+### Paper-understanding gap query binding
+
+`compile-understanding-gap` accepts only a valid `PaperUnderstandingGap/v1`.
+It embeds that complete object as `understanding_gap`, mirrors its ID/digest/type
+in `gap_ref`, preserves `question` as `paper_need`, and preserves
+`search_terms` as `criteria`. It emits exactly one `confirm` and one `refute`
+query using fixed vocabulary for:
+
+- `missing_input_format`
+- `missing_data_flow`
+- `missing_derivation_step`
+- `missing_algorithm_detail`
+- `missing_applicability_boundary`
+- `missing_conclusion_scope`
+
+For this request subtype, extra top-level fields, altered query text, rewritten
+criteria, and any attempted resolved semantic value fail closed. The ordinary
+request digest therefore binds the original gap, upstream validation and
+projection provenance, and targeted query intent. This is discovery only; it
+does not fill the missing detail.
+
+The compiler uses fixed human-safe vocabulary for each gap type plus validated
+human search concepts. It never concatenates `missing_field` or any basis path
+into an external query and repeats guards against private paths, tokens,
+Zotero-like keys, digests, and internal IDs at the compiler boundary.
+
 ## `ScholarResultBatch/v1`
 
 ```json
@@ -166,6 +192,9 @@ python scripts/scholar_discovery.py execute --request-set request-set.json \
 python scripts/scholar_discovery.py handoff --request request.json \
   --plan plan.json --batch openalex.json --output discovery-result.json
 python scripts/scholar_discovery.py validate --input discovery-result.json
+python scripts/scholar_discovery.py compile-understanding-gap \
+  --gap understanding-gap.json --as-of 2026-08-05T00:00:00Z \
+  --output scholar-request.json
 ```
 
 `execute` is the production path for a validated `ScholarDiscoveryRequestSet/v1`.

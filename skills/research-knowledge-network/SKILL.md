@@ -16,6 +16,8 @@ Use this skill for tasks that must transform local research artifacts into an au
 5. Deterministic bulk import of local `ZoteroCorpusSnapshot/v1` parent metadata.
 6. Strict review and controlled application of content-addressed
    `NetworkPatchProposal/v2` artifacts.
+7. Read-only validation of the five typed projections in an
+   `UnderstandingNetworkProjection/v1` adapter.
 
 The skill must not perform retrieval, external search, model-based interpretation beyond local rules, or Zotero writes.
 
@@ -23,6 +25,7 @@ The skill must not perform retrieval, external search, model-based interpretatio
 
 Primary entry: `scripts/knowledge_network.py`.
 Patch review entry: `scripts/network_patch.py`.
+Paper-understanding adapter entry: `scripts/understanding_projection.py`.
 
 Load this skill when the user asks for:
 
@@ -42,10 +45,17 @@ Load this skill when the user asks for:
 - `ingest-zotero-snapshot` accepts only `ZoteroCorpusSnapshot/v1` and supports deterministic metadata-only source onboarding.
 - Record evidence with `supports|contradicts|qualifies|not_tested`, exact locator, and independence group.
 - Derive gap candidates for unresolved high-impact evidence needs, single-source claims, open conflicts, and missing promised dimensions/profiles.
+- Consume applicability, workflow, math, algorithm, and conclusion projections
+  only through `UnderstandingNetworkProjection/v1`. Validate its source
+  artifact, validation, and projection digests, but treat each `payload` as
+  opaque upstream-owned data rather than reimplementing `$learn-from-papers`.
 
 ## Operational constraints
 
 - This skill does not call the web, does not perform paper-level deep-read, and does not update Zotero.
+- An understanding projection is read-only context for network planning,
+  coverage, and gap detection. It never authorizes graph mutation; claims and
+  evidence still require the existing reviewed, governed ingest path.
 - Evidence is never treated as truth; it is represented as claims + polarity + exact locator + source/version context.
 - Gap discovery and targeted research form a closed loop only through explicit,
   validated `NetworkPatchAcceptance/v1`. A proposal, discovery result, or model
@@ -154,6 +164,25 @@ Use `--supersedes` for controlled revisions and never auto-merge entity IDs.
 Use `transition-gap`, not a second `record-gap`, to resolve, block, or reopen a
 recorded or derived gap.
 
+Create and source-validate a paper-understanding adapter with:
+
+```bash
+python3 scripts/understanding_projection.py create-projection \
+  --understanding paper-understanding.json \
+  --validation-record paper-understanding-validation.json \
+  --source-bundle paper-source-bundle.json \
+  --source paper.pdf \
+  --dossier paper-reading-dossier.json \
+  --output understanding-projection.json
+python3 scripts/understanding_projection.py validate \
+  --input understanding-projection.json \
+  --understanding paper-understanding.json \
+  --validation-record paper-understanding-validation.json \
+  --source-bundle paper-source-bundle.json \
+  --source paper.pdf \
+  --dossier paper-reading-dossier.json
+```
+
 ## Validation expectations
 
 - `status`: report blockers and completion gate signals.
@@ -167,3 +196,4 @@ For deep guidance on the underlying model, gaps, and workflow, read:
 - [research-basis.md](references/research-basis.md)
 - [zotero-corpus-workflow.md](references/zotero-corpus-workflow.md)
 - [patch-application-contracts.md](references/patch-application-contracts.md)
+- [understanding-projection-contract.md](references/understanding-projection-contract.md)

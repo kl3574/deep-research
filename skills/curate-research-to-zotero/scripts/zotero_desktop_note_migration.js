@@ -95,6 +95,181 @@ function parentDataSnapshotSHA256(parentData) {
   }));
 }
 
+function exactObjectKeys(value, expected) {
+  return value
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && JSON.stringify(Object.keys(value).sort())
+      === JSON.stringify([...expected].sort());
+}
+
+async function verifyProjectionGate(
+  entry,
+  stagedHTML,
+  stagedProjection,
+  label,
+) {
+  const isProjection =
+    stagedProjection.root.noteContract === "PaperKnowledgeNote/v2";
+  const projectionFields = [
+    "projection_manifest",
+    "projection_manifest_path",
+    "projection_source_path",
+    "projection_source_sha256",
+  ];
+  const presentFields = projectionFields.filter(field =>
+    Object.prototype.hasOwnProperty.call(entry, field)
+  );
+  if (!isProjection) {
+    assertion(
+      presentFields.length === 0,
+      `${label}: non-projection note has projection gate fields`,
+    );
+    return;
+  }
+  assertion(
+    presentFields.length === projectionFields.length,
+    `${label}: PaperKnowledgeNote/v2 projection gate is incomplete`,
+  );
+  assertion(
+    typeof entry.projection_manifest_path === "string"
+      && entry.projection_manifest_path.startsWith("/")
+      && typeof entry.projection_source_path === "string"
+      && entry.projection_source_path.startsWith("/")
+      && /^[0-9a-f]{64}$/.test(entry.projection_source_sha256),
+    `${label}: projection gate paths or source hash are invalid`,
+  );
+  const sourceHTML = await Zotero.File.getContentsAsync(
+    entry.projection_source_path,
+    "UTF-8",
+  );
+  assertion(
+    sha256Text(sourceHTML) === entry.projection_source_sha256,
+    `${label}: projection source HTML changed`,
+  );
+  const manifestText = await Zotero.File.getContentsAsync(
+    entry.projection_manifest_path,
+    "UTF-8",
+  );
+  const diskManifest = JSON.parse(manifestText);
+  assertion(
+    stableJSONStringify(diskManifest)
+      === stableJSONStringify(entry.projection_manifest),
+    `${label}: projection manifest differs from staged binding`,
+  );
+  const projection = entry.projection_manifest;
+  const expectedProjectionKeys = [
+    "schema",
+    "projection_id",
+    "projection_digest",
+    "input_schema",
+    "output_schema",
+    "normalized_input_sha256",
+    "understanding_binding",
+    "html_sha256",
+    "html_utf8_bytes",
+    "retrieval_title",
+    "retrieval_title_codepoints",
+    "write_contract",
+    "validation",
+  ];
+  assertion(
+    exactObjectKeys(projection, expectedProjectionKeys)
+      && projection.schema === "PaperKnowledgeNoteProjection/v1"
+      && projection.input_schema === "PaperUnderstandingNoteInput/v1"
+      && projection.output_schema === "PaperKnowledgeNote/v2",
+    `${label}: projection manifest schema or fields are invalid`,
+  );
+  const digestPayload = { ...projection };
+  delete digestPayload.projection_id;
+  delete digestPayload.projection_digest;
+  const observedProjectionDigest = sha256Text(
+    stableJSONStringify(digestPayload),
+  );
+  assertion(
+    projection.projection_digest === observedProjectionDigest
+      && projection.projection_id
+        === `paper-knowledge-note-projection-${observedProjectionDigest.slice(0, 16)}`,
+    `${label}: projection manifest is not content-addressed`,
+  );
+  const binding = projection.understanding_binding;
+  assertion(
+    exactObjectKeys(binding, [
+      "understanding_id",
+      "understanding_digest",
+      "validation_record_id",
+      "validation_record_digest",
+    ])
+      && typeof binding.understanding_id === "string"
+      && binding.understanding_id.length > 0
+      && /^[0-9a-f]{64}$/.test(binding.understanding_digest)
+      && typeof binding.validation_record_id === "string"
+      && binding.validation_record_id.length > 0
+      && /^[0-9a-f]{64}$/.test(binding.validation_record_digest),
+    `${label}: understanding or validation binding is invalid`,
+  );
+  const writeContract = projection.write_contract;
+  assertion(
+    exactObjectKeys(writeContract, [
+      "target_item_type",
+      "allowed_mutation_fields",
+      "forbidden_parent_fields",
+      "parent_bibliographic_fields_preserved",
+      "zotero_write_performed",
+    ])
+      && writeContract.target_item_type === "note"
+      && exactArrayEqual(writeContract.allowed_mutation_fields, ["note"])
+      && exactArrayEqual(writeContract.forbidden_parent_fields, [
+        "title",
+        "shortTitle",
+        "creators",
+        "DOI",
+        "date",
+        "publicationTitle",
+      ])
+      && writeContract.parent_bibliographic_fields_preserved === true
+      && writeContract.zotero_write_performed === false,
+    `${label}: projection write contract does not preserve parent fields`,
+  );
+  assertion(
+    projection.validation
+      && projection.validation.status === "verified"
+      && Array.isArray(projection.validation.warnings)
+      && projection.validation.summary
+      && projection.validation.summary.note_contract === "PaperKnowledgeNote/v2"
+      && projection.validation.summary.title === projection.retrieval_title
+      && projection.validation.summary.parent_bibliographic_fields_preserved === true,
+    `${label}: projection validation readback is inconsistent`,
+  );
+  const sourceProjection = semanticHTMLProjection(sourceHTML);
+  const sourceH1 = sourceProjection.headings.filter(
+    heading => heading.tag === "h1"
+  );
+  const stagedH1 = stagedProjection.headings.filter(
+    heading => heading.tag === "h1"
+  );
+  assertion(
+    projection.html_sha256 === entry.projection_source_sha256
+      && new TextEncoder().encode(sourceHTML).length === projection.html_utf8_bytes
+      && sourceProjection.root.noteContract === "PaperKnowledgeNote/v2"
+      && sourceH1.length === 1
+      && stagedH1.length === 1
+      && sourceH1[0].text === projection.retrieval_title
+      && stagedH1[0].text === projection.retrieval_title
+      && Array.from(projection.retrieval_title).length
+        === projection.retrieval_title_codepoints
+      && !/<!--[\s\S]*?-->/u.test(sourceHTML)
+      && !/<!--[\s\S]*?-->/u.test(stagedHTML),
+    `${label}: projection HTML hash, H1, or comment gate failed`,
+  );
+  if (entry.status !== "unchanged_verified") {
+    assertion(
+      sha256Text(stagedHTML) === projection.html_sha256,
+      `${label}: staged projection HTML differs from projection source`,
+    );
+  }
+}
+
 const fileVerificationCache = new Map();
 
 async function verifyPDFFile(
@@ -372,6 +547,7 @@ function semanticHTMLProjection(html) {
     root: {
       tag: root.tagName.toLowerCase(),
       schemaVersion: root.getAttribute("data-schema-version"),
+      noteContract: root.getAttribute("data-note-contract"),
     },
     structure: canonicalNode(root),
     textChunks,
@@ -910,19 +1086,36 @@ async function verifyEntry(entry, targetContext) {
       && stagedProjection.root.schemaVersion === "9",
     `${label}: staged HTML has no schema-9 root`,
   );
-  const requiredSections = [
-    "资料与阅读状态",
-    "为什么重要",
-    "一句话结论",
-    "心智模型",
-    "关键主张与证据",
-    "方法或推导",
-    "结果",
-    "假设、失败边界与竞争解释",
-    "知识图谱关系",
-    "复用",
-    "溯源",
-  ];
+  const isPaperKnowledgeNoteV2 =
+    stagedProjection.root.noteContract === "PaperKnowledgeNote/v2";
+  if (isPaperKnowledgeNoteV2 || entry.projection_manifest) {
+    assertion(
+      typeof verifyProjectionGate === "function",
+      `${label}: projection verification helper is unavailable`,
+    );
+    await verifyProjectionGate(entry, stagedHTML, stagedProjection, label);
+  }
+  const requiredSections = isPaperKnowledgeNoteV2
+    ? [
+      "适用场景与结论",
+      "工作流程与 I/O / 数据流",
+      "数学原理与推导",
+      "算法原理",
+      "证据、边界与溯源",
+    ]
+    : [
+      "资料与阅读状态",
+      "为什么重要",
+      "一句话结论",
+      "心智模型",
+      "关键主张与证据",
+      "方法或推导",
+      "结果",
+      "假设、失败边界与竞争解释",
+      "知识图谱关系",
+      "复用",
+      "溯源",
+    ];
   const h1 = stagedProjection.headings.filter(heading => heading.tag === "h1");
   const h2 = stagedProjection.headings
     .filter(heading => heading.tag === "h2")
@@ -941,6 +1134,38 @@ async function verifyEntry(entry, targetContext) {
     h1.length === 1 && h1[0].text,
     `${label}: staged schema-9 note must contain one non-empty h1`,
   );
+  if (isPaperKnowledgeNoteV2) {
+    assertion(
+      exactArrayEqual(h2, requiredSections),
+      `${label}: PaperKnowledgeNote/v2 must use the exact pyramid section order`,
+      { headings: h2, expected: requiredSections },
+    );
+    assertion(
+      Array.from(h1[0].text).length <= 100
+        && h1[0].text.startsWith("适用：")
+        && /｜结论(?:（[^\r\n）]+）)?：/u.test(h1[0].text)
+        && !/[<>]/u.test(h1[0].text)
+        && !/(^|[^0-9a-f])[0-9a-f]{64}([^0-9a-f]|$)/iu.test(h1[0].text)
+        && !/(^|[^0-9])10\.\d{4,9}\/\S+/iu.test(h1[0].text),
+      `${label}: research retrieval title is malformed or too long`,
+    );
+    assertion(
+      !/<!--[\s\S]*?-->/u.test(stagedHTML)
+        && !/<(?:a|img|iframe|object|embed)\b/iu.test(stagedHTML)
+        && !/(?:^|[\s（(：:])\/(?!\/)(?:(?:home|Users|root|tmp|var|etc|usr|opt|srv|mnt|media|run)(?:\/[^<>\s]*)?|(?:[^<>\s/]+\/)+[^<>\s/]+)/u.test(
+          stagedProjection.textChunks.join(" "),
+        )
+        && !/(^|[^A-Z0-9])[A-Z0-9]{8}([^A-Z0-9]|$)/u.test(
+          stagedProjection.textChunks.join(" "),
+        ),
+      `${label}: PaperKnowledgeNote/v2 contains a comment, remote resource, local path, or private key`,
+    );
+    assertion(
+      stagedHTML.includes("仅允许写入 child note 的 note 字段")
+        && stagedHTML.includes("不得写入父条目 shortTitle"),
+      `${label}: parent bibliographic-field preservation contract is missing`,
+    );
+  }
   assertion(
     stagedHTML.includes(entry.pdf_sha256),
     `${label}: staged note does not cite the verified PDF SHA-256`,

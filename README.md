@@ -19,7 +19,7 @@
 | 技能 | 职责 | 典型输入 | 核心产物 |
 | --- | --- | --- | --- |
 | `$deep-research` | 多来源、全局到具体的针对性深调研 | 领域问题、技术选型、证据争议、版本问题 | 概念地图、技术路线、source registry、claim/evidence matrix、冲突日志、GapQueue |
-| `$learn-from-papers` | 给定一篇论文，执行问题驱动且可复核的深度理解 | PDF、DOI、预印本、出版页面 | source bundle、paper card、原子证据账本、reading dossier、v2 网络投影、中文知识笔记 |
+| `$learn-from-papers` | 给定一篇论文，执行问题驱动且可复核的深度理解 | PDF、DOI、预印本、出版页面 | source bundle、reading dossier、`PaperUnderstanding/v1`、验证记录、金字塔知识笔记输入 |
 | `$research-knowledge-network` | 将来源证据、实体、主张、关系持久化为可审计网络并派生知识缺口 | evidence card、术语表、实验摘要、审稿点 | 证据网络、coverage 概览、冲突视图、可复验缺口列表 |
 | `$network-gap-discovery` | 在开放世界假设下自主提出并反证可能缺失的节点、关系、边界或证据 | `KnowledgeNetwork/v1`、competency questions、既有 gap | gap hypotheses、定向检索请求、`NetworkPatchProposal/v2` |
 | `$scholar-discovery` | 对一个明确证据需要执行可复现的多源论文发现 | gap search test、主题条件、种子论文 | query plan、检索账本、去重 work families、排序候选与失败状态 |
@@ -37,6 +37,8 @@
 - 学术来源按综述/教材/原始研究用途路由，业界来源按规范/版本化文档/SHA 源码/测试/运行时路由；
 - 把 `version-fit`、全文访问、方法适配和来源身份作为硬门，而不是用名望或引用数代替审查；
 - 对关键论文执行 `Question plan → Source bundle → Document graph → Evidence → Reconstruction → Separate-context attestation`；attestation 只记录可审计的上下文声明，不认证主体身份，逐项证据仍保留可重算的页码/字符区间以及图、表、公式或定理定位；
+- 将适用场景、工作流与结构化 I/O、数据流、数学推导依赖、算法步骤和有边界结论固化为内容寻址的 `PaperUnderstanding/v1`；区分 `answered / unresolved / not_applicable` 与 terminal/understood coverage，禁止把终态覆盖冒充理解；
+- 从同一理解对象确定性投影 `PaperUnderstandingNoteInput/v1 → PaperKnowledgeNote/v2`：先给适用场景与结论，再给工作流、数学和算法原理，最后保留证据、边界与溯源；研究检索短标题只进入子笔记 `<h1>`，不覆盖书目 `shortTitle`；
 - 将 `supports / qualifies / refutes / not_tested` 作为不可随意降维的关系；检索 DOI/URL 与证据段落 locator 永远分离；
 - 所有跨来源结论在主张级综合，主动寻找反证并保留未决冲突；
 - 对长任务使用显式 gap/action 循环；
@@ -50,7 +52,7 @@
 ## 安装
 
 ```bash
-git clone --branch v0.4.0 --depth 1 https://github.com/kl3574/deep-research.git
+git clone --branch v0.5.0 --depth 1 https://github.com/kl3574/deep-research.git
 cd deep-research
 mkdir -p ~/.codex/skills
 stamp="$(date +%Y%m%d%H%M%S)"
@@ -74,9 +76,10 @@ focus only on decision-critical bottlenecks with traceable sources.
 ```
 
 ```text
-Use $learn-from-papers to deeply reconstruct this paper. Explain every central
-claim from full-text evidence, audit its figures and equations, and produce a
-Chinese Zotero knowledge note with LaTeX formulas.
+Use $learn-from-papers to deeply reconstruct this paper. Model applicability,
+workflow and typed I/O, data flow, mathematical derivation dependencies,
+algorithm steps, and bounded conclusions from full-text evidence. Produce a
+pyramid-structured Chinese Zotero note without changing bibliographic fields.
 ```
 
 ```text
@@ -172,8 +175,10 @@ field-only 不虚构知识网络、已有 Zotero 语料先读取再深读并入�
 `NetworkPatchProposal/v2` 必须取得显式治理接受。该回归只调用本地验证器，
 不联网、不写 Zotero、不应用网络 patch，也不替代各技能的语义与真实写入测试。
 
-`curate-research-to-zotero` 还提供三层笔记保障：
+`curate-research-to-zotero` 还提供四层笔记保障：
 
+- `PaperUnderstandingValidation/v1` 证明理解对象、source bundle 与 reading dossier 的内容地址绑定；
+- `paper_knowledge_note.py` 将已验证的理解输入确定性渲染为内容寻址的 `PaperKnowledgeNote/v2` 金字塔 HTML；
 - `zotero-note-html.md` 定义中文 schema-9 知识笔记契约；
 - `verify_note_html.py` 检查章节、Claim ID、定位、LaTeX 与溯源；
 - `prepare_note_migration.py` 负责无写入暂存；`render_zotero_desktop_runner.py`
@@ -212,6 +217,8 @@ python evals/real-world/audit_sparse_dynamics_run.py \
 - Targeted research、rapid review、scoping review 和 systematic review 不可互相冒充。
 - 人类阅读/学习研究只作为 agent 工作流的设计类比，不证明模型像人一样学习。
 - 流畅解释不是证据；成功导入父条目也不等于 PDF、笔记和 collection 已正确同步。
+- 结构验证不证明语义正确；自动语义评分也不能替代对原文、推导和适用边界的独立复核。
+- 研究检索标题与 Zotero 书目 `shortTitle` 职责不同；前者写子笔记 `<h1>`，后者默认保持来源元数据不变。
 - 高风险科学、医疗、法律、安全或政策结论仍需要领域专家和适用的正式协议。
 
 ## License

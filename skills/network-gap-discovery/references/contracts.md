@@ -1,5 +1,74 @@
 # Network gap discovery contracts
 
+## `PaperUnderstandingGap/v1`
+
+This content-addressed handoff records one unresolved detail from a separately
+validated `PaperUnderstanding/v1` and
+`UnderstandingNetworkProjection/v1`. It never embeds or revalidates the five
+domain payloads.
+
+```json
+{
+  "schema": "PaperUnderstandingGap/v1",
+  "gap_id": "understanding-gap-<16 hex>",
+  "gap_digest": "<64 lowercase hex>",
+  "gap_type": "missing_data_flow",
+  "projection_type": "workflow",
+  "missing_field": "workflow.data_flow[1]",
+  "question": "Which source passage specifies this data transfer?",
+  "search_terms": {
+    "must": ["method name"], "should": ["data flow"], "must_not": []
+  },
+  "provenance": {
+    "understanding_binding": {
+      "understanding_id": "paper-understanding-...",
+      "understanding_digest": "<64 lowercase hex>",
+      "validation_record_id": "paper-understanding-validation-...",
+      "validation_record_digest": "<64 lowercase hex>"
+    },
+    "projection_ref": {
+      "schema": "UnderstandingNetworkProjection/v1",
+      "projection_id": "understanding-projection-...",
+      "projection_digest": "<64 lowercase hex>",
+      "projection_type": "workflow",
+      "payload_digest": "<64 lowercase hex>"
+    },
+    "basis_refs": [{
+      "ref_type": "understanding_projection_path",
+      "projection_type": "workflow",
+      "source_path": "workflow.data_flow[1]",
+      "payload_digest": "<64 lowercase hex>"
+    }]
+  },
+  "novelty_claimed": false
+}
+```
+
+The closed type-to-projection map is:
+
+| gap type | projection type |
+| --- | --- |
+| `missing_input_format` | `workflow` |
+| `missing_data_flow` | `workflow` |
+| `missing_derivation_step` | `math` |
+| `missing_algorithm_detail` | `algorithm` |
+| `missing_applicability_boundary` | `applicability` |
+| `missing_conclusion_scope` | `conclusion` |
+
+The digest hashes the canonical object excluding only `gap_id` and
+`gap_digest`; the ID is `understanding-gap-<digest[:16]>`. The validator checks
+the opaque upstream identities, validation/projection digests, typed mapping,
+typed source-path basis, search terms, and `novelty_claimed: false`.
+Understanding, validation-record, projection, gap, and payload identities are
+content-derived. Each gap type is restricted to known field paths in its own
+domain; for example, `missing_data_flow` cannot target `conclusion.*`.
+
+Question and search-term fields reject private filesystem paths, secret/token
+patterns, Zotero-like keys, long digests, and internal graph IDs. Machine field
+paths remain local provenance and are never query text. The contract cannot
+establish that a detail is scientifically absent, fill it, or authorize a
+network patch.
+
 ## `NetworkGapProbe/v1`
 
 `scan` consumes a `KnowledgeNetwork/v1` export and returns its bound digest,

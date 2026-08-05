@@ -54,3 +54,39 @@ The private rubric explicitly uses `none_or_all_required` for `not_tested`: no
 evidence is an admissible abstention, but partial evidence is not. Conflict
 retention always requires all designated conflict locators, even for
 `not_tested` atoms.
+
+## PaperUnderstanding semantic evaluation
+
+`understanding_evaluator.py` is an independent second gate for final
+`PaperUnderstanding/v1` artifacts. It reports producer schema validation and
+semantic quality separately; schema validity does not add points to the
+semantic score. The fixture-specific rubric checks applicability, workflow
+nodes and formats, data-flow edges, mathematical and algorithmic dependencies,
+bounded conclusions, pyramid-title consistency, source locators/provenance,
+and honest abstention. Named hard gates reject the synthetic paper's mixed- or
+process-noise, 30%, long-time, and statistical overclaims, as well as missing
+I/O formats, invented unreported settings, title drift, and shallow structure.
+Semantic marker groups and negation handling include English and Chinese
+equivalents. The retrieval title is not matched to a gold sentence: it must
+follow the candidate's own executive-summary formula and preserve the rubric's
+applicability and conclusion semantics.
+An I/O node may use an explicit `unreported`/`未报告` format only when
+`workflow.missing_information` names that node (by ID, description, or semantic
+type) and identifies the format gap; empty, generic, or unbound placeholders
+still fail the hard gate.
+Canonical-title provenance is read from `source_binding` and checked against the
+source H1. Locator validity is derived from locator tokens printed by the source,
+while the rubric's critical-locator coverage remains a separate requirement.
+Explicit setting and stopping gaps may be owned by either workflow or algorithm
+missing-information fields.
+
+```bash
+python evals/learn-from-papers/understanding_evaluator.py \
+  --candidate /tmp/paper-understanding-v1.json \
+  --rubric evals/learn-from-papers/understanding_rubric.json \
+  --source evals/learn-from-papers/fixtures/synthetic_wsr_paper.md
+```
+
+`overall.passed` requires both `schema_validation.passed` and
+`semantic_evaluation.passed`. Inspect the semantic dimensions and hard gates;
+do not treat the aggregate score as a substitute for those diagnostics.

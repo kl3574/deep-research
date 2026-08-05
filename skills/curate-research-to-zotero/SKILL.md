@@ -25,11 +25,25 @@ Load [zotero-workflow.md](references/zotero-workflow.md). Approve the exact targ
 
 Stop on ambiguity or drift. Never expose credentials, edit SQLite, publish private artifacts, duplicate parents, or destructively alter records without separate approval.
 
+For a reviewed `$learn-from-papers` `PaperUnderstandingNoteInput/v1` handoff,
+load [paper-knowledge-note-v2.md](references/paper-knowledge-note-v2.md) and use
+[paper_knowledge_note.py](scripts/paper_knowledge_note.py) to preview, render,
+and verify the private deterministic `PaperKnowledgeNote/v2` projection before
+building any Zotero migration manifest. The generated research retrieval title
+belongs only in the child note `h1`. Preserve the parent bibliographic `title`
+and `shortTitle`; this projection grants no authority to edit either field.
+
 ## Read back
 
 Verify target, children, files, content, and hashes. Record differences/counts and rerun staging for idempotence.
 
 For Chinese notes, preserve Chinese prose, terms, and LaTeX. Validate schema-9 HTML with [zotero-note-html.md](references/zotero-note-html.md) and [verify_note_html.py](scripts/verify_note_html.py).
+
+For `PaperKnowledgeNote/v2`, additionally verify the exact pyramid section
+order, bounded retrieval-title length, target/hypothesis/relation/scope/evidence
+retention, absence of remote resources/private paths/private item keys, and the
+declared child-note-only write surface. Offline projection success is not Zotero
+write or readback evidence.
 
 ## Versioned batch orchestration
 

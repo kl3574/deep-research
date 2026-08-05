@@ -1,4 +1,4 @@
 interface:
   display_name: "Learn from Papers"
-  short_description: "Source-rooted deep reading of one paper"
+  short_description: "Build strict source-rooted paper understanding artifacts and map-to-note projections for local evidence workflows."
   default_prompt: "Use $learn-from-papers to answer a precise question about this paper with scoped claims, exact locators, conflict checks, and honest verification state."

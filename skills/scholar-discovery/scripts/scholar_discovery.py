@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -26,6 +28,7 @@ BATCH_SCHEMA = "ScholarResultBatch/v1"
 RESULT_SCHEMA = "ScholarDiscoveryResult/v1"
 RESULT_SET_SCHEMA = "ScholarDiscoveryResultSet/v1"
 REQUEST_SET_SCHEMA_VERSION = "v1"
+PAPER_UNDERSTANDING_GAP_SCHEMA = "PaperUnderstandingGap/v1"
 
 INTENTS = {"auto", "known_item", "topic_set", "author", "citation_graph", "update"}
 EFFORTS = {"fast", "diligent"}
@@ -99,6 +102,41 @@ SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 IDENTIFIER_RE = re.compile(r"^([0-9A-Za-z_\-.:/]+)$")
 DOI_RE = re.compile(r"^10\.\d{4,9}/\S+$")
 
+PAPER_UNDERSTANDING_GAP_QUERY_TERMS = {
+    "missing_input_format": {
+        "confirm": "input format data type schema interface",
+        "refute": "unsupported input format incompatibility limitation",
+    },
+    "missing_data_flow": {
+        "confirm": "data flow pipeline consumes produces intermediate output",
+        "refute": "data flow ambiguity missing stage failure limitation",
+    },
+    "missing_derivation_step": {
+        "confirm": "derivation proof equation intermediate step assumptions",
+        "refute": "derivation gap omitted step limitation correction",
+    },
+    "missing_algorithm_detail": {
+        "confirm": "algorithm pseudocode ordered steps state invariant stopping condition",
+        "refute": "algorithm failure mode missing detail implementation limitation",
+    },
+    "missing_applicability_boundary": {
+        "confirm": "applicability boundary assumptions conditions population regime",
+        "refute": "out of scope boundary condition failure limitation",
+    },
+    "missing_conclusion_scope": {
+        "confirm": "conclusion scope supported outcome conditions",
+        "refute": "overgeneralization limitation scope qualification contradiction",
+    },
+}
+SENSITIVE_GAP_QUERY_PATTERNS = (
+    re.compile(r"(?:^|\s)(?:/(?:home|root|Users)/|~/|[A-Za-z]:[\\/])"),
+    re.compile(r"\b(?:file://|ghp_|github_pat_|sk-|xox[baprs]-)[A-Za-z0-9_./-]+", re.I),
+    re.compile(r"\b(?:api[_ -]?key|access[_ -]?token|authorization|cookie)\s*[:=]", re.I),
+    re.compile(r"\b(?=[A-Z0-9]{8}\b)(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*[0-9])[A-Z0-9]{8}\b"),
+    re.compile(r"\b[0-9a-f]{32,64}\b", re.I),
+    re.compile(r"\b(?:gap|relation|node|entity)[:_-][A-Za-z0-9._-]+", re.I),
+)
+
 ENDPOINT_HINTS = {
     "openalex": "https://api.openalex.org/works",
     "crossref": "https://api.crossref.org/works",
@@ -170,6 +208,45 @@ Transport = Callable[[str, int], bytes]
 
 class ContractError(ValueError):
     """Raised when a discovery contract fails closed."""
+
+
+_NETWORK_GAP_MODULE: Any | None = None
+
+
+def _load_network_gap_module() -> Any:
+    """Load the authoritative optional gap-contract validator on demand."""
+    global _NETWORK_GAP_MODULE
+    if _NETWORK_GAP_MODULE is not None:
+        return _NETWORK_GAP_MODULE
+    path = (
+        Path(__file__).resolve().parents[2]
+        / "network-gap-discovery"
+        / "scripts"
+        / "network_gap_discovery.py"
+    )
+    if not path.is_file():
+        raise ContractError(
+            "PaperUnderstanding gap compilation requires the "
+            "network-gap-discovery skill"
+        )
+    spec = importlib.util.spec_from_file_location("scholar_network_gap_contract", path)
+    if spec is None or spec.loader is None:
+        raise ContractError(f"cannot load network-gap-discovery contract from {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    if not hasattr(module, "validate_paper_understanding_gap"):
+        raise ContractError(
+            "network-gap-discovery lacks validate_paper_understanding_gap"
+        )
+    _NETWORK_GAP_MODULE = module
+    return module
+
+
+def _validate_understanding_gap_contract(value: Any) -> dict[str, Any]:
+    try:
+        return _load_network_gap_module().validate_paper_understanding_gap(value)
+    except ValueError as exc:
+        raise ContractError(f"invalid PaperUnderstanding gap: {exc}") from exc
 
 
 
@@ -353,11 +430,167 @@ def validate_request(value: Any) -> dict[str, Any]:
     else:
         require_string(request.get("gap_hypothesis_id"), "request.gap_hypothesis_id")
 
+    if "understanding_gap" in request:
+        _validate_understanding_gap_request_binding(request)
+
     # keep backward-compat for non-network fields if present
     if "schema_version" in request:
         if request["schema_version"] != REQUEST_SET_SCHEMA_VERSION:
             raise ContractError("request.schema_version is unsupported")
     return request
+
+
+def _normalized_query_text(parts: list[str]) -> str:
+    return " ".join(" ".join(parts).split())
+
+
+def _assert_safe_gap_query_text(value: str, label: str) -> None:
+    if any(pattern.search(value) for pattern in SENSITIVE_GAP_QUERY_PATTERNS):
+        raise ContractError(
+            f"{label} must not expose secrets, private paths, keys, or internal IDs"
+        )
+
+
+def _understanding_gap_query_seeds(gap: dict[str, Any]) -> list[dict[str, str]]:
+    gap_type = gap["gap_type"]
+    vocabulary = PAPER_UNDERSTANDING_GAP_QUERY_TERMS.get(gap_type)
+    if vocabulary is None:
+        raise ContractError(f"unsupported PaperUnderstanding gap type: {gap_type}")
+    search_terms = gap["search_terms"]
+    base_terms = [*search_terms["must"], *search_terms["should"]]
+    queries = [
+        {
+            "objective": objective,
+            "query": _normalized_query_text([*base_terms, vocabulary[objective]]),
+        }
+        for objective in ("confirm", "refute")
+    ]
+    for index, query in enumerate(queries):
+        _assert_safe_gap_query_text(
+            query["query"], f"PaperUnderstanding gap query_seeds[{index}].query"
+        )
+    return queries
+
+
+def _validate_understanding_gap_request_binding(
+    request: dict[str, Any],
+) -> dict[str, Any]:
+    gap = _validate_understanding_gap_contract(request.get("understanding_gap"))
+    expected_request_keys = {
+        "schema",
+        "request_id",
+        "paper_need",
+        "intent",
+        "effort",
+        "criteria",
+        "metadata_filters",
+        "seeds",
+        "routes",
+        "budgets",
+        "query_seeds",
+        "as_of",
+        "gap_ref",
+        "gap_hypothesis_id",
+        "understanding_gap",
+    }
+    if set(request) != expected_request_keys:
+        raise ContractError(
+            "a PaperUnderstanding gap request must contain only the bounded "
+            "discovery fields and understanding_gap"
+        )
+    gap_ref = require_dict(request.get("gap_ref"), "request.gap_ref")
+    if set(gap_ref) != {"gap_id", "gap_digest", "gap_type"}:
+        raise ContractError(
+            "a PaperUnderstanding request gap_ref must contain exactly "
+            "gap_id, gap_digest, and gap_type"
+        )
+    if gap_ref != {
+        "gap_id": gap["gap_id"],
+        "gap_digest": gap["gap_digest"],
+        "gap_type": gap["gap_type"],
+    }:
+        raise ContractError("request.gap_ref does not match understanding_gap")
+    if request.get("gap_hypothesis_id") != gap["gap_id"]:
+        raise ContractError(
+            "request.gap_hypothesis_id does not match understanding_gap.gap_id"
+        )
+    if request.get("paper_need") != gap["question"]:
+        raise ContractError(
+            "request.paper_need must preserve understanding_gap.question exactly"
+        )
+    _assert_safe_gap_query_text(request["paper_need"], "request.paper_need")
+    if request.get("criteria") != gap["search_terms"]:
+        raise ContractError(
+            "request.criteria must preserve understanding_gap.search_terms exactly"
+        )
+    for group, values in request["criteria"].items():
+        for index, value in enumerate(values):
+            _assert_safe_gap_query_text(
+                value, f"request.criteria.{group}[{index}]"
+            )
+    if request.get("query_seeds") != _understanding_gap_query_seeds(gap):
+        raise ContractError(
+            "request.query_seeds must be the canonical targeted queries for the gap"
+        )
+    return request
+
+
+def compile_understanding_gap_request(
+    value: Any,
+    *,
+    as_of: str,
+    google_scholar_policy: str = "manual_optional",
+) -> dict[str, Any]:
+    """Compile a validated missing-detail observation into discovery-only queries."""
+    gap = copy.deepcopy(_validate_understanding_gap_contract(value))
+    if google_scholar_policy not in GOOGLE_POLICIES:
+        raise ContractError(
+            f"google_scholar_policy must be one of {sorted(GOOGLE_POLICIES)}"
+        )
+    request = {
+        "schema": REQUEST_SCHEMA,
+        "request_id": f"SDR-{gap['gap_digest'][:16]}",
+        "paper_need": gap["question"],
+        "intent": "topic_set",
+        "effort": "diligent",
+        "criteria": copy.deepcopy(gap["search_terms"]),
+        "metadata_filters": {
+            "years": {},
+            "authors": [],
+            "venues": [],
+            "languages": [],
+            "work_types": [],
+            "open_access": None,
+        },
+        "seeds": {
+            "doi": [],
+            "arxiv": [],
+            "pmid": [],
+            "openalex": [],
+            "semantic_scholar": [],
+            "titles": [],
+        },
+        "routes": {
+            "automatic": ["openalex", "crossref", "semantic_scholar"],
+            "google_scholar": google_scholar_policy,
+        },
+        "budgets": {
+            "max_rounds": 2,
+            "max_queries": 12,
+            "max_candidates": 100,
+            "timeout_seconds": 900,
+        },
+        "query_seeds": _understanding_gap_query_seeds(gap),
+        "as_of": as_of,
+        "gap_ref": {
+            "gap_id": gap["gap_id"],
+            "gap_digest": gap["gap_digest"],
+            "gap_type": gap["gap_type"],
+        },
+        "gap_hypothesis_id": gap["gap_id"],
+        "understanding_gap": gap,
+    }
+    return validate_request(request)
 
 
 def validate_request_set(value: Any) -> dict[str, Any]:
@@ -2215,6 +2448,19 @@ def parser() -> argparse.ArgumentParser:
     execute.add_argument("--request-set", required=True)
     execute.add_argument("--output", required=True)
 
+    compile_gap = subcommands.add_parser(
+        "compile-understanding-gap",
+        help="compile a PaperUnderstandingGap/v1 into targeted discovery queries",
+    )
+    compile_gap.add_argument("--gap", required=True)
+    compile_gap.add_argument("--as-of", required=True)
+    compile_gap.add_argument(
+        "--google-scholar-policy",
+        choices=sorted(GOOGLE_POLICIES),
+        default="manual_optional",
+    )
+    compile_gap.add_argument("--output", required=True)
+
     validate = subcommands.add_parser("validate", help="validate one contract")
     validate.add_argument("--input", required=True)
 
@@ -2239,6 +2485,15 @@ def main(argv: list[str] | None = None) -> int:
             write_json(
                 args.output,
                 execute_request_set(load_json(args.request_set), _http_transport),
+            )
+        elif args.command == "compile-understanding-gap":
+            write_json(
+                args.output,
+                compile_understanding_gap_request(
+                    load_json(args.gap),
+                    as_of=args.as_of,
+                    google_scholar_policy=args.google_scholar_policy,
+                ),
             )
         else:
             validated = validate_any(load_json(args.input))

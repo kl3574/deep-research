@@ -35,6 +35,10 @@ versions. Explain conflicts; never vote them away.
   cannot carry decisive claims. Pass Tier A an epistemic task with target,
   subquestions, scope, falsifiers, acceptance criteria, required components, and
   inspection depth.
+- Route a completed rich reading only as a verified, content-addressed
+  `PaperUnderstanding/v1` plus an `UnderstandingNetworkProjection/v1` adapter.
+  Record that routing in `PaperUnderstandingRoute/v1`; never copy, repair,
+  summarize, or revalidate the five semantic domains inside this orchestrator.
 - If a compatible knowledge network is supplied or requested, audit it first,
   then use `$network-gap-discovery` for falsifiable open-world gap hypotheses and
   `$scholar-discovery` for bounded candidate discovery. Otherwise run a bounded
@@ -57,6 +61,14 @@ verifier identity. A `decisive` projection is only eligible under its declared
 trust policy. Never relabel `refutes`, `qualifies`, or `not_tested` as support,
 and never mutate a research knowledge network without its explicit governance
 acceptance.
+
+When rich understanding is requested, additionally require the upstream
+`PaperUnderstanding/v1` ID/digest, its content-derived
+`PaperUnderstandingValidation/v1` record ID/digest, and the projection adapter
+ID/digest. Validate only their route envelope with
+`scripts/paper_understanding_route.py`; `$learn-from-papers` remains the sole
+semantic validator and `$research-knowledge-network` remains the projection
+consumer.
 
 ## State, stop, and delivery
 

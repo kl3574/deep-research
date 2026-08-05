@@ -29,6 +29,7 @@ authorization and review.
 
 1. Resolve canonical identity, exact version read, status/corrections, access,
    code/data/supplement availability, local source reference, and SHA-256.
+   Copy the canonical title exactly from the source metadata or heading.
 2. Plan atomic subquestions, target scope, falsifiers, required artifacts, and
    `not_tested` or abstention conditions before retrieval.
 3. For `evidence` or `reconstruction`, build and verify
@@ -43,19 +44,41 @@ authorization and review.
    appendices, supplements, captions, and availability statements.
 5. Create atomic target/evidence records with exact scope and one relation:
    `supports`, `qualifies`, `refutes`, or `not_tested`. Follow
-   [evidence-ledger.md](references/evidence-ledger.md); never treat
+   [evidence-ledger.md](references/evidence-ledger.md). Bind each evidence row
+   to one canonical locator copied exactly from the source/dossier; never join
+   several locators into a new bracketed or prose locator. Never treat
    `qualifies` as weak support or absence as refutation.
+   Use the printed equation, theorem, figure, or table locator when the claim
+   depends on that object; a surrounding section locator is not equivalent.
 6. Adversarially compare abstract, methods, results, visuals, equations,
    appendix, supplement, citations, and availability. Preserve material sign,
    unit, denominator, population, horizon, seed, baseline, uncertainty, version,
    and train/test conflicts.
-7. Reconstruct only checked material. Keep `planned`, `executed`, `passed`,
+7. For `evidence` and `reconstruction`, create strict `PaperUnderstanding/v1`
+   records with content-addressed identity in `scripts/paper_understanding.py`
+   before machine handoff. Validate the exact understanding against its real
+   source, source bundle, and `PaperReadingDossier/v1`; retain the emitted
+   content-addressed `PaperUnderstandingValidation/v1` record. Model every
+   material workflow data object and operation, record concrete I/O contracts,
+   use structured dependency steps for math and algorithms, and enumerate all
+   unreported settings. An explicit `unreported` format must name the same gap
+   in `missing_information`; it is not a substitute for inspecting the source.
+   State each missing setting directly in its owning domain; do not replace
+   details with ID ranges or cross-domain shorthand.
+8. Reconstruct only checked material. Keep `planned`, `executed`, `passed`,
    `failed`, and `not_answerable` distinct; execution is not replication unless
    the stated rubric and outputs match.
-8. Create and audit `PaperReadingDossier/v1`; project
+9. Create and audit `PaperReadingDossier/v1`; project
    `PaperReadingReportSet/v2` only for machine handoff. Use
    [reading-dossier.md](references/reading-dossier.md) for attestation commands
    and [contracts.md](references/contracts.md) for schemas and failure rules.
+10. `PaperUnderstanding/v1` is the dedicated non-network handoff artifact for
+    deep, non-map outputs. Project to
+    `PaperUnderstandingNoteInput/v1` only with `project-note-input`, and only
+    when `source_binding.reading_depth != "map"`. Supply the understanding,
+    validation record, source bundle, source, and dossier paths; the command
+    reopens them, regenerates validation deterministically, and requires exact
+    record equality before emitting final note input.
 
 ## Verification and governance boundary
 
@@ -71,6 +94,14 @@ authentication, or proof of semantic entailment. Label other checks
 and binding checks. It is not a truth certificate. `PaperReadingReportSet/v1` is
 historical-audit only. Even finalized v2 output cannot mutate a network without
 explicit `$research-knowledge-network` governance acceptance.
+
+`project-note-input` is the only projection path from `PaperUnderstanding/v1` and
+is fail-closed when the projection contract is not met. It never writes shadow
+or audit copies unless their roots are explicitly supplied, and all requested
+outputs commit atomically or roll back.
+
+Structural validation or a content-addressed record alone is not live provenance
+proof and cannot emit `PaperUnderstandingNoteInput/v1`.
 
 ## Completion and output
 

@@ -85,3 +85,13 @@ This skill models a local, auditable graph with explicit provenance boundaries:
 - Gap projection preserves `gap_type`, `impact`, and the consumer priority
   vocabulary. Implicit candidates retain grounds, warrant, backing, qualifier,
   defeaters, falsifiable `search_test`, and `novelty_claimed=false`.
+
+`UnderstandingNetworkProjection/v1` is a separate inbound adapter. Its creator
+consumes a validated `PaperUnderstanding/v1` and the corresponding passed,
+source-verified `PaperUnderstandingValidation/v1`, then copies applicability,
+workflow, math, algorithm, and conclusion verbatim. Per-row and aggregate
+payload digests, typed basis references, validation provenance, and a full
+source rebuild prevent caller-authored rewrites. RKN does not reinterpret or
+repair upstream semantics. Adapter payloads may inform planning, coverage, or
+explicit gap records, but cannot directly create graph content and always carry
+`mutation_authorized: false`.

@@ -30,6 +30,32 @@ is `available`, the operation and aggregate delivery status are
 | B | Supporting or benchmark source | Full-text evidence-depth inspection and exact locators for every used claim |
 | C | Orientation/discovery | Identity and access status; cannot support a decisive claim |
 
+## Rich paper-understanding route
+
+Deep research orchestrates, but does not reinterpret, a rich one-paper result.
+Use a separate `PaperUnderstandingRoute/v1` sidecar that binds:
+
+- `understanding_binding` containing content-derived understanding and
+  `PaperUnderstandingValidation/v1` record IDs/digests;
+- the `UnderstandingNetworkProjection/v1` ID/digest;
+- a content-addressed `PaperUnderstandingRouteValidationBinding/v1` that repeats
+  and jointly binds the validation record, understanding, and projection
+  identities;
+- only `research-knowledge-network` and/or `network-gap-discovery` as
+  destinations;
+- `orchestration_only: true` and `semantic_rewrite_allowed: false`.
+
+The route digest covers every field except its derived ID/digest, and the ID is
+`understanding-route-<digest[:16]>`. Validate it with:
+
+```bash
+python3 scripts/paper_understanding_route.py --input paper-understanding-route.json
+```
+
+Do not send the underlying five-domain payload to `$scholar-discovery`.
+`$network-gap-discovery` may issue a typed missing-detail gap, and only that gap
+is compiled into targeted discovery queries.
+
 ## ResearchHandoff/v1
 
 The handoff is private JSON with this shape:

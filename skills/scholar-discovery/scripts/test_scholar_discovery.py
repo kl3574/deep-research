@@ -9,6 +9,7 @@ from scholar_discovery import (
     ContractError,
     HTTP_USER_AGENT,
     build_result,
+    compile_understanding_gap_request,
     compile_plan,
     execute_request_set,
     _http_transport,
@@ -65,6 +66,71 @@ def request_fixture():
         "as_of": "2026-08-05T00:00:00Z",
         "gap_ref": {"gap_id": "GAP-1", "network_id": "KN-1"},
     }
+
+
+UNDERSTANDING_GAP_PROJECTION_BY_TYPE = {
+    "missing_input_format": "workflow",
+    "missing_data_flow": "workflow",
+    "missing_derivation_step": "math",
+    "missing_algorithm_detail": "algorithm",
+    "missing_applicability_boundary": "applicability",
+    "missing_conclusion_scope": "conclusion",
+}
+
+
+def understanding_gap_fixture(gap_type="missing_input_format"):
+    missing_fields = {
+        "missing_input_format": "workflow.graph.nodes[0].format",
+        "missing_data_flow": "workflow.data_flow[0]",
+        "missing_derivation_step": "mathematical_principles.derivation_steps[0]",
+        "missing_algorithm_detail": "algorithmic_principles.ordered_steps[0]",
+        "missing_applicability_boundary": "applicability.does_not_apply_when[0]",
+        "missing_conclusion_scope": "conclusion.statement",
+    }
+    payload_digest = "d" * 64
+    gap = {
+        "schema": "PaperUnderstandingGap/v1",
+        "gap_id": "",
+        "gap_digest": "",
+        "gap_type": gap_type,
+        "projection_type": UNDERSTANDING_GAP_PROJECTION_BY_TYPE[gap_type],
+        "missing_field": missing_fields[gap_type],
+        "question": f"Which source passage resolves {gap_type}?",
+        "search_terms": {
+            "must": ["system identification"],
+            "should": ["primary source"],
+            "must_not": ["unrelated acronym"],
+        },
+        "provenance": {
+            "understanding_binding": {
+                "understanding_id": "paper-understanding-aaaaaaaaaaaaaaaa",
+                "understanding_digest": "a" * 64,
+                "validation_record_id": "paper-understanding-validation-bbbbbbbbbbbbbbbb",
+                "validation_record_digest": "b" * 64,
+            },
+            "projection_ref": {
+                "schema": "UnderstandingNetworkProjection/v1",
+                "projection_id": "understanding-projection-cccccccccccccccc",
+                "projection_digest": "c" * 64,
+                "projection_type": UNDERSTANDING_GAP_PROJECTION_BY_TYPE[gap_type],
+                "payload_digest": payload_digest,
+            },
+            "basis_refs": [
+                {
+                    "ref_type": "understanding_projection_path",
+                    "projection_type": UNDERSTANDING_GAP_PROJECTION_BY_TYPE[gap_type],
+                    "source_path": missing_fields[gap_type],
+                    "payload_digest": payload_digest,
+                }
+            ],
+        },
+        "novelty_claimed": False,
+    }
+    gap["gap_digest"] = sha256_json(
+        {key: value for key, value in gap.items() if key not in {"gap_id", "gap_digest"}}
+    )
+    gap["gap_id"] = f"understanding-gap-{gap['gap_digest'][:16]}"
+    return gap
 
 
 def request_set_fixture():
@@ -137,6 +203,100 @@ def batch_fixture(request, query, candidates, status="succeeded"):
 
 
 class ScholarDiscoveryTest(unittest.TestCase):
+    def test_compiles_all_understanding_gap_types_to_targeted_queries(self):
+        query_pairs = set()
+        for gap_type in UNDERSTANDING_GAP_PROJECTION_BY_TYPE:
+            with self.subTest(gap_type=gap_type):
+                gap = understanding_gap_fixture(gap_type)
+                request = compile_understanding_gap_request(
+                    gap, as_of="2026-08-05T00:00:00Z"
+                )
+                self.assertEqual(request["understanding_gap"], gap)
+                self.assertEqual(request["paper_need"], gap["question"])
+                self.assertEqual(request["criteria"], gap["search_terms"])
+                self.assertEqual(
+                    [item["objective"] for item in request["query_seeds"]],
+                    ["confirm", "refute"],
+                )
+                for item in request["query_seeds"]:
+                    self.assertNotIn(gap["missing_field"], item["query"])
+                    self.assertNotIn("workflow.graph", item["query"])
+                query_pairs.add(
+                    tuple(item["query"] for item in request["query_seeds"])
+                )
+        self.assertEqual(len(query_pairs), len(UNDERSTANDING_GAP_PROJECTION_BY_TYPE))
+
+    def test_understanding_gap_provenance_is_bound_into_request_digest(self):
+        first_gap = understanding_gap_fixture("missing_data_flow")
+        first = compile_understanding_gap_request(
+            first_gap, as_of="2026-08-05T00:00:00Z"
+        )
+        second_gap = copy.deepcopy(first_gap)
+        second_gap["provenance"]["projection_ref"]["projection_digest"] = "e" * 64
+        second_gap["provenance"]["projection_ref"]["projection_id"] = (
+            "understanding-projection-eeeeeeeeeeeeeeee"
+        )
+        second_gap["gap_digest"] = sha256_json(
+            {
+                key: value
+                for key, value in second_gap.items()
+                if key not in {"gap_id", "gap_digest"}
+            }
+        )
+        second_gap["gap_id"] = f"understanding-gap-{second_gap['gap_digest'][:16]}"
+        second = compile_understanding_gap_request(
+            second_gap, as_of="2026-08-05T00:00:00Z"
+        )
+        self.assertNotEqual(sha256_json(first), sha256_json(second))
+        self.assertEqual(second["understanding_gap"]["provenance"], second_gap["provenance"])
+
+    def test_understanding_gap_request_cannot_fill_or_rewrite_semantics(self):
+        gap = understanding_gap_fixture("missing_algorithm_detail")
+        request = compile_understanding_gap_request(
+            gap, as_of="2026-08-05T00:00:00Z"
+        )
+        rewritten = copy.deepcopy(request)
+        rewritten["query_seeds"][0]["query"] += " inferred answer"
+        with self.assertRaisesRegex(ContractError, "canonical targeted queries"):
+            validate_request(rewritten)
+
+        filled = copy.deepcopy(request)
+        filled["resolved_value"] = "invented algorithm step"
+        with self.assertRaisesRegex(ContractError, "bounded discovery fields"):
+            validate_request(filled)
+
+    def test_understanding_gap_compiler_translates_foreign_contract_errors(self):
+        invalid = understanding_gap_fixture("missing_conclusion_scope")
+        invalid["gap_type"] = "missing_invented_semantics"
+        invalid["gap_digest"] = sha256_json(
+            {
+                key: value
+                for key, value in invalid.items()
+                if key not in {"gap_id", "gap_digest"}
+            }
+        )
+        invalid["gap_id"] = f"understanding-gap-{invalid['gap_digest'][:16]}"
+        with self.assertRaisesRegex(ContractError, "invalid PaperUnderstanding gap"):
+            compile_understanding_gap_request(
+                invalid, as_of="2026-08-05T00:00:00Z"
+            )
+
+    def test_understanding_gap_compiler_rejects_private_query_material(self):
+        gap = understanding_gap_fixture("missing_data_flow")
+        gap["search_terms"]["must"] = ["/private/user/source.pdf"]
+        gap["gap_digest"] = sha256_json(
+            {
+                key: value
+                for key, value in gap.items()
+                if key not in {"gap_id", "gap_digest"}
+            }
+        )
+        gap["gap_id"] = f"understanding-gap-{gap['gap_digest'][:16]}"
+        with self.assertRaisesRegex(ContractError, "private paths|internal IDs"):
+            compile_understanding_gap_request(
+                gap, as_of="2026-08-05T00:00:00Z"
+            )
+
     def test_rejects_automatic_google_scholar(self):
         request = request_fixture()
         request["routes"]["automatic"].append("google_scholar")

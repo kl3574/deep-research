@@ -76,6 +76,30 @@ Problem -> assumptions -> method/argument -> evidence -> conclusion
 - Do not paste long copyrighted passages. Paraphrase, using only short necessary quotations.
 - Keep the top half useful for breadth retrieval and the lower sections sufficient for depth recovery.
 
+## Machine handoff coordination
+
+This Markdown knowledge note is a human-oriented view and is not equivalent to the machine contract.
+
+For machine-facing note projection, always use `project-note-input` on a validated `PaperUnderstanding/v1`.
+
+Projection requirements:
+- input must be schema-valid `PaperUnderstanding/v1`;
+- a content-addressed `PaperUnderstandingValidation/v1` must bind the exact
+  understanding and have `source_binding_verified: true` after live source,
+  bundle, and dossier validation;
+- final projection must reopen the understanding, validation record, source
+  bundle, source, and dossier; it must reject the supplied record unless it is
+  exactly equal to deterministic live regeneration;
+- `source_binding.reading_depth` must be `evidence` or `reconstruction`;
+- no projected domain may have `unresolved` status;
+- all domain status/rationale/evidence metadata, workflow graph metadata,
+  structured derivation/algorithm steps, and contribution bindings must remain
+  explicit;
+- executive-summary claim IDs must be preserved exactly and each must be in
+  understood coverage.
+
+If projection fails due to schema or route constraints, capture the CLI error and keep the failure output with the source handoff log.
+
 ## Zotero handoff
 
 Pass to `$curate-research-to-zotero`:

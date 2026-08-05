@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import re
 import sys
@@ -108,6 +109,21 @@ DANGEROUS_ELEMENTS = {
     "textarea",
 }
 URL_ATTRIBUTES = {"action", "formaction", "href", "poster", "src", "xlink:href"}
+
+
+def _validate_paper_knowledge_note(
+    raw: str,
+) -> tuple[list[str], list[str], dict[str, object]]:
+    module_path = Path(__file__).with_name("paper_knowledge_note.py")
+    spec = importlib.util.spec_from_file_location(
+        "paper_knowledge_note_projection_validator",
+        module_path,
+    )
+    if spec is None or spec.loader is None:
+        return ["PN-HTML-00: cannot load PaperKnowledgeNote/v2 validator"], [], {}
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.validate_rendered_html(raw)
 
 
 class NoteParser(HTMLParser):
@@ -250,6 +266,12 @@ def section_text(raw: str, heading: str) -> str:
 
 
 def validate_note(raw: str) -> tuple[list[str], list[str], dict[str, object]]:
+    if re.search(
+        r"<div\b[^>]*\bdata-note-contract=[\"']PaperKnowledgeNote/v2[\"']",
+        raw,
+        flags=re.I,
+    ):
+        return _validate_paper_knowledge_note(raw)
     errors: list[str] = []
     warnings: list[str] = []
     parser = NoteParser()

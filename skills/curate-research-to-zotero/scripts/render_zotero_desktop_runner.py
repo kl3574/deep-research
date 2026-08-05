@@ -11,6 +11,10 @@ import sys
 from pathlib import Path
 
 from verify_note_html import validate_note
+from paper_knowledge_note import (
+    ContractError as ProjectionContractError,
+    validate_projection_html_readback,
+)
 
 
 SENTINEL = "const CONFIG = null; // __DEEP_RESEARCH_ZOTERO_CONFIG__"
@@ -40,6 +44,61 @@ def sha256_bytes(value: bytes) -> str:
 
 def normalize_staged_html_for_storage(text: str) -> str:
     return _STORAGE_NORMALIZATION_CONTROL_PATTERN.sub("", text).strip()
+
+
+def verify_projection_gate_entry(
+    entry: dict[str, object],
+    *,
+    staged_html: str,
+    status: str,
+    label: str,
+) -> None:
+    _errors, _warnings, summary = validate_note(staged_html)
+    is_projection = summary.get("note_contract") == "PaperKnowledgeNote/v2"
+    projection_fields = {
+        "projection_manifest",
+        "projection_manifest_path",
+        "projection_source_path",
+        "projection_source_sha256",
+    }
+    present = projection_fields.intersection(entry)
+    if not is_projection:
+        if present:
+            raise ValueError(f"{label}: non-projection note has projection gate fields")
+        return
+    if present != projection_fields:
+        raise ValueError(f"{label}: PaperKnowledgeNote/v2 projection gate is incomplete")
+
+    source_path = Path(str(entry["projection_source_path"])).expanduser()
+    manifest_path = Path(str(entry["projection_manifest_path"])).expanduser()
+    if not source_path.is_absolute() or not manifest_path.is_absolute():
+        raise ValueError(f"{label}: projection gate paths must be absolute")
+    try:
+        source_bytes = source_path.read_bytes()
+        source_html = source_bytes.decode("utf-8")
+        disk_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{label}: projection gate artifact is unreadable: {exc}") from exc
+    source_sha256 = entry["projection_source_sha256"]
+    if (
+        not isinstance(source_sha256, str)
+        or not SHA256_PATTERN.fullmatch(source_sha256)
+        or sha256_bytes(source_bytes) != source_sha256
+    ):
+        raise ValueError(f"{label}: projection source HTML hash changed")
+    embedded_manifest = entry["projection_manifest"]
+    if disk_manifest != embedded_manifest:
+        raise ValueError(f"{label}: projection manifest differs from staged binding")
+    try:
+        validate_projection_html_readback(
+            embedded_manifest,
+            projection_source_html=source_html,
+            staged_html=staged_html,
+            require_exact_staged_hash=status != "unchanged_verified",
+            require_upstream_provenance=True,
+        )
+    except ProjectionContractError as exc:
+        raise ValueError(f"{label}: projection manifest gate failed: {exc}") from exc
 
 
 def load_and_validate_manifest(
@@ -381,6 +440,12 @@ def load_and_validate_manifest(
             raise ValueError(
                 f"{note_key}: note full-text SHA-256 does not match pdf_sha256"
             )
+        verify_projection_gate_entry(
+            entry,
+            staged_html=new_html,
+            status=status,
+            label=note_key,
+        )
     return raw, payload, len(staged), len(mutation), mutation_keys
 
 
@@ -402,13 +467,29 @@ def protected_manifest_paths(
             }
         ):
             continue
-        for field in ("old_path", "new_path", "pdf_path"):
+        for field in (
+            "old_path",
+            "new_path",
+            "pdf_path",
+            "projection_manifest_path",
+            "projection_source_path",
+        ):
             value = entry.get(field)
             if not isinstance(value, str) or not value or value == "unresolved":
                 continue
             candidate = Path(value).expanduser()
             if candidate.is_absolute():
                 protected.add(candidate.resolve())
+        projection_manifest = entry.get("projection_manifest")
+        if isinstance(projection_manifest, dict):
+            provenance = projection_manifest.get("upstream_provenance")
+            if isinstance(provenance, dict):
+                for field, value in provenance.items():
+                    if not field.endswith("_path") or not isinstance(value, str):
+                        continue
+                    candidate = Path(value).expanduser()
+                    if candidate.is_absolute():
+                        protected.add(candidate.resolve())
     return protected
 
 

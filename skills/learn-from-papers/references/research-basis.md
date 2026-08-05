@@ -103,3 +103,13 @@ This file records why the workflow is structured as it is. It is maintenance evi
 ## Design boundary
 
 The workflow is an evidence-informed engineering design. Validate it with forward tests on real PDFs, preserve source provenance, and keep domain-expert review for high-stakes scientific, medical, legal, safety, or policy decisions.
+
+## Why PaperUnderstanding was added
+
+The workflow separates claim extraction, network projection, and machine handoff by adding `PaperUnderstanding/v1` as an intermediate understanding layer.
+
+The dossier is designed for governance and attestation around explicit evidence claims.
+The understanding artifact is designed for structured internal reuse where route-specific downstream systems need a denser, section-level encoding.
+
+`project-note-input` exists to prevent silent shape drift between free-form notes and strict machine contracts.
+Projecting from `map` depth is intentionally blocked because the route does not include the reconstruction/evidence commitments that the note-input consumer requires.

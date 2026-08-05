@@ -24,6 +24,10 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 from verify_note_html import validate_note
+from paper_knowledge_note import (
+    ContractError as ProjectionContractError,
+    validate_projection_manifest,
+)
 
 
 BASE_URL = "http://127.0.0.1:23119"
@@ -428,6 +432,75 @@ def sha256_file(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             h.update(block)
     return h.hexdigest()
+
+
+def load_projection_manifests(
+    paths: list[Path] | None,
+) -> dict[str, dict[str, object]]:
+    manifests: dict[str, dict[str, object]] = {}
+    for raw_path in paths or []:
+        candidate = raw_path.expanduser()
+        if not candidate.is_absolute():
+            raise ValueError("projection manifest paths must be absolute")
+        try:
+            candidate = candidate.resolve(strict=True)
+            payload = json.loads(candidate.read_text(encoding="utf-8"))
+            validated = validate_projection_manifest(
+                payload,
+                require_upstream_provenance=True,
+                verify_upstream_provenance=True,
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError, ProjectionContractError) as exc:
+            raise ValueError(f"invalid projection manifest {candidate}: {exc}") from exc
+        html_sha256 = str(validated["html_sha256"])
+        if html_sha256 in manifests:
+            raise ValueError(
+                "projection manifests contain duplicate HTML bindings: "
+                f"{html_sha256}"
+            )
+        manifests[html_sha256] = {
+            "manifest": validated,
+            "path": str(candidate),
+        }
+    return manifests
+
+
+def projection_binding_for_html(
+    rendered: str,
+    source_path: Path,
+    manifests_by_html_sha256: dict[str, dict[str, object]],
+    used_html_sha256: set[str],
+) -> dict[str, object]:
+    html_sha256 = sha256_bytes(rendered.encode("utf-8"))
+    _errors, _warnings, summary = validate_note(rendered)
+    is_projection = summary.get("note_contract") == "PaperKnowledgeNote/v2"
+    available = manifests_by_html_sha256.get(html_sha256)
+    if not is_projection:
+        if available is not None:
+            raise ValueError(
+                "projection manifest HTML is not a PaperKnowledgeNote/v2 document"
+            )
+        return {}
+    if available is None:
+        raise ValueError(
+            "PaperKnowledgeNote/v2 HTML requires a matching --projection-manifest"
+        )
+    try:
+        validated = validate_projection_manifest(
+            available["manifest"],
+            rendered=rendered,
+            require_upstream_provenance=True,
+            verify_upstream_provenance=True,
+        )
+    except ProjectionContractError as exc:
+        raise ValueError(f"projection manifest gate failed: {exc}") from exc
+    used_html_sha256.add(html_sha256)
+    return {
+        "projection_manifest": validated,
+        "projection_manifest_path": str(available["path"]),
+        "projection_source_path": str(source_path),
+        "projection_source_sha256": html_sha256,
+    }
 
 
 def parent_data_snapshot_sha256(parent_data: dict[str, object]) -> str:
@@ -1115,6 +1188,10 @@ def resolve_pdf(
 
 def prepare(args: argparse.Namespace) -> dict[str, object]:
     ensure_staging_destination(args.output_dir)
+    projection_manifests = load_projection_manifests(
+        getattr(args, "projection_manifest", None)
+    )
+    used_projection_html_sha256: set[str] = set()
     target = resolve_target_contract(
         args.group_id,
         args.collection_key,
@@ -1338,6 +1415,12 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
                     f"{parent_key}: parent wrapper and item data identity differ"
                 )
             requested_html = parent_note_paths[parent_key].read_text(encoding="utf-8")
+            projection_fields = projection_binding_for_html(
+                requested_html,
+                parent_note_paths[parent_key],
+                projection_manifests,
+                used_projection_html_sha256,
+            )
             new_path = updated_dir / f"{parent_key}.create.html"
             write_text_exclusive(new_path, requested_html)
             new_sha = sha256_file(new_path)
@@ -1360,6 +1443,7 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
                     "validation_errors": errors,
                     "validation_warnings": warnings,
                     "validation_summary": validation_summary,
+                    **projection_fields,
                 }
             )
             continue
@@ -1383,6 +1467,7 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
         old_sha = sha256_bytes(old_bytes)
         old_path = originals_dir / f"{note_key}.html"
         write_bytes_exclusive(old_path, old_bytes)
+        projection_fields: dict[str, object] = {}
 
         if parent_key in parent_note_paths and note_key in overrides:
             raise ValueError(
@@ -1390,7 +1475,14 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
             )
         if parent_key in parent_note_paths:
             used_parent_notes.add(parent_key)
-            override_html = parent_note_paths[parent_key].read_text(encoding="utf-8")
+            projection_source_path = parent_note_paths[parent_key]
+            override_html = projection_source_path.read_text(encoding="utf-8")
+            projection_fields = projection_binding_for_html(
+                override_html,
+                projection_source_path,
+                projection_manifests,
+                used_projection_html_sha256,
+            )
             migration_kind = "curated_parent_override"
             if note_html_matches_storage_semantics(override_html, raw):
                 migrated = raw
@@ -1402,6 +1494,12 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
             used_overrides.add(note_key)
             override_path = Path(overrides[note_key]).expanduser().resolve()
             override_html = override_path.read_text(encoding="utf-8")
+            projection_fields = projection_binding_for_html(
+                override_html,
+                override_path,
+                projection_manifests,
+                used_projection_html_sha256,
+            )
             migration_kind = "curated_override"
             if note_html_matches_storage_semantics(override_html, raw):
                 migrated = raw
@@ -1459,6 +1557,7 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
                 "validation_errors": errors,
                 "validation_warnings": warnings,
                 "validation_summary": validation_summary,
+                **projection_fields,
             }
         )
 
@@ -1479,6 +1578,14 @@ def prepare(args: argparse.Namespace) -> dict[str, object]:
         raise ValueError(
             "parent note map entries were not used by an eligible target: "
             f"{sorted(unused_parent_notes)}"
+        )
+    unused_projection_manifests = (
+        set(projection_manifests) - used_projection_html_sha256
+    )
+    if unused_projection_manifests:
+        raise ValueError(
+            "projection manifests were not used by an eligible projected note: "
+            f"{sorted(unused_projection_manifests)}"
         )
 
     return {
@@ -1513,6 +1620,15 @@ def parse_args() -> argparse.Namespace:
         "--pdf-attachment-map",
         type=Path,
         help="JSON object mapping parent item keys to explicitly approved PDF attachment keys",
+    )
+    parser.add_argument(
+        "--projection-manifest",
+        action="append",
+        type=Path,
+        help=(
+            "absolute PaperKnowledgeNoteProjection/v1 path; repeat for each "
+            "PaperKnowledgeNote/v2 HTML supplied through a note map"
+        ),
     )
     return parser.parse_args()
 

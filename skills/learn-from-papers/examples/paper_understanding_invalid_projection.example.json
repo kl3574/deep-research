@@ -1,0 +1,391 @@
+{
+  "algorithmic_principles": {
+    "algorithms": [
+      {
+        "algorithm_id": "alg-001",
+        "claim_ids": [
+          "claim-001"
+        ],
+        "complexity": "O(Td)",
+        "initialization": "x_0=0",
+        "inputs": [
+          "x_t",
+          "lr"
+        ],
+        "locator": "main p.2",
+        "name": "稳定性裁剪更新",
+        "numerical_risks": [
+          "步长敏感"
+        ],
+        "ordered_steps": [
+          {
+            "action": "x_{t+1} = x_t + lr * grad",
+            "consumes": [
+              "x_t",
+              "lr"
+            ],
+            "depends_on": [],
+            "evidence_ids": [
+              "evidence-001"
+            ],
+            "locator": "main p.2",
+            "origin": "source_stated",
+            "produces": [
+              "x_{t+1}"
+            ],
+            "step_id": "alg-001-1"
+          }
+        ],
+        "origin": "source_stated",
+        "outputs": [
+          "x_{t+1}"
+        ],
+        "stopping_condition": "|grad| < eps",
+        "update_rule": "梯度方向收缩"
+      }
+    ],
+    "evidence_ids": [
+      "evidence-001"
+    ],
+    "failure_modes": [
+      "梯度爆炸"
+    ],
+    "invariants": [
+      "范数有界"
+    ],
+    "missing_information": [],
+    "objective": "稳定性验证",
+    "ordered_steps": [
+      {
+        "action": "初始化 x_0=0",
+        "consumes": [
+          "x_t"
+        ],
+        "depends_on": [],
+        "evidence_ids": [
+          "evidence-001"
+        ],
+        "locator": "main p.2",
+        "origin": "source_stated",
+        "produces": [
+          "buffer"
+        ],
+        "step_id": "alg-step-001"
+      },
+      {
+        "action": "执行稳定性裁剪更新",
+        "consumes": [
+          "buffer",
+          "lr"
+        ],
+        "depends_on": [
+          "alg-step-001"
+        ],
+        "evidence_ids": [
+          "evidence-001"
+        ],
+        "locator": "main p.2",
+        "origin": "source_stated",
+        "produces": [
+          "x_{t+1}"
+        ],
+        "step_id": "alg-step-002"
+      }
+    ],
+    "rationale": "步骤与目标函数一致",
+    "state_variables": [
+      "x_t",
+      "learning_rate"
+    ],
+    "status": "answered"
+  },
+  "applicability": {
+    "applies_when": [
+      "观测噪声受限"
+    ],
+    "claim_ids": [
+      "claim-001"
+    ],
+    "does_not_apply_when": [
+      "过度外推任务"
+    ],
+    "evidence_ids": [
+      "evidence-001"
+    ],
+    "missing_information": [],
+    "primary_use_case": "参数训练稳定性评估",
+    "rationale": "方法给出了可复核的边界条件",
+    "status": "answered"
+  },
+  "claims": [
+    {
+      "claim_id": "claim-001",
+      "confidence": "high",
+      "confidence_rationale": "来源清晰且可复核",
+      "evidence": [
+        {
+          "evidence_id": "evidence-001",
+          "locator": "main p.1",
+          "summary": "主文给出收敛关系"
+        }
+      ],
+      "evidence_ids": [
+        "evidence-001"
+      ],
+      "hypothesis_id": "hyp-001",
+      "nature": "source-stated",
+      "relation": "supports",
+      "scope": {
+        "assumptions": [
+          "噪声边界"
+        ],
+        "conditions": [
+          "小步长"
+        ],
+        "exclusions": [
+          "非平稳噪声"
+        ],
+        "units": [
+          "step"
+        ]
+      },
+      "statement": "在受控噪声和步长条件下训练稳定",
+      "status": "answered",
+      "target_id": "target-001",
+      "verifier_status": "passed"
+    }
+  ],
+  "conclusion": {
+    "claim_ids": [
+      "claim-001"
+    ],
+    "confidence": "medium",
+    "confidence_rationale": "结论由主文证据直接支持",
+    "evidence_ids": [
+      "evidence-001"
+    ],
+    "missing_information": [],
+    "rationale": "已匹配主文假设与证据",
+    "statement": "训练在上述条件下稳定",
+    "status": "answered"
+  },
+  "contributions": [
+    {
+      "claim_ids": [
+        "claim-001"
+      ],
+      "contribution_id": "contrib-001",
+      "domain_refs": [
+        "workflow",
+        "conclusion",
+        "math-001",
+        "alg-001",
+        "applicability"
+      ],
+      "evidence_ids": [
+        "evidence-001"
+      ],
+      "statement": "明确了稳定性验证的先决条件"
+    }
+  ],
+  "coverage": {
+    "terminal_claims": [],
+    "understood_claims": [
+      {
+        "claim_id": "claim-001",
+        "reason": "源文献给出直接证据"
+      }
+    ]
+  },
+  "executive_summary": {
+    "applicability_short": "模型是否能稳定训练",
+    "claim_ids": [
+      "claim-001"
+    ],
+    "conclusion_short": "在约束条件下该结论成立",
+    "summary": "该论文支持稳定训练的一个充分条件。"
+  },
+  "generated_at": "2026-08-05T10:38:27Z",
+  "mathematical_principles": {
+    "assumptions": [
+      "Lipschitz 条件"
+    ],
+    "derivation_steps": [
+      {
+        "depends_on": [
+          "assumption:Lipschitz 条件"
+        ],
+        "evidence_ids": [
+          "evidence-001"
+        ],
+        "locator": "main p.1",
+        "origin": "source_stated",
+        "statement": "从Lipschitz条件得到界限估计。",
+        "step_id": "math-step-001"
+      },
+      {
+        "depends_on": [
+          "step:math-step-001"
+        ],
+        "evidence_ids": [
+          "evidence-001"
+        ],
+        "locator": "main p.1",
+        "origin": "source_stated",
+        "statement": "由假设1推出 V(t) 收敛。",
+        "step_id": "math-step-002"
+      }
+    ],
+    "evidence_ids": [
+      "evidence-001"
+    ],
+    "missing_information": [],
+    "principles": [
+      {
+        "assumptions": [
+          "正则性"
+        ],
+        "claim_ids": [
+          "claim-001"
+        ],
+        "derivation_steps": [
+          {
+            "depends_on": [
+              "assumption:正则性"
+            ],
+            "evidence_ids": [
+              "evidence-001"
+            ],
+            "locator": "main p.1",
+            "origin": "source_stated",
+            "statement": "从假设与边界直接推出",
+            "step_id": "math-prin-001"
+          }
+        ],
+        "latex": "\\dot V(t) \\le -\\alpha V(t)",
+        "locator": "main p.1",
+        "origin": "source_stated",
+        "principle_id": "math-001",
+        "results": [
+          "V(t) 收敛"
+        ],
+        "statement": "若满足假设 H，则有 L2 收敛",
+        "symbols": [
+          "V",
+          "\\alpha"
+        ]
+      }
+    ],
+    "rationale": "定理链条可逐步展开",
+    "results": [
+      "稳定性边界成立"
+    ],
+    "status": "answered"
+  },
+  "producer": "learn-from-papers",
+  "protocol_version": "1.0",
+  "research_retrieval_title": "适用：模型是否能稳定训练｜结论：在约束条件下该结论成立",
+  "schema": "PaperUnderstanding/v1",
+  "schema_version": "1.0",
+  "source_binding": {
+    "access_level": "full_text",
+    "agent_inferences_explicit": true,
+    "authors": [
+      "A. Author",
+      "B. Author"
+    ],
+    "canonical_title": "Stability Note: an Example",
+    "evidence_ledger_ref": "EL-001",
+    "paper_card_ref": "PC-001",
+    "publication_status": "preprint",
+    "reading_depth": "map",
+    "reading_dossier_digest": "9062dbd8d683450297859e179995c61dacae6040077547cd528254328047406f",
+    "reading_dossier_id": "reading-dossier-9062dbd8d6834502",
+    "source_artifact_sha256": "44723afaf2b456edce683547be9bc6965af45fbda4a22c28572c1b38b31b8584",
+    "source_bundle_digest": "739afe94d1f376d31d672ed70848ad5d41d5ac1f7bdf997c309be954d9934ef1",
+    "source_bundle_id": "paper-source-bundle-739afe94d1f376d3",
+    "source_id": "SRC-2026-001",
+    "stable_identifier": "10.9999/example",
+    "venue": "Journal of Examples",
+    "verified_at": "2026-08-05T00:00:00Z",
+    "year": 2024
+  },
+  "understanding_digest": "e629e36f6bd457e304702906d7006187ccaea156f19be57eae28a8652bb50362",
+  "understanding_id": "paper-understanding-e629e36f6bd457e3",
+  "workflow": {
+    "data_flow": [
+      "step-01 -> step-02",
+      "step-02 -> output"
+    ],
+    "evidence_ids": [
+      "evidence-001"
+    ],
+    "graph": {
+      "nodes": [
+        {
+          "description": "输入日志",
+          "format": "text",
+          "kind": "input",
+          "node_id": "node-in",
+          "representation": "text_data",
+          "semantic_type": "raw_input",
+          "shape": "scalar",
+          "unit": "none"
+        },
+        {
+          "description": "输出边界结论",
+          "format": "text",
+          "kind": "output",
+          "node_id": "node-out",
+          "representation": "text_data",
+          "semantic_type": "final_statement",
+          "shape": "scalar",
+          "unit": "none"
+        }
+      ],
+      "operations": [
+        {
+          "consumes": [
+            "node-in"
+          ],
+          "operation": "bound",
+          "operation_id": "op-01",
+          "produces": [
+            "node-out"
+          ]
+        }
+      ]
+    },
+    "inputs": [
+      "训练日志",
+      "超参数"
+    ],
+    "missing_information": [],
+    "outputs": [
+      "支持结论"
+    ],
+    "preconditions": [
+      "输入数据已标准化"
+    ],
+    "rationale": "从方法、假设到结论可追溯",
+    "status": "answered",
+    "steps": [
+      {
+        "action": "复核关键假设",
+        "checks": [
+          "符号定义一致"
+        ],
+        "output": "假设清单",
+        "step_id": "step-01"
+      },
+      {
+        "action": "提取关键不等式",
+        "checks": [
+          "逐行校验"
+        ],
+        "output": "边界式",
+        "step_id": "step-02"
+      }
+    ]
+  }
+}
