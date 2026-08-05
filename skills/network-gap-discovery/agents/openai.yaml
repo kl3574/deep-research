@@ -1,0 +1,4 @@
+interface:
+  display_name: "Network Gap Discovery"
+  short_description: "Find falsifiable missing content in research networks"
+  default_prompt: "Use $network-gap-discovery to audit this research knowledge network, test likely missing nodes or relations, and propose evidence-backed additions without writing the graph."

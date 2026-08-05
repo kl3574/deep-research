@@ -1,0 +1,4 @@
+interface:
+  display_name: "Scholar Discovery"
+  short_description: "Find and rank scholarly candidates with audit trails"
+  default_prompt: "Use $scholar-discovery to turn this evidence need into a bounded, multi-route, reproducible paper discovery result."

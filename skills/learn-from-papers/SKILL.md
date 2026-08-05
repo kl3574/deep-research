@@ -35,4 +35,22 @@ Lead with the answer, then the minimum paper card: source/status/access; central
 
 The card and ledger are canonical. For a durable note, project them through [knowledge-note.md](references/knowledge-note.md) using Chinese prose and LaTeX. `$curate-research-to-zotero` owns schema-9 HTML, exact-target approval, writes, and readback; this skill performs no Zotero write.
 
+## Content-addressed report set
+
+After a completed structured deep-read extraction, run:
+
+```bash
+python skills/learn-from-papers/scripts/paper_reading_report_set.py create \
+  --input structured_extraction.json --output paper-reading-report-set.json
+python skills/learn-from-papers/scripts/paper_reading_report_set.py validate \
+  --input paper-reading-report-set.json
+```
+
+`PaperReadingReportSet/v1` provides a content-addressed audit artifact for full-text evidence
+boundaries used by deep-read gates. It is **not** a provenance-proof of author identity; controller-reviewed
+provenance is still required before operational decisions.
+
+See [contracts.md](references/contracts.md) and
+[`examples/paper_reading_report_set.example.json`](examples/paper_reading_report_set.example.json) for schema and examples.
+
 Load [research-basis.md](references/research-basis.md) only when auditing this skill.

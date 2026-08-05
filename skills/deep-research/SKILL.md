@@ -23,6 +23,20 @@ snapshot, and derive new searches from missing, conflicting, or low-confidence
 network edges. Do not treat an empty web search as proof that the existing corpus
 is complete.
 
+Use `$network-gap-discovery` after deterministic network checks when the task
+requires open-world discovery of likely missing nodes, relations, boundary
+conditions, or evidence. Treat its outputs as falsifiable candidates, never
+novelty or completeness claims. Send each accepted gap search test to
+`$scholar-discovery`, which owns bounded multi-provider paper discovery,
+identity reconciliation, query provenance, and candidate ranking. It does not
+own evidence acceptance.
+
+Google Scholar is manual-only: generate a bounded query for the user and ingest
+only a user-supplied export. Never scrape Scholar result HTML, automate around
+robots.txt, solve CAPTCHA, or label API fallback results as Scholar results.
+Use documented scholarly APIs for autonomous routes and disclose provider
+failures and coverage limits.
+
 Classify papers before deep reading:
 
 - **Tier A:** decision-critical. Send to `$learn-from-papers` and require its
@@ -70,6 +84,12 @@ Stop targeted work only when promised coverage is met; every consequential claim
 Lead with the bounded answer. Deliver coverage, map/deep branches, route comparison, registry/ledger, conflicts, gaps, and the next highest-information check. Keep confidence dimensions separate; a hard-gate failure may dominate.
 
 `$deep-research` owns cross-source synthesis. Hand one paper at a time to `$learn-from-papers`. Use `$curate-research-to-zotero` only for requested acquisition/preservation, passing reviewed identity, version, provenance, and exact target. Acquisition never authorizes writes; require explicit target/batch approval and readback.
+
+`$scholar-discovery` owns paper candidate discovery but never claim synthesis.
+`$network-gap-discovery` owns open-world gap hypotheses and patch proposals but
+never network mutation. Send validated patch proposals to
+`$research-knowledge-network`; only reviewed evidence with exact locators may
+be merged.
 
 The handoff must preserve the knowledge-network digest, requested-item completion
 matrix, attachment roles, and immutable CurationBatch manifest hashes. A
