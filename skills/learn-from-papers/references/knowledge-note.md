@@ -11,6 +11,8 @@ Use this artifact only after the paper card and evidence ledger pass their accep
 - Canonical identity:
 - Version/publication status:
 - Full-text hash:
+- Source bundle ID/digest:
+- Reading dossier ID/digest:
 - Reading depth: map | evidence | reconstruction
 - Read/verified at:
 
@@ -25,8 +27,8 @@ Use this artifact only after the paper card and evidence ledger pass their accep
 Problem -> assumptions -> method/argument -> evidence -> conclusion
 
 ## Key claims and evidence
-| Claim ID | Claim | Evidence and exact locator | Conditions | Confidence |
-| --- | --- | --- | --- | --- |
+| Claim ID | Target/hypothesis | Claim | Relation | Evidence and exact locator | Conditions/exclusions | Confidence |
+| --- | --- | --- | --- | --- | --- | --- |
 
 ## Method or derivation
 - Inputs and outputs:
@@ -69,6 +71,8 @@ Problem -> assumptions -> method/argument -> evidence -> conclusion
 - Separate author interpretation from agent inference.
 - Retain null results, boundary conditions, and unresolved conflicts.
 - Link the note to stable claim IDs used by the wider `$deep-research` evidence matrix.
+- Preserve `supports | qualifies | refutes | not_tested`; never collapse them into a generic positive note.
+- Record abstained required questions and terminal unknowns so retrieval does not turn absence into support.
 - Do not paste long copyrighted passages. Paraphrase, using only short necessary quotations.
 - Keep the top half useful for breadth retrieval and the lower sections sufficient for depth recovery.
 

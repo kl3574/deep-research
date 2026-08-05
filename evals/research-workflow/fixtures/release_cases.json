@@ -1,0 +1,344 @@
+{
+  "schema": "WorkflowRoutingCaseSet/v1",
+  "cases": [
+    {
+      "case_id": "field-only-no-network",
+      "description": "A field map remains in deep-research and does not invent persistent network state.",
+      "plan": {
+        "schema": "WorkflowRoutePlan/v1",
+        "route_id": "route-field-only",
+        "request_class": "field_only",
+        "objective": "Map a field and compare route families without persistence.",
+        "steps": [
+          {
+            "step_id": "field-map",
+            "skill": "deep-research",
+            "operation": "field_map",
+            "execution": "local_readonly",
+            "consumes": ["ResearchQuestion/v1#field"],
+            "produces": ["FieldMap/v1#field"]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "existing-zotero-corpus",
+      "description": "Existing Zotero material is inventoried and read before paper learning and network ingestion.",
+      "plan": {
+        "schema": "WorkflowRoutePlan/v1",
+        "route_id": "route-existing-zotero",
+        "request_class": "existing_zotero_corpus",
+        "objective": "Learn from an existing Zotero corpus and persist reviewed evidence.",
+        "steps": [
+          {
+            "step_id": "inventory-corpus",
+            "skill": "curate-research-to-zotero",
+            "operation": "inventory_existing_corpus",
+            "execution": "local_readonly",
+            "consumes": ["ZoteroTarget/v1#wolfs"],
+            "produces": ["ZoteroCorpusSnapshot/v1#zs-001"]
+          },
+          {
+            "step_id": "read-existing",
+            "skill": "curate-research-to-zotero",
+            "operation": "read_existing_source",
+            "execution": "local_readonly",
+            "consumes": ["ZoteroCorpusSnapshot/v1#zs-001"],
+            "produces": ["PaperSourceBundle/v1#psb-existing"]
+          },
+          {
+            "step_id": "deep-read-existing",
+            "skill": "learn-from-papers",
+            "operation": "deep_read",
+            "execution": "local_readonly",
+            "consumes": ["PaperSourceBundle/v1#psb-existing"],
+            "produces": ["PaperReadingDossier/v1#prd-existing"]
+          },
+          {
+            "step_id": "ingest-existing",
+            "skill": "research-knowledge-network",
+            "operation": "ingest_existing_corpus",
+            "execution": "append_only_local",
+            "consumes": [
+              "ZoteroCorpusSnapshot/v1#zs-001",
+              "PaperReadingDossier/v1#prd-existing"
+            ],
+            "produces": ["KnowledgeNetwork/v1#kn-existing"]
+          },
+          {
+            "step_id": "snapshot-existing",
+            "skill": "research-knowledge-network",
+            "operation": "snapshot",
+            "execution": "local_readonly",
+            "consumes": ["KnowledgeNetwork/v1#kn-existing"],
+            "produces": ["NetworkSnapshotRef/v1#kn-existing-s1"],
+            "network_ref": {
+              "network_id": "KN-EXISTING",
+              "snapshot_id": "KN-EXISTING-S1",
+              "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "open-world-gap-to-scholar",
+      "description": "An exact network snapshot drives gap hypotheses, request emission, and official-API discovery.",
+      "plan": {
+        "schema": "WorkflowRoutePlan/v1",
+        "route_id": "route-open-world-gap",
+        "request_class": "open_world_gap",
+        "objective": "Search for evidence that confirms or refutes an open-world gap.",
+        "steps": [
+          {
+            "step_id": "snapshot-gap",
+            "skill": "research-knowledge-network",
+            "operation": "snapshot",
+            "execution": "local_readonly",
+            "consumes": ["KnowledgeNetwork/v1#kn-gap"],
+            "produces": ["NetworkSnapshotRef/v1#kn-gap-s1"],
+            "network_ref": {
+              "network_id": "KN-GAP",
+              "snapshot_id": "KN-GAP-S1",
+              "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+            }
+          },
+          {
+            "step_id": "audit-gap",
+            "skill": "network-gap-discovery",
+            "operation": "audit_snapshot",
+            "execution": "local_readonly",
+            "consumes": ["NetworkSnapshotRef/v1#kn-gap-s1"],
+            "produces": ["GapHypothesisSet/v1#gh-001"],
+            "network_ref": {
+              "network_id": "KN-GAP",
+              "snapshot_id": "KN-GAP-S1",
+              "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+            }
+          },
+          {
+            "step_id": "emit-gap-search",
+            "skill": "network-gap-discovery",
+            "operation": "emit_search_requests",
+            "execution": "local_readonly",
+            "consumes": [
+              "NetworkSnapshotRef/v1#kn-gap-s1",
+              "GapHypothesisSet/v1#gh-001"
+            ],
+            "produces": ["ScholarDiscoveryRequestSet/v1#sdrs-001"],
+            "network_ref": {
+              "network_id": "KN-GAP",
+              "snapshot_id": "KN-GAP-S1",
+              "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+            }
+          },
+          {
+            "step_id": "discover-official",
+            "skill": "scholar-discovery",
+            "operation": "automatic_discovery",
+            "execution": "documented_api",
+            "provider": "official_apis",
+            "consumes": ["ScholarDiscoveryRequestSet/v1#sdrs-001"],
+            "produces": ["ScholarDiscoveryResultSet/v1#sdr-results-001"]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "google-scholar-manual-only",
+      "description": "Google Scholar enters only through a user-supplied manual export.",
+      "plan": {
+        "schema": "WorkflowRoutePlan/v1",
+        "route_id": "route-scholar-manual",
+        "request_class": "google_scholar_manual",
+        "objective": "Normalize a user-performed Scholar export without browser automation.",
+        "steps": [
+          {
+            "step_id": "manual-scholar-export",
+            "skill": "scholar-discovery",
+            "operation": "manual_google_scholar_export",
+            "execution": "user_manual_export",
+            "provider": "google_scholar",
+            "consumes": ["UserSuppliedScholarExport/v1#export-001"],
+            "produces": ["ScholarResultBatch/v1#manual-001"]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "new-source-fresh-snapshot",
+      "description": "A discovered source is curated, onboarded, and included in a fresh snapshot before proposal.",
+      "plan": {
+        "schema": "WorkflowRoutePlan/v1",
+        "route_id": "route-new-source",
+        "request_class": "new_source_patch",
+        "objective": "Propose a network patch from a newly acquired and onboarded source.",
+        "steps": [
+          {
+            "step_id": "curate-new-source",
+            "skill": "curate-research-to-zotero",
+            "operation": "onboard_new_source",
+            "execution": "governed_write",
+            "consumes": ["AcceptedDiscoveryCandidate/v1#candidate-new"],
+            "produces": ["CuratedSource/v1#src-new"]
+          },
+          {
+            "step_id": "network-onboard-source",
+            "skill": "research-knowledge-network",
+            "operation": "onboard_source",
+            "execution": "append_only_local",
+            "consumes": ["CuratedSource/v1#src-new"],
+            "produces": ["OnboardedSourceRef/v1#src-new"]
+          },
+          {
+            "step_id": "snapshot-after-onboarding",
+            "skill": "research-knowledge-network",
+            "operation": "snapshot",
+            "execution": "local_readonly",
+            "consumes": [
+              "KnowledgeNetwork/v1#kn-new-source",
+              "OnboardedSourceRef/v1#src-new"
+            ],
+            "produces": ["NetworkSnapshotRef/v1#kn-new-source-s2"],
+            "network_ref": {
+              "network_id": "KN-NEW-SOURCE",
+              "snapshot_id": "KN-NEW-SOURCE-S2",
+              "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+            }
+          },
+          {
+            "step_id": "propose-from-new-source",
+            "skill": "network-gap-discovery",
+            "operation": "propose_patch_v2",
+            "execution": "local_readonly",
+            "consumes": [
+              "NetworkSnapshotRef/v1#kn-new-source-s2",
+              "PaperReadingReportSet/v2#finalized-new-source"
+            ],
+            "produces": ["NetworkPatchProposal/v2#npp-new-source"],
+            "network_ref": {
+              "network_id": "KN-NEW-SOURCE",
+              "snapshot_id": "KN-NEW-SOURCE-S2",
+              "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "decisive-external-attestation",
+      "description": "Only a finalized, passed, external attestation reaches decisive evidence consumption.",
+      "plan": {
+        "schema": "WorkflowRoutePlan/v1",
+        "route_id": "route-decisive",
+        "request_class": "decisive_evidence",
+        "objective": "Promote a reviewed claim only after independent attestation finalization.",
+        "steps": [
+          {
+            "step_id": "deep-read-decisive",
+            "skill": "learn-from-papers",
+            "operation": "deep_read",
+            "execution": "local_readonly",
+            "consumes": ["PaperSourceBundle/v1#psb-decisive"],
+            "produces": ["PaperReadingDossier/v1#prd-decisive"]
+          },
+          {
+            "step_id": "prepare-attestation-requests",
+            "skill": "learn-from-papers",
+            "operation": "prepare_attestations",
+            "execution": "local_readonly",
+            "consumes": ["PaperReadingDossier/v1#prd-decisive"],
+            "produces": ["VerificationRequestSet/v1#vrs-001"]
+          },
+          {
+            "step_id": "external-attestation",
+            "skill": "learn-from-papers",
+            "operation": "external_attest",
+            "execution": "external_verifier",
+            "consumes": ["VerificationRequestSet/v1#vrs-001"],
+            "produces": ["VerificationAttestation/v1#va-001"],
+            "attestation": {
+              "schema": "VerificationAttestation/v1",
+              "origin": "external_verifier",
+              "mode": "independent_source_check",
+              "verdict": "passed",
+              "producer_context_id": "producer-context-001",
+              "verifier_context_id": "external-context-001"
+            }
+          },
+          {
+            "step_id": "finalize-attestations",
+            "skill": "learn-from-papers",
+            "operation": "finalize_attestations",
+            "execution": "local_readonly",
+            "consumes": [
+              "VerificationRequestSet/v1#vrs-001",
+              "VerificationAttestation/v1#va-001"
+            ],
+            "produces": ["PaperReadingReportSet/v2#finalized-decisive"]
+          },
+          {
+            "step_id": "consume-decisive",
+            "skill": "network-gap-discovery",
+            "operation": "consume_reviewed_evidence",
+            "execution": "local_readonly",
+            "consumes": ["PaperReadingReportSet/v2#finalized-decisive"],
+            "produces": ["ReviewedGapState/v1#reviewed-001"]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "patch-v2-governance",
+      "description": "A v2 proposal is typed into a plan and applied only with explicit external governance acceptance.",
+      "plan": {
+        "schema": "WorkflowRoutePlan/v1",
+        "route_id": "route-patch-governance",
+        "request_class": "network_patch_v2",
+        "objective": "Apply an evidence-backed patch through an explicit governance decision.",
+        "steps": [
+          {
+            "step_id": "propose-patch-v2",
+            "skill": "network-gap-discovery",
+            "operation": "propose_patch_v2",
+            "execution": "local_readonly",
+            "consumes": [
+              "NetworkSnapshotRef/v1#kn-patch-s1",
+              "PaperReadingReportSet/v2#finalized-patch"
+            ],
+            "produces": ["NetworkPatchProposal/v2#npp-001"]
+          },
+          {
+            "step_id": "prepare-typed-patch",
+            "skill": "research-knowledge-network",
+            "operation": "prepare_patch",
+            "execution": "local_readonly",
+            "consumes": ["NetworkPatchProposal/v2#npp-001"],
+            "produces": ["NetworkPatchPlan/v1#npp-plan-001"]
+          },
+          {
+            "step_id": "apply-governed-patch",
+            "skill": "research-knowledge-network",
+            "operation": "apply_patch",
+            "execution": "governed_write",
+            "consumes": [
+              "NetworkPatchProposal/v2#npp-001",
+              "NetworkPatchPlan/v1#npp-plan-001",
+              "NetworkPatchAcceptance/v1#acceptance-001"
+            ],
+            "produces": ["NetworkPatchApplication/v1#application-001"],
+            "governance": {
+              "schema": "NetworkPatchAcceptance/v1",
+              "decision": "accept",
+              "authorized": true,
+              "operator_scope": "external_governance",
+              "operator_id": "governance-board-001",
+              "authority_basis_ids": ["basis-001"],
+              "acceptance_artifact": "NetworkPatchAcceptance/v1#acceptance-001"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,100 +1,83 @@
 ---
 name: deep-research
-description: Use when a task needs auditable multi-source research, field mapping, route comparison, or conflict resolution. Not for one-paper reading, Zotero curation, or knowledge-network maintenance.
+description: Use when a task needs auditable multi-source research, field mapping, route comparison, or conflict resolution. Route one-paper reading, Zotero curation, and graph maintenance elsewhere.
 ---
 
 # Deep Research
 
-## Contract and map
+Own cross-source investigation and synthesis. Record the question and use,
+subquestions, scope/exclusions, currentness, risk, assumptions, and promised
+coverage. Never call targeted, rapid, or orientation work systematic; that
+requires a prespecified protocol.
 
-Record question/use, subquestions, scope/exclusions, coverage/version/currentness, risk, uncertainty, limits, and assumptions. Never call orientation/targeted/rapid work systematic; that requires a prespecified protocol.
+## Core loop
 
-Normalize terms; map globally; traverse `landscape -> branch -> bottleneck -> deep dive`. Decompose by object/scope, mechanism, route, evidence/maturity, context/version, failure/boundary, and implementation/artifact; call dimensions orthogonal only if shown. Prioritize impact, uncertainty, dependencies, and information gain. Compare only aligned routes. See [research-decomposition.md](references/research-decomposition.md) for search/comparison schemas.
+Run `scope -> map -> gap -> discover -> inspect -> extract -> countercheck ->
+merge -> citation audit -> stop or continue`. Each action must close a named gap
+or improve a decision-critical claim. Compare only aligned routes. Use
+[research-decomposition.md](references/research-decomposition.md) for mapping and
+[execution-loop.md](references/execution-loop.md) for controller, parallelism,
+failure, budget, and untrusted-content rules.
 
-Run `scope -> map -> enqueue gap -> discover -> inspect -> extract -> countercheck -> merge -> citation audit -> stop or continue`. Every action must close a named gap or improve a decision-critical claim. Apply the guards, bounded-parallel rules, failure handling, and untrusted-content boundary in [execution-loop.md](references/execution-loop.md).
+Maintain source identity/version/status, exact locators, atomic claim/evidence
+relations, conflicts, search provenance, and limits. Orient with reviews; support
+decisive academic claims with applicable primary full text. Treat metadata,
+abstracts, snippets, roadmaps, issues, and AI summaries as discovery only. Apply
+the gates in [source-routing.md](references/source-routing.md) and
+[evidence-synthesis.md](references/evidence-synthesis.md). Seek nulls, failures,
+counterexamples, corrections, exclusions, alternatives, and incompatible
+versions. Explain conflicts; never vote them away.
 
-## Compound research and delivery preflight
+## Conditional routes
 
-When one request combines research with acquisition, notes, or Zotero delivery,
-run the read-only preflight in [delivery-handoff.md](references/delivery-handoff.md)
-before retrieval fan-out. If Zotero is in scope, inventory the existing target
-corpus first, build a [KnowledgeNetwork/v1](references/knowledge-network.md)
-snapshot, and derive new searches from missing, conflicting, or low-confidence
-network edges. Do not treat an empty web search as proof that the existing corpus
-is complete.
+- Send one decision-critical paper at a time to `$learn-from-papers`; Tier B
+  supporting papers still need full-text locators, while Tier C orientation
+  cannot carry decisive claims. Pass Tier A an epistemic task with target,
+  subquestions, scope, falsifiers, acceptance criteria, required components, and
+  inspection depth.
+- If a compatible knowledge network is supplied or requested, audit it first,
+  then use `$network-gap-discovery` for falsifiable open-world gap hypotheses and
+  `$scholar-discovery` for bounded candidate discovery. Otherwise run a bounded
+  field study without inventing a network.
+- Google Scholar is manual-only: generate bounded queries and ingest only a
+  user-supplied export. Never scrape Scholar HTML, bypass robots or CAPTCHA, or
+  relabel API results as Scholar results. Autonomous discovery uses documented
+  scholarly APIs and reports provider/coverage limits.
+- If acquisition, notes, or Zotero delivery is requested, run the read-only
+  preflight in [delivery-handoff.md](references/delivery-handoff.md). Inventory
+  the exact Zotero target before searching, validate one golden bundle before
+  fan-out, and keep `research_status` separate from `delivery_status`. Two failed
+  or unavailable delivery paths with no success yield `blocked_capability`, not
+  a fabricated completion.
 
-Use `$network-gap-discovery` after deterministic network checks when the task
-requires open-world discovery of likely missing nodes, relations, boundary
-conditions, or evidence. Treat its outputs as falsifiable candidates, never
-novelty or completeness claims. Send each accepted gap search test to
-`$scholar-discovery`, which owns bounded multi-provider paper discovery,
-identity reconciliation, query provenance, and candidate ranking. It does not
-own evidence acceptance.
+For Tier A machine handoff, require a verified `PaperSourceBundle/v1`, audited
+`PaperReadingDossier/v1`, and `PaperReadingReportSet/v2`. The v2 relation and
+attestation fields are protocol records, not semantic truth or authenticated
+verifier identity. A `decisive` projection is only eligible under its declared
+trust policy. Never relabel `refutes`, `qualifies`, or `not_tested` as support,
+and never mutate a research knowledge network without its explicit governance
+acceptance.
 
-Google Scholar is manual-only: generate a bounded query for the user and ingest
-only a user-supplied export. Never scrape Scholar result HTML, automate around
-robots.txt, solve CAPTCHA, or label API fallback results as Scholar results.
-Use documented scholarly APIs for autonomous routes and disclose provider
-failures and coverage limits.
+## State, stop, and delivery
 
-Classify papers before deep reading:
+With an authorized durable workspace, use [run-state.md](references/run-state.md);
+otherwise keep equivalent temporary state. For compound work, validate a private
+`ResearchHandoff/v1` with `scripts/validate_research_handoff.py`. The ledger and
+handoff record state; they do not browse, invoke models, execute source content,
+or authorize writes.
 
-- **Tier A:** decision-critical. Send to `$learn-from-papers` and require its
-  paper-card, evidence-ledger, and passed locator-audit references.
-- **Tier B:** supporting or benchmark evidence. Inspect full text to evidence
-  depth and retain exact locators for every used claim.
-- **Tier C:** orientation or discovery. Metadata, abstract, review, or snippet
-  evidence cannot carry a decisive claim.
+Stop targeted work only when promised coverage is met, consequential claims have
+fit evidence or remain explicitly unresolved, contrary/boundary evidence is
+represented, and two auditable rounds add nothing decision-relevant. Call this
+`pragmatic saturation`, never completeness. Systematic work stops by protocol;
+budget or access exhaustion produces a partial result with open gaps.
 
-Before parallel acquisition or note generation, complete and validate one golden
-bundle end to end: identity/version, lawful attachment role, reading tier,
-structured note, exact target, dry-run, and supported readback. Fan-out inherits
-that contract; it does not weaken it.
+Lead with the bounded answer, then coverage, map/deep branches, aligned route
+comparison, evidence/conflicts, gaps, limits, and the next highest-information
+check. `$curate-research-to-zotero` alone owns approved acquisition, writes, and
+readback. `$research-knowledge-network` alone validates and applies accepted
+patches. Preserve private Zotero identifiers, paths, notes, PDFs, and handoff
+manifests from public output.
 
-Keep `research_status` and `delivery_status` separate. Research may be complete
-while acquisition or Zotero delivery is partial. For each required acquisition
-or Zotero operation, record independent support paths and evidence. If two paths
-fail or are unavailable and no path succeeds, mark the operation and aggregate
-delivery `blocked_capability`; do not manufacture a duplicate or claim delivery
-completion.
-
-## Evidence gates
-
-Maintain the registry, atomic claim/evidence ledger, conflict log, locators, and search trail from [source-routing.md](references/source-routing.md) and [evidence-synthesis.md](references/evidence-synthesis.md).
-
-When the user authorizes a durable workspace, use the deterministic ledger in [run-state.md](references/run-state.md) to checkpoint and validate the run. Otherwise keep equivalent temporary state and do not create persistent artifacts. The ledger records research; it never performs web requests, invokes models, or makes source content executable.
-
-For a compound request, materialize a private `ResearchHandoff/v1` even when the
-research ledger itself remains temporary. Validate it with
-`scripts/validate_research_handoff.py` before calling research or delivery
-complete.
-
-Use reviews/textbooks to orient and primary full text for decisive academic claims; applicable versioned standards/official references for norms; exact releases/full commits, source/tests, and authorized runtime evidence for implementation. Issues, roadmaps, snippets, abstracts, and AI summaries are discovery only.
-
-Before citing, pass authenticity/status, access/locator, method, scope/applicability, and `version_fit`. Wrong editions, branches, APIs, platforms, regions, tiers, or configurations cannot support exact claims. Register the inspected identity/version/status; never cite from memory.
-
-Seek nulls, failures, counterexamples, critiques, corrections/retractions, exclusions, alternatives, and incompatible versions. Record support/contradiction/qualification and overlap. Explain conflicts—never vote or average; narrow or mark `unresolved` when a gate fails.
-
-Send every decisive paper to `$learn-from-papers`; consume its card, ledger, and corrections. If unavailable, disclose it and label the fallback. Claim reconstruction only after inspecting full text, equations, figures, tables, and corrections.
-
-## Stop, deliver, and hand off
-
-Stop targeted work only when promised coverage is met; every consequential claim has fit evidence or is `unresolved`; decisive versions/status, boundaries, and contrary/null evidence are represented; and two consecutive auditable rounds add no decision-relevant concept, route, conflict, or evidence. Call this `pragmatic saturation`, not completeness; systematic work stops only by protocol. Budget or access exhaustion yields a partial result with unresolved gaps, never a forced answer. Disclose access, language/year/database, version/runtime, and bias limits.
-
-Lead with the bounded answer. Deliver coverage, map/deep branches, route comparison, registry/ledger, conflicts, gaps, and the next highest-information check. Keep confidence dimensions separate; a hard-gate failure may dominate.
-
-`$deep-research` owns cross-source synthesis. Hand one paper at a time to `$learn-from-papers`. Use `$curate-research-to-zotero` only for requested acquisition/preservation, passing reviewed identity, version, provenance, and exact target. Acquisition never authorizes writes; require explicit target/batch approval and readback.
-
-`$scholar-discovery` owns paper candidate discovery but never claim synthesis.
-`$network-gap-discovery` owns open-world gap hypotheses and patch proposals but
-never network mutation. Send validated patch proposals to
-`$research-knowledge-network`; only reviewed evidence with exact locators may
-be merged.
-
-The handoff must preserve the knowledge-network digest, requested-item completion
-matrix, attachment roles, and immutable CurationBatch manifest hashes. A
-supplement is `supplement`, never `main_text`. Public outputs may summarize the
-network but must not contain private Zotero identifiers, local paths, notes, PDFs,
-or unredacted handoff manifests.
-
-[research-basis.md](references/research-basis.md): maintenance/audit only.
+[knowledge-network.md](references/knowledge-network.md) defines snapshot
+semantics; [research-basis.md](references/research-basis.md) is maintenance-only.

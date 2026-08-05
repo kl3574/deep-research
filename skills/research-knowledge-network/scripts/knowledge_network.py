@@ -46,7 +46,13 @@ GAP_STATUS_TRANSITIONS = {
     "blocked": {"open", "resolved"},
 }
 RELATION_TYPES = {"supports", "contradicts", "grounds", "refines", "depends", "enables"}
-EVENT_TYPES = {"init", "derive_gaps", "snapshot_refreshed", "status_snapshot"}
+EVENT_TYPES = {
+    "init",
+    "derive_gaps",
+    "snapshot_refreshed",
+    "status_snapshot",
+    "patch_decision",
+}
 
 
 def _utcnow() -> str:
@@ -1178,10 +1184,27 @@ def _validate_claim_record(
     entity_id = row.get("entity_id")
     if entity_id is not None and entity_id not in known_entities:
         errors.append(f"claim {claim_id} references unknown entity {entity_id}")
-    if _value_is_nonlist(row.get("coverage_dimensions")):
-        errors.append(f"claim {claim_id} coverage_dimensions must be list")
-    if _value_is_nonlist(row.get("benchmark_profiles")):
-        errors.append(f"claim {claim_id} benchmark_profiles must be list")
+    scope_statement = row.get("scope_statement", "")
+    if not isinstance(scope_statement, str):
+        errors.append(f"claim {claim_id} scope_statement must be string")
+    for field in (
+        "assumptions",
+        "conditions",
+        "units",
+        "exclusions",
+        "defeaters",
+        "coverage_dimensions",
+        "benchmark_profiles",
+    ):
+        values = row.get(field, [])
+        if not isinstance(values, list):
+            errors.append(f"claim {claim_id} {field} must be list")
+            continue
+        valid_items = all(isinstance(item, str) and item for item in values)
+        if not valid_items:
+            errors.append(f"claim {claim_id} {field} contains invalid item")
+        elif len(values) != len(set(values)):
+            errors.append(f"claim {claim_id} {field} contains duplicates")
 
 
 def _validate_evidence_records(
@@ -1465,13 +1488,218 @@ def _references_unknown_supersede(value: Any, known: set[str]) -> bool:
     return value is not None and value not in known
 
 
-def _validate_event_records(rows: list[dict[str, Any]], errors: list[str]) -> None:
+def _validate_event_records(
+    rows: list[dict[str, Any]], errors: list[str], expected_network_id: str
+) -> None:
     for row in rows:
         if row.get("schema_version") != SCHEMA_VERSION:
             errors.append("event record schema_version mismatch")
         event_type = row.get("event_type")
         if event_type not in EVENT_TYPES:
             errors.append(f"event {row.get('record_id')} invalid event_type")
+        if event_type == "patch_decision":
+            _validate_patch_decision_event(row, errors, expected_network_id)
+
+
+def _validate_patch_decision_event(
+    row: dict[str, Any], errors: list[str], expected_network_id: str
+) -> None:
+    record_id = row.get("record_id")
+    label = f"event {record_id}"
+    expected_fields = {
+        "schema_version",
+        "network_id",
+        "record_id",
+        "sequence",
+        "recorded_at",
+        "event_type",
+        "event_digest",
+        "proposal_id",
+        "proposal_digest",
+        "plan_id",
+        "plan_digest",
+        "acceptance_id",
+        "acceptance_digest",
+        "decided_at",
+        "operator",
+        "decisions",
+    }
+    if set(row) != expected_fields:
+        errors.append(f"{label} patch_decision fields invalid")
+        return
+    if row.get("network_id") != expected_network_id:
+        errors.append(f"{label} network_id mismatch")
+    digest_fields = (
+        ("proposal", "proposal_id", "proposal_digest", "network-patch-proposal-"),
+        ("plan", "plan_id", "plan_digest", "network-patch-plan-"),
+        (
+            "acceptance",
+            "acceptance_id",
+            "acceptance_digest",
+            "network-patch-acceptance-",
+        ),
+    )
+    for name, id_field, digest_field, prefix in digest_fields:
+        digest = row.get(digest_field)
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            errors.append(f"{label} {name} digest invalid")
+        elif row.get(id_field) != prefix + digest[:16]:
+            errors.append(f"{label} {name} ID/digest mismatch")
+    event_digest = row.get("event_digest")
+    if not isinstance(event_digest, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", event_digest
+    ):
+        errors.append(f"{label} event_digest invalid")
+    else:
+        subject = {
+            key: value
+            for key, value in row.items()
+            if key
+            not in {
+                "schema_version",
+                "record_id",
+                "sequence",
+                "recorded_at",
+                "event_digest",
+            }
+        }
+        expected_digest = _sha256_json(subject).split(":", 1)[1]
+        if event_digest != expected_digest:
+            errors.append(f"{label} event_digest mismatch")
+        expected_record_id = _record_id("event", "patch", event_digest[:16])
+        if record_id != expected_record_id:
+            errors.append(f"{label} record ID/digest mismatch")
+    try:
+        datetime.strptime(str(row.get("decided_at")), "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        errors.append(f"{label} decided_at invalid")
+    try:
+        datetime.strptime(str(row.get("recorded_at")), "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        errors.append(f"{label} recorded_at invalid")
+    operator = row.get("operator")
+    if not isinstance(operator, dict) or set(operator) != {
+        "operator_id",
+        "operator_role",
+        "authority_basis",
+    }:
+        errors.append(f"{label} operator fields invalid")
+        return
+    if _value_missing_text(operator.get("operator_id")) or _value_missing_text(
+        operator.get("operator_role")
+    ):
+        errors.append(f"{label} operator identity invalid")
+    authority = operator.get("authority_basis")
+    if not isinstance(authority, list) or not authority:
+        errors.append(f"{label} authority basis missing")
+        return
+    authority_ids: set[str] = set()
+    for index, basis in enumerate(authority):
+        if not isinstance(basis, dict) or set(basis) != {
+            "basis_id",
+            "basis_type",
+            "source_ref",
+            "locator",
+            "artifact_sha256",
+        }:
+            errors.append(f"{label} authority basis[{index}] fields invalid")
+            continue
+        artifact_digest = basis.get("artifact_sha256")
+        if not isinstance(artifact_digest, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", artifact_digest
+        ):
+            errors.append(f"{label} authority basis[{index}] digest invalid")
+        if basis.get("basis_type") not in {
+            "expert_review",
+            "curation_policy",
+            "user_authorization",
+        }:
+            errors.append(f"{label} authority basis[{index}] type invalid")
+        if _value_missing_text(basis.get("source_ref")) or _value_missing_text(
+            basis.get("locator")
+        ):
+            errors.append(f"{label} authority basis[{index}] locator invalid")
+        subject = {key: value for key, value in basis.items() if key != "basis_id"}
+        expected_id = (
+            "patch-authority-basis-"
+            + _sha256_json(subject).split(":", 1)[1][:16]
+        )
+        if basis.get("basis_id") != expected_id:
+            errors.append(f"{label} authority basis[{index}] ID mismatch")
+        else:
+            if expected_id in authority_ids:
+                errors.append(f"{label} duplicate authority basis")
+            authority_ids.add(expected_id)
+    decisions = row.get("decisions")
+    if not isinstance(decisions, list) or not decisions:
+        errors.append(f"{label} decisions missing")
+        return
+    seen_actions: set[tuple[str, str]] = set()
+    seen_operations: set[tuple[str, str]] = set()
+    for index, decision in enumerate(decisions):
+        decision_label = f"{label} decision[{index}]"
+        if not isinstance(decision, dict) or set(decision) != {
+            "action_id",
+            "action_digest",
+            "decision",
+            "rationale",
+            "authority_basis_ids",
+            "operations",
+        }:
+            errors.append(f"{decision_label} fields invalid")
+            continue
+        action_digest = decision.get("action_digest")
+        action_id = decision.get("action_id")
+        if not isinstance(action_digest, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", action_digest
+        ) or action_id != "network-patch-action-" + str(action_digest)[:16]:
+            errors.append(f"{decision_label} action ID/digest mismatch")
+        action_identity = (str(action_id), str(action_digest))
+        if action_identity in seen_actions:
+            errors.append(f"{decision_label} duplicate action")
+        seen_actions.add(action_identity)
+        decision_value = decision.get("decision")
+        if decision_value not in {"accept", "reject", "defer"}:
+            errors.append(f"{decision_label} decision invalid")
+        if _value_missing_text(decision.get("rationale")):
+            errors.append(f"{decision_label} rationale missing")
+        cited = decision.get("authority_basis_ids")
+        if (
+            not isinstance(cited, list)
+            or not cited
+            or len(cited) != len(set(cited))
+            or not set(cited).issubset(authority_ids)
+        ):
+            errors.append(f"{decision_label} authority binding invalid")
+        operations = decision.get("operations")
+        if not isinstance(operations, list):
+            errors.append(f"{decision_label} operations invalid")
+            continue
+        if decision_value == "accept" and not operations:
+            errors.append(f"{decision_label} accepted action lacks operations")
+        if decision_value in {"reject", "defer"} and operations:
+            errors.append(f"{decision_label} non-accepted action has operations")
+        for op_index, operation in enumerate(operations):
+            if not isinstance(operation, dict) or set(operation) != {
+                "operation_id",
+                "operation_digest",
+            }:
+                errors.append(
+                    f"{decision_label} operation[{op_index}] fields invalid"
+                )
+                continue
+            operation_digest = operation.get("operation_digest")
+            operation_id = operation.get("operation_id")
+            if not isinstance(operation_digest, str) or not re.fullmatch(
+                r"[0-9a-f]{64}", operation_digest
+            ) or operation_id != "network-operation-" + str(operation_digest)[:16]:
+                errors.append(
+                    f"{decision_label} operation[{op_index}] ID/digest mismatch"
+                )
+            operation_identity = (str(operation_id), str(operation_digest))
+            if operation_identity in seen_operations:
+                errors.append(f"{decision_label} duplicate operation")
+            seen_operations.add(operation_identity)
 
 
 def _validate_sequence_continuity(
@@ -1533,7 +1761,7 @@ def _validate_record_shapes(
     _validate_gap_records(
         records["gaps"], known["claims"], records["evidence"], errors
     )
-    _validate_event_records(records["events"], errors)
+    _validate_event_records(records["events"], errors, paths.network_id)
     _validate_sequence_continuity(records, errors)
     _validate_record_id_collisions(records, errors)
 
@@ -2120,14 +2348,30 @@ def command_add_claim(args: argparse.Namespace) -> int:
             }:
                 print("supersedes target is unknown", file=sys.stderr)
                 return 1
+        typed_lists = {
+            "assumptions": list(args.assumption),
+            "conditions": list(args.condition),
+            "units": list(args.unit),
+            "exclusions": list(args.exclusion),
+            "defeaters": list(args.defeater),
+            "coverage_dimensions": list(args.coverage_dimension),
+            "benchmark_profiles": list(args.benchmark_profile),
+        }
+        for field, values in typed_lists.items():
+            if any(not isinstance(item, str) or not item for item in values):
+                print(f"{field} contains an empty item", file=sys.stderr)
+                return 1
+            if len(values) != len(set(values)):
+                print(f"{field} contains duplicates", file=sys.stderr)
+                return 1
         payload = {
             "claim_id": claim_id,
             "claim_text": _ensure_value(args.claim_text, "claim_text"),
             "entity_id": entity_id,
             "impact": _ensure_value(args.impact, "impact"),
             "is_factual": False,
-            "coverage_dimensions": sorted(_sort_items(set(args.coverage_dimension))),
-            "benchmark_profiles": sorted(_sort_items(set(args.benchmark_profile))),
+            "scope_statement": args.scope_statement,
+            **typed_lists,
             "supersedes": args.supersedes,
         }
         if payload["impact"] not in IMPACTS:
@@ -3327,6 +3571,51 @@ def _export_change_history(
         records["events"], key=lambda item: int(item.get("sequence") or 0)
     )
     for row in ordered_events:
+        if row.get("event_type") == "patch_decision":
+            operator = row.get("operator")
+            authority = (
+                operator.get("authority_basis", [])
+                if isinstance(operator, dict)
+                else []
+            )
+            basis_refs = sorted(
+                {
+                    "authority:sha256:" + str(item.get("artifact_sha256"))
+                    for item in authority
+                    if isinstance(item, dict)
+                    and isinstance(item.get("artifact_sha256"), str)
+                }
+            )
+            object_ids = sorted(
+                {
+                    str(identifier)
+                    for decision in row.get("decisions", [])
+                    if isinstance(decision, dict)
+                    for identifier in [
+                        decision.get("action_id"),
+                        *[
+                            operation.get("operation_id")
+                            for operation in decision.get("operations", [])
+                            if isinstance(operation, dict)
+                        ],
+                    ]
+                    if isinstance(identifier, str) and identifier
+                }
+            )
+            if not basis_refs or not object_ids:
+                continue
+            history.append(
+                {
+                    "change_id": str(row["record_id"]),
+                    "action": "patch-decision",
+                    "object_ids": object_ids,
+                    "basis_refs": basis_refs,
+                    "recorded_at": str(
+                        row.get("recorded_at") or state["created_at"]
+                    ),
+                }
+            )
+            continue
         history.append(
             {
                 "change_id": str(row["record_id"]),
@@ -3531,6 +3820,12 @@ def _build_parser() -> argparse.ArgumentParser:
     add_claim.add_argument("--claim-text", required=True)
     add_claim.add_argument("--entity-id")
     add_claim.add_argument("--impact", required=True)
+    add_claim.add_argument("--scope-statement", default="")
+    add_claim.add_argument("--assumption", action="append", default=[])
+    add_claim.add_argument("--condition", action="append", default=[])
+    add_claim.add_argument("--unit", action="append", default=[])
+    add_claim.add_argument("--exclusion", action="append", default=[])
+    add_claim.add_argument("--defeater", action="append", default=[])
     add_claim.add_argument("--coverage-dimension", action="append", default=[])
     add_claim.add_argument("--benchmark-profile", action="append", default=[])
     add_claim.add_argument("--supersedes")

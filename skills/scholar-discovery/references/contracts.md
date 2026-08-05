@@ -161,7 +161,23 @@ backward compatibility.
 
 ```bash
 python scripts/scholar_discovery.py plan --request request.json --output plan.json
+python scripts/scholar_discovery.py execute --request-set request-set.json \
+  --output discovery-result-set.json
 python scripts/scholar_discovery.py handoff --request request.json \
   --plan plan.json --batch openalex.json --output discovery-result.json
 python scripts/scholar_discovery.py validate --input discovery-result.json
 ```
+
+`execute` is the production path for a validated `ScholarDiscoveryRequestSet/v1`.
+It compiles each bounded plan and calls only the official API providers named in
+`routes.automatic`; provider credentials required by the script must already be
+available in the process environment. Per-request provider failures remain
+explicit in the result set rather than being replaced with fabricated
+candidates. Validate the emitted result set before handing it downstream.
+
+`execute` never automates Google Scholar. If the request makes Scholar optional
+and no manual export is supplied, the result records that omission and may
+continue through official APIs. If Scholar is mandatory, obtain a user-performed
+export and normalize it as a manual batch for `handoff`; an unavailable mandatory
+export is a terminal discovery limitation, not permission to scrape, bypass a
+CAPTCHA, or silently widen the coverage claim.

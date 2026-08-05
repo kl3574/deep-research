@@ -1,0 +1,52 @@
+{
+  "schema": "PaperSourceBundle/v1",
+  "schema_version": "v1",
+  "producer": "learn-from-papers",
+  "protocol_version": "1.0",
+  "generated_at": "2026-08-05T00:00:00Z",
+  "source": {
+    "name": "paper.txt",
+    "format": "text",
+    "size_bytes": 10,
+    "source_sha256": "44723afaf2b456edce683547be9bc6965af45fbda4a22c28572c1b38b31b8584"
+  },
+  "page_count": 2,
+  "tools": {
+    "pdfinfo": {
+      "command": "pdfinfo",
+      "available": false,
+      "status": "not_needed",
+      "version": null
+    },
+    "pdftotext": {
+      "command": "pdftotext",
+      "available": false,
+      "status": "not_needed",
+      "version": null
+    },
+    "pdftoppm": {
+      "command": "pdftoppm",
+      "available": false,
+      "status": "not_needed",
+      "version": null
+    }
+  },
+  "pages": [
+    {
+      "page_index": 1,
+      "artifact_path": "pages/page-0001.txt",
+      "artifact_sha256": "8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8",
+      "byte_count": 5,
+      "char_count": 5
+    },
+    {
+      "page_index": 2,
+      "artifact_path": "pages/page-0002.txt",
+      "artifact_sha256": "f44e64e75f3948e9f73f8dfa94721c4ce8cbb4f265c4790c702b2d41cfbf2753",
+      "byte_count": 4,
+      "char_count": 4
+    }
+  ],
+  "bundle_digest": "739afe94d1f376d31d672ed70848ad5d41d5ac1f7bdf997c309be954d9934ef1",
+  "bundle_id": "paper-source-bundle-739afe94d1f376d3"
+}

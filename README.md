@@ -19,9 +19,9 @@
 | 技能 | 职责 | 典型输入 | 核心产物 |
 | --- | --- | --- | --- |
 | `$deep-research` | 多来源、全局到具体的针对性深调研 | 领域问题、技术选型、证据争议、版本问题 | 概念地图、技术路线、source registry、claim/evidence matrix、冲突日志、GapQueue |
-| `$learn-from-papers` | 给定一篇论文，快速且深入地学习与理解 | PDF、DOI、预印本、出版页面 | paper card、证据账本、方法/推导重建、中文知识笔记 |
+| `$learn-from-papers` | 给定一篇论文，执行问题驱动且可复核的深度理解 | PDF、DOI、预印本、出版页面 | source bundle、paper card、原子证据账本、reading dossier、v2 网络投影、中文知识笔记 |
 | `$research-knowledge-network` | 将来源证据、实体、主张、关系持久化为可审计网络并派生知识缺口 | evidence card、术语表、实验摘要、审稿点 | 证据网络、coverage 概览、冲突视图、可复验缺口列表 |
-| `$network-gap-discovery` | 在开放世界假设下自主提出并反证可能缺失的节点、关系、边界或证据 | `KnowledgeNetwork/v1`、competency questions、既有 gap | gap hypotheses、定向检索请求、`NetworkPatchProposal/v1` |
+| `$network-gap-discovery` | 在开放世界假设下自主提出并反证可能缺失的节点、关系、边界或证据 | `KnowledgeNetwork/v1`、competency questions、既有 gap | gap hypotheses、定向检索请求、`NetworkPatchProposal/v2` |
 | `$scholar-discovery` | 对一个明确证据需要执行可复现的多源论文发现 | gap search test、主题条件、种子论文 | query plan、检索账本、去重 work families、排序候选与失败状态 |
 | `$curate-research-to-zotero` | 保存经审核的研究资产 | 来源清单、本地文件、Zotero 目标 | 文件哈希、ingestion manifest、PDF/元数据/笔记同步与 readback |
 
@@ -36,7 +36,8 @@
 - 用 `problem → mechanism → requirements → route families → implementation → validation → failure boundary → selection conditions` 学习技术路线；
 - 学术来源按综述/教材/原始研究用途路由，业界来源按规范/版本化文档/SHA 源码/测试/运行时路由；
 - 把 `version-fit`、全文访问、方法适配和来源身份作为硬门，而不是用名望或引用数代替审查；
-- 对关键论文执行 `Map → Evidence → Reconstruction`，逐项保留页码、章节、图、表、公式或定理定位；
+- 对关键论文执行 `Question plan → Source bundle → Document graph → Evidence → Reconstruction → Separate-context attestation`；attestation 只记录可审计的上下文声明，不认证主体身份，逐项证据仍保留可重算的页码/字符区间以及图、表、公式或定理定位；
+- 将 `supports / qualifies / refutes / not_tested` 作为不可随意降维的关系；检索 DOI/URL 与证据段落 locator 永远分离；
 - 所有跨来源结论在主张级综合，主动寻找反证并保留未决冲突；
 - 对长任务使用显式 gap/action 循环；
 - 用开放世界语义区分 deterministic gap、implicit candidate 与 unknown，
@@ -49,15 +50,20 @@
 ## 安装
 
 ```bash
-git clone https://github.com/kl3574/deep-research.git
+git clone --branch v0.4.0 --depth 1 https://github.com/kl3574/deep-research.git
 cd deep-research
 mkdir -p ~/.codex/skills
+stamp="$(date +%Y%m%d%H%M%S)"
 for skill in deep-research learn-from-papers research-knowledge-network network-gap-discovery scholar-discovery curate-research-to-zotero; do
-  ln -s "$(pwd)/skills/$skill" "$HOME/.codex/skills/$skill"
+  if [ -e "$HOME/.codex/skills/$skill" ] || [ -L "$HOME/.codex/skills/$skill" ]; then
+    mv "$HOME/.codex/skills/$skill" "$HOME/.codex/skills/${skill}.backup-${stamp}"
+  fi
+  cp -a "skills/$skill" "$HOME/.codex/skills/$skill"
 done
 ```
 
-如果目标路径已存在，请先检查它，不要覆盖已有技能。重启 Codex 会话后技能才会被发现。
+固定 tag、保留旧安装备份并复制实体目录，避免开发分支漂移或重复技能根。
+重启 Codex 会话后技能才会被重新发现。
 
 ## 使用示例
 
@@ -130,7 +136,10 @@ skills/
     ├── references/
     └── scripts/
 evals/
-└── cases.md
+├── cases.md
+├── learn-from-papers/
+├── real-world/
+└── research-workflow/
 ```
 
 `SKILL.md` 只保留执行主干，详细方法与研究依据按需加载。下载的论文和个人 Zotero 数据不会提交到本仓库。
@@ -145,13 +154,23 @@ ruff check --no-cache skills evals scripts
 python scripts/check_public_privacy.py
 python -m unittest discover -s scripts -p 'test_*.py'
 python -m unittest discover -s skills/deep-research/scripts -p 'test_*.py'
+python -m unittest discover -s skills/learn-from-papers/scripts -p 'test_*.py'
 python -m unittest discover -s skills/research-knowledge-network/scripts -p 'test_*.py'
 python -m unittest discover -s skills/network-gap-discovery/scripts -p 'test_*.py'
 python -m unittest discover -s skills/scholar-discovery/scripts -p 'test_*.py'
 python -m unittest discover -s skills/curate-research-to-zotero/scripts -p 'test_*.py'
 python -m unittest discover -s evals/real-world -p 'test_*.py'
+python -m unittest discover -s evals/learn-from-papers -p 'test_*.py'
+python -m unittest discover -s evals/research-workflow -p 'test_*.py'
 python -m compileall -q skills evals scripts
 ```
+
+六技能路由回归见 `evals/research-workflow/`。它用七个小型合成案例检查：
+field-only 不虚构知识网络、已有 Zotero 语料先读取再深读并入网、开放世界缺口
+经精确快照生成 `ScholarDiscoveryRequestSet/v1`、Google Scholar 仅允许用户手工
+导出、新来源先入库并进入新快照、决定性证据必须完成外部 attestation，以及
+`NetworkPatchProposal/v2` 必须取得显式治理接受。该回归只调用本地验证器，
+不联网、不写 Zotero、不应用网络 patch，也不替代各技能的语义与真实写入测试。
 
 `curate-research-to-zotero` 还提供三层笔记保障：
 

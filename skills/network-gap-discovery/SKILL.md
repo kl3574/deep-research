@@ -11,8 +11,13 @@ Act as an auditable gap-hypothesis controller, not an automatic graph completer.
 Read an immutable, validated `KnowledgeNetwork/v1`; propose missing-content
 hypotheses; make each hypothesis falsifiable; route searches to
 `$scholar-discovery`; send decisive papers to `$learn-from-papers`; and emit only
-a `NetworkPatchProposal/v1`. The existing `$research-knowledge-network`
+a `NetworkPatchProposal/v2`. The existing `$research-knowledge-network`
 controller alone may validate and merge accepted records.
+
+Every paper-reading request carries a closed `epistemic_task`: question,
+hypothesis, target signature, scope, defeaters, falsifiers, acceptance criteria,
+canonical relation vocabulary, and required inspection depth. This skill sets
+that task but has no paper-reading authority.
 
 Absence from an open-world graph means `unknown`. It becomes a deterministic
 gap only relative to an explicit competency question, promised dimension,
@@ -27,7 +32,10 @@ proposal validation. Read [contracts.md](references/contracts.md) first.
 ## Autonomous bounded loop
 
 1. Validate the network with `$research-knowledge-network`; bind its exact path,
-   `network_id`, `snapshot_id`, and SHA-256. Never reason over a stale export.
+   `network_id`, `snapshot_id`, and canonical export `content_sha256`. The
+   cross-skill `network_ref.sha256` is this content digest, not the file hash or
+   a second hash of the envelope containing `content_sha256`. Never reason over
+   a stale export.
 2. Run `scan` to inventory declared gaps, unmet gates, isolates, disconnected
    components, dangling relations, low-confidence edges, and provenance
    omissions. Treat scan signals as prompts, never facts.
@@ -52,14 +60,20 @@ proposal validation. Read [contracts.md](references/contracts.md) first.
    checks, and full-text locator review. Preserve all routes and exclusions.
 6. Transition to `content_found`, `already_covered`, `supported_gap`, `refuted`,
    `unresolved`, or `blocked`. A search miss is `no_signal`, not nonexistence.
-7. Draft `NetworkPatchProposal/v1` with candidate nodes, relations, and evidence
-   plus exact locators and provenance. Keep `proposal_only: true`; never invoke
-   network mutation or Zotero writes.
+7. Draft `NetworkPatchProposal/v2` with candidate nodes, relations, and evidence
+   plus source-rooted evidence locators and provenance. A DOI or URL is only an
+   acquisition identity and can never become patch provenance. Keep
+   `proposal_only: true`; never invoke network mutation or Zotero writes.
 8. Re-scan the new validated snapshot after the controller merges an accepted
    patch. Continue only while a named high-information gap remains.
 
-11. `consume-results` accepts only `ScholarDiscoveryResultSet/v1` payloads and
+9. `consume-results` accepts only `ScholarDiscoveryResultSet/v1` payloads and
    requires request-set/network binding to the current discovery cycle.
+10. Decisive `consume-reviewed-evidence` and `propose-patch` derive review
+    records directly from a strictly reprojected `PaperReadingReportSet/v2`, its
+    dossier, verified source bundle, source artifact, and reopenable verifier
+    attestation. Caller-built `ReviewedEvidenceSet/v1` and
+    `PaperReadingReportSet/v1` remain audit-only and cannot change graph state.
 
 ## Hypothesis and status rules
 
@@ -77,6 +91,25 @@ Do not infer a negative edge from missing data. Do not upgrade a link-prediction
 score, LLM suggestion, search rank, abstract, or snippet into evidence. Keep
 claims scoped by population/system, regime, intervention, comparator, outcome,
 version, and time when those conditions matter.
+
+## Independent-verifier boundary
+
+Use the frozen three-stage producer contract: `prepare-attestations` emits only a
+`VerificationAttestationRequest/v1`; an external verifier in a different context
+emits `VerificationAttestation/v1`; `finalize-attestations` reopens both artifacts
+and recomputes report identities. The bridge repeats those checks. It requires
+canonical bytes and hashes, `origin: external_verifier`, distinct producer and
+verifier context IDs, `verdict: passed`, and exact request/report bindings.
+Explicit producer/self/generated verifier names remain an additional negative
+guard, never the proof of independence.
+
+For multi-report sets, call external `attest` once per prepared `report_id` and
+chain each output into the next call. Requests and attestations bind the full
+pending-normalized report-set context, network reference, completion matrix, and
+the sorted unique subject identities of every expected report. Artifact paths
+must be canonical `verification-requests/<sha256>.json` or
+`verification-attestations/<sha256>.json` regular files; aliases and special
+files fail in the strict producer validator before bridge derivation.
 
 ## Priority and stop rules
 
@@ -97,10 +130,71 @@ generation, open-world semantics, evidence gates, or evaluation.
 ## Runbook notes
 
 Use `consume-results` to ingest each `ScholarDiscoveryResultSet/v1`, then use
-`consume-reviewed-evidence` for inspected `ReviewedEvidenceSet/v1` when the
-review step returns. Inspecting only `discovery_only` candidates does not upgrade
+`consume-reviewed-evidence` with the finalized report set, dossier, source
+bundle, source artifact, and verification root. Inspecting only
+`discovery_only` candidates does not upgrade
 an hypothesis from `results`; it stays `results` for later discoveries or manual
 capture.
+
+For v2 reports, derive reviewed outcomes from the report relation only:
+`supports -> supports`, `refutes -> contradicts`, and
+`qualifies|not_tested -> unknown`. Reject caller relabeling. `already_covered`
+requires a future explicit coverage disposition and is not inferred from a
+paper relation. Bind the report hypothesis, request digest, source bundle,
+artifact hash, report digest, evidence id, source span id/hash, and actual
+evidence locator before any status transition. Only a decisive, verifier-passed,
+claim-support-eligible `supports` projection may enter a patch.
+
+Never trust verification labels alone. Reopen `verification.artifact_ref` under
+the explicit verification root, reject symlinks/path escape, hash the canonical
+attestation bytes, and bind its contents to the report subject, claim, scope,
+evidence/span, dossier, bundle, source artifact, mode, and verifier. Reproject
+the supplied dossier against the explicit source-bundle and source-artifact
+paths and require exact semantic equality before deriving records. Final report
+IDs may differ from the unsigned projection only through the frozen attestation
+descriptor and the excluded `projection_status`/`claim_support_eligible` fields.
+
+Patch eligibility additionally requires exact request/report scope equality,
+`full_text`, `evidence|reconstruction`, `decisive`, verifier-passed evidence,
+and `independent_source_check|expert_review`. Abstract/partial access, `map`,
+`same_context_diagnostic`, `qualifies`, and `not_tested` remain unresolved and
+cannot enter `NetworkPatchProposal/v2`.
+
+Every patch basis `source_id` must already exist in the bound live network's
+`sources` collection. Missing sources produce terminal `blocked` with
+`next_action: onboarding_required`; onboard the source, export a new snapshot,
+and rerun discovery. Downstream evidence materialization uses exactly
+`independence_group = source_id`.
+
+Patch actions use one closed map rather than deriving types from string
+prefixes: `node -> propose_node`, `relation -> propose_relation`, and
+`evidence|boundary|counterexample|version|benchmark|benchmark_profile|assumption|
+mechanism|metric|measurement|estimator|failure_mode|context -> propose_evidence`.
+Only a closed relation target, or an evidence target whose signature equals the
+sole reviewed `evidence_id`, is `proposed`. Node targets and all semantic audit
+targets are emitted as locally valid `blocked` actions. A blocked action records
+the gap proposal but is deliberately ineligible for RKN acceptance or apply.
+
+For `propose_relation`, the action includes a closed, content-addressed
+`NetworkPatchTargetClaim/v1`. Its claim text comes from the finalized report,
+impact from hypothesis `decision_impact`, scope/profile from the exact
+request/report scope, epistemic status from its reviewed basis, and report claim
+ID/digest from that same basis. Never substitute the target signature as a claim,
+default impact to `medium`, or omit typed scope categories.
+
+The target claim hashes a typed scope with exactly `scope_statement`,
+`assumptions`, `conditions`, `units`, `exclusions`, `defeaters`,
+`coverage_dimensions`, and `benchmark_profiles`. Never flatten typed scope
+categories into `coverage_dimensions`, copy exclusions or defeaters into
+`benchmark_profiles`, or invent either field. The current review-request schema
+has no explicit same-named coverage/benchmark inputs, so those two lists remain
+empty while the typed categories preserve the actual semantics. Consumers that
+cannot preserve this exact typed scope must reject the proposal.
+
+Use `report_set.review_source` (`source_id`, `source_digest`, and
+`acquisition_locator`) to select the discovery-side request source. Treat
+`report_set.source_ref` solely as the verified source-bundle artifact filename;
+it is not the request source slot and the two values need not match.
 
 Saturation is reached after two consecutive no-progress discovery/review rounds,
 but only when there is no `awaiting` manual result obligation.
