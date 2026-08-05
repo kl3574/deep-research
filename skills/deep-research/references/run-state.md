@@ -44,7 +44,8 @@ ROOT/
         ├── sources.jsonl
         ├── claims.jsonl
         ├── conflicts.jsonl
-        └── errors.jsonl
+        ├── errors.jsonl
+        └── commands.jsonl
 ```
 
 `events.jsonl` and the seven domain ledgers are append-oriented facts. `run.json`
@@ -52,6 +53,16 @@ stores the immutable contract plus derived lifecycle, coverage, outcome, and
 summary caches. Status is recomputed from the ledgers, so an interruption after a
 JSONL append but before a cache update does not lose the committed record. A
 subsequent `resume` refreshes stale caches.
+
+`commands.jsonl` is a separate append-only observability journal. It does not join
+the global research-fact sequence and cannot make coverage stale. Every mutating
+CLI invocation records `started` and `finished` boundaries with pre/post research
+event counts, content-derived state digests, `committed`, `partial`, and an
+explicit single-command batch context. A process death can leave `started`
+without `finished`; a cache-write failure can leave `finished` with
+`committed=true, partial=true`. Neither state claims rollback. `status` reports
+the unresolved command and a machine-readable recovery plan; a successful
+`resume` repairs derived caches and appends `recovered` without deleting history.
 
 Every JSONL row carries a global, unique, contiguous sequence. Truncated JSON,
 duplicate records, gaps in sequence, wrong run IDs, and wrong schema versions fail
@@ -251,6 +262,16 @@ interrupted run back to `running` and appends a lifecycle event; on an already
 running run it refreshes caches without adding a fake resume event. A finalized
 run rejects further records.
 
+Every mutating command emits one JSON result envelope. Read
+`pre_event_count/post_event_count`, `pre_state_digest/post_state_digest`, and
+`committed` before interpreting the process exit code. `partial=true` means a
+research fact was appended but the command did not finish its cache/reporting
+boundary; do not blindly retry it. `batch_context` states that this CLI currently
+performs one domain mutation per invocation, reports the successful prefix, and
+always sets `rollback_claimed=false`. Validation failures before append report
+`committed=false`. A duplicate-ID retry whose target already exists reports
+`already_committed_target` and `do_not_retry=true`.
+
 The coverage audit must be the last substantive state change before finalization.
 Any later gap, action, round, source, claim, conflict, error, resume, or resolution
 event makes it stale; run `set-coverage` again after auditing the updated ledger.
@@ -326,6 +347,11 @@ reports stale `run.json` cache warnings. Run `resume` to repair caches and, when
 fatal error exists, record the actual transition back to `running`. Malformed or
 cross-run ledgers require human inspection; the tool never guesses or discards a
 damaged row.
+
+Finalization uses the same result envelope and includes
+`active_actions_before/after`. A failed `finalize` never hides an active action;
+the recovery plan lists its ID so the controller can append an honest terminal
+`finish-action` before retrying finalization.
 
 ## Validation and privacy
 

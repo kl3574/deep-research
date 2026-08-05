@@ -37,8 +37,10 @@ ZOTERO_SNAPSHOT_SCHEMA = "ZoteroCorpusSnapshot/v1"
 
 READ_DEPTHS = {"full", "partial", "metadata", "abstract"}
 EVIDENCE_POLARITY = {"supports", "contradicts", "qualifies", "not_tested"}
+DECISIVE_COVERAGE_POLARITIES = frozenset({"supports"})
 GAP_TYPES = {"explicit", "deterministic_structural", "implicit_candidate"}
 IMPACTS = {"high", "medium", "low"}
+GAP_PRIORITIES = {"P0", "P1", "P2", "P3"}
 GAP_STATUSES = {"open", "resolved", "blocked"}
 GAP_STATUS_TRANSITIONS = {
     "open": {"resolved", "blocked"},
@@ -1449,6 +1451,12 @@ def _validate_gap_record(
         errors.append(f"gap {gap_id} invalid gap_type")
     if row.get("status") not in GAP_STATUSES:
         errors.append(f"gap {gap_id} invalid status")
+    priority = row.get("priority")
+    if priority is not None and priority not in GAP_PRIORITIES:
+        errors.append(f"gap {gap_id} invalid priority")
+    decision_impact = row.get("decision_impact")
+    if decision_impact is not None and decision_impact not in IMPACTS:
+        errors.append(f"gap {gap_id} invalid decision_impact")
     if row.get("gap_type") == "implicit_candidate":
         _validate_implicit_gap_record(row, gap_id, known_claims, errors)
 
@@ -1889,6 +1897,7 @@ def _derive_status_summary(
     open_conflicts = _derive_conflicts(records)
     high_impact_open = _count_high_impact_open_claims(claim_map, by_claim)
     open_gaps = _collect_open_gaps(records["gaps"])
+    blocking_explicit_gaps = _collect_blocking_open_explicit_gaps(records["gaps"])
     coverage = _collect_aggregate_coverage(
         records["claims"],
         records["evidence"],
@@ -1900,6 +1909,7 @@ def _derive_status_summary(
         open_conflicts,
         coverage["missing_dimensions"],
         coverage["missing_benchmark_profiles"],
+        blocking_explicit_gaps,
     )
     has_current_membership = "corpus_snapshot_current_source_ids" in state
     current_sources = _corpus_snapshot_current_source_ids(state)
@@ -1918,6 +1928,7 @@ def _derive_status_summary(
         "counts": {name: len(records[name]) for name in LEDGER_NAMES},
         "open_conflicts": open_conflicts,
         "open_gaps": sorted(set(open_gaps)),
+        "open_high_priority_explicit_gap_ids": blocking_explicit_gaps,
         "high_impact_claims_with_no_decisive_evidence": high_impact_open,
         "coverage": {
             "required_dimensions": required_dimensions,
@@ -1975,7 +1986,7 @@ def _count_high_impact_open_claims(
         decisive = {
             row.get("polarity")
             for row in evidences
-            if row.get("polarity") in {"supports", "contradicts", "qualifies"}
+            if row.get("polarity") in DECISIVE_COVERAGE_POLARITIES
         }
         if not decisive:
             count += 1
@@ -1983,14 +1994,34 @@ def _count_high_impact_open_claims(
 
 
 def _collect_open_gaps(gaps: list[dict[str, Any]]) -> list[str]:
-    latest: dict[str, dict[str, Any]] = {}
-    for row in sorted(gaps, key=lambda item: int(item.get("sequence") or 0)):
-        gap_id = row.get("gap_id")
-        if isinstance(gap_id, str):
-            latest[gap_id] = row
+    latest = _latest_gaps_by_id(gaps)
     return sorted(
         gap_id for gap_id, row in latest.items() if row.get("status") == "open"
     )
+
+
+def _collect_blocking_open_explicit_gaps(
+    gaps: list[dict[str, Any]],
+) -> list[str]:
+    blocking: list[str] = []
+    for gap_id, row in _latest_gaps_by_id(gaps).items():
+        if (
+            row.get("status") != "open"
+            or row.get("gap_type") != "explicit"
+            or row.get("claim_id") is not None
+        ):
+            continue
+        priority = row.get("priority")
+        decision_impact = row.get("decision_impact")
+        explicitly_blocking = priority in {"P0", "P1"} or decision_impact == "high"
+        legacy_blocking = (
+            priority is None
+            and decision_impact is None
+            and row.get("impact") in {"high", "medium"}
+        )
+        if explicitly_blocking or legacy_blocking:
+            blocking.append(gap_id)
+    return sorted(blocking)
 
 
 def _active_records(
@@ -2023,7 +2054,7 @@ def _collect_aggregate_coverage(
         row["claim_id"]
         for row in active_evidence
         if isinstance(row.get("claim_id"), str)
-        and row.get("polarity") in {"supports", "contradicts", "qualifies"}
+        and row.get("polarity") in DECISIVE_COVERAGE_POLARITIES
     }
     covered_dimensions: set[str] = set()
     covered_profiles: set[str] = set()
@@ -2036,6 +2067,7 @@ def _collect_aggregate_coverage(
         covered_dimensions.update(_sort_items(claim.get("coverage_dimensions", [])))
         covered_profiles.update(_sort_items(claim.get("benchmark_profiles", [])))
     return {
+        "decisive_evidence_polarities": sorted(DECISIVE_COVERAGE_POLARITIES),
         "evidence_backed_active_claim_ids": sorted(backed_active_claim_ids),
         "covered_dimensions": sorted(covered_dimensions),
         "covered_benchmark_profiles": sorted(covered_profiles),
@@ -2051,6 +2083,7 @@ def _collect_completion_blockers(
     open_conflicts: list[str],
     missing_dimensions: list[str],
     missing_profiles: list[str],
+    blocking_explicit_gaps: list[str],
 ) -> list[str]:
     blockers: list[str] = []
     if high_impact_open:
@@ -2059,6 +2092,8 @@ def _collect_completion_blockers(
         blockers.append("open_conflict")
     if missing_dimensions or missing_profiles:
         blockers.append("unmet_coverage")
+    if blocking_explicit_gaps:
+        blockers.append("open_high_priority_explicit_gap")
     return blockers
 
 
@@ -2071,13 +2106,13 @@ def _derive_gaps_payload_for_claim(
     decisive = {
         row.get("polarity")
         for row in evidences
-        if row.get("polarity") in {"supports", "contradicts", "qualifies"}
+        if row.get("polarity") in DECISIVE_COVERAGE_POLARITIES
     }
     groups = {
         row.get("independence_group")
         for row in evidences
         if isinstance(row.get("independence_group"), str)
-        and row.get("polarity") in {"supports", "contradicts", "qualifies"}
+        and row.get("polarity") in DECISIVE_COVERAGE_POLARITIES
     }
 
     if claim.get("impact") == "high" and not decisive:
@@ -2538,6 +2573,10 @@ def command_record_gap(args: argparse.Namespace) -> int:
             ),
             "resolution_source": (args.resolution_source or "").strip(),
         }
+        if args.priority is not None:
+            payload["priority"] = args.priority
+        if args.decision_impact is not None:
+            payload["decision_impact"] = args.decision_impact
         source = (args.source or "").strip()
         if payload["gap_type"] == "implicit_candidate":
             required_implicit = (
@@ -2652,6 +2691,8 @@ def command_transition_gap(args: argparse.Namespace) -> int:
             "group_count",
             "severity",
             "independence_groups",
+            "priority",
+            "decision_impact",
         )
         payload = {key: latest.get(key) for key in semantic_fields if key in latest}
         payload.update(
@@ -3538,6 +3579,14 @@ def _export_gaps(
             "description": str(row.get("description") or "review gap"),
             "novelty_claimed": False,
         }
+        if row.get("priority") in GAP_PRIORITIES:
+            output["declared_priority"] = str(row["priority"])
+        if row.get("decision_impact") in IMPACTS:
+            output["decision_impact"] = str(row["decision_impact"])
+        if str(row.get("derivation_rule") or ""):
+            output["derivation_rule"] = str(row["derivation_rule"])
+        if isinstance(row.get("claim_id"), str):
+            output["claim_id"] = str(row["claim_id"])
         if gap_type == "implicit_candidate":
             defeaters = row.get("defeaters")
             output.update(
@@ -3677,6 +3726,9 @@ def _knowledge_network_export(
         ),
         "conflicts_terminal": conflicts_terminal,
         "low_confidence_edges_terminal": low_confidence_terminal,
+        "high_priority_explicit_gaps_terminal": not status[
+            "open_high_priority_explicit_gap_ids"
+        ],
         "change_history_recorded": True,
     }
     completion_status = "partial"
@@ -3734,6 +3786,7 @@ def _knowledge_network_export(
         "completion": {
             "status": completion_status,
             "open_gap_ids": open_gap_ids,
+            "blocking_gap_ids": status["open_high_priority_explicit_gap_ids"],
             "gate_checks": gate_checks,
         },
         "sources": raw_sources,
@@ -3859,6 +3912,8 @@ def _build_parser() -> argparse.ArgumentParser:
     record_gap.add_argument("--gap-type", required=True, choices=sorted(GAP_TYPES))
     record_gap.add_argument("--claim-id")
     record_gap.add_argument("--impact", required=True)
+    record_gap.add_argument("--priority", choices=sorted(GAP_PRIORITIES))
+    record_gap.add_argument("--decision-impact", choices=sorted(IMPACTS))
     record_gap.add_argument("--status", required=True, choices=sorted(GAP_STATUSES))
     record_gap.add_argument("--source", default="manual")
     record_gap.add_argument("--description", required=True)

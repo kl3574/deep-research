@@ -49,6 +49,19 @@ REQUIRED_METADATA_LABELS = [
     "核验时间",
 ]
 
+METADATA_ONLY_REQUIRED_METADATA_LABELS = [
+    "标题",
+    "作者",
+    "年份",
+    "期刊或载体",
+    "DOI或稳定标识",
+    "版本与出版状态",
+    "访问层级",
+    "全文状态",
+    "阅读深度",
+    "核验时间",
+]
+
 CLAIM_HEADERS = [
     "Claim ID",
     "性质",
@@ -69,7 +82,7 @@ CONFIDENCE_LEVELS = {"high", "medium", "low"}
 READING_DEPTHS = {"map", "evidence", "reconstruction"}
 FORBIDDEN_MATH_GLYPHS = ("Ẋ", "Θ", "Ξ", "²", "³", "‖")
 CHINESE_RE = re.compile(r"[\u3400-\u9fff]")
-SHA_RE = re.compile(r"\b[0-9a-f]{64}\b")
+SHA_RE = re.compile(r"\b[0-9A-Fa-f]{64}\b")
 DOI_RE = re.compile(r"\b10\.\d{4,9}/\S+", re.I)
 URL_RE = re.compile(r"\bhttps?://\S+", re.I)
 CLAIM_ID_RE = re.compile(r"^C[1-9]\d*$")
@@ -266,12 +279,34 @@ def section_text(raw: str, heading: str) -> str:
 
 
 def validate_note(raw: str) -> tuple[list[str], list[str], dict[str, object]]:
+    root_open = re.match(r"\s*<div\b([^>]*)>", raw, flags=re.I | re.S)
+    root_access_match = (
+        re.search(
+            r"\bdata-access-level\s*=\s*[\"']([^\"']+)[\"']",
+            root_open.group(1),
+            flags=re.I,
+        )
+        if root_open
+        else None
+    )
+    declared_root_access = (
+        root_access_match.group(1).strip().lower() if root_access_match else None
+    )
     if re.search(
         r"<div\b[^>]*\bdata-note-contract=[\"']PaperKnowledgeNote/v2[\"']",
         raw,
         flags=re.I,
     ):
-        return _validate_paper_knowledge_note(raw)
+        errors, warnings, summary = _validate_paper_knowledge_note(raw)
+        if declared_root_access not in (None, "full_text"):
+            errors.append(
+                "NF-06: PaperKnowledgeNote/v2 is a full-text projection and "
+                "cannot declare another data-access-level"
+            )
+        summary = dict(summary)
+        summary.setdefault("access_level", "full_text")
+        summary["root_access_level"] = declared_root_access
+        return errors, warnings, summary
     errors: list[str] = []
     warnings: list[str] = []
     parser = NoteParser()
@@ -287,12 +322,24 @@ def validate_note(raw: str) -> tuple[list[str], list[str], dict[str, object]]:
             + " > ".join(f"<{tag}>" for tag in parser.stack)
         )
 
+    root_access_level: str | None = None
     if len(parser.root_tags) != 1:
         errors.append(f"NF-02: expected exactly one root element, found {len(parser.root_tags)}")
     elif parser.root_tags[0][0] != "div":
         errors.append("NF-02: root element must be div")
     elif parser.root_tags[0][1].get("data-schema-version") != "9":
         errors.append("NF-02: root div must have data-schema-version='9'")
+    else:
+        root_access_level = (
+            parser.root_tags[0][1].get("data-access-level", "").strip().lower()
+            or None
+        )
+        if root_access_level not in (None, "full_text", "metadata_only"):
+            errors.append(
+                "NF-06: root data-access-level must be full_text or metadata_only"
+            )
+
+    metadata_only = root_access_level == "metadata_only"
 
     if len(parser.h1) != 1 or not parser.h1[0]:
         errors.append(f"NF-02: expected one non-empty h1, found {len(parser.h1)}")
@@ -314,7 +361,12 @@ def validate_note(raw: str) -> tuple[list[str], list[str], dict[str, object]]:
     # such as <br>, or insert inline wrappers such as <strong>. Replace tags
     # with spaces so adjacent metadata values do not merge into one token.
     status_text = re.sub(r"<[^>]+>", " ", status_html)
-    for label in REQUIRED_METADATA_LABELS:
+    required_metadata_labels = (
+        METADATA_ONLY_REQUIRED_METADATA_LABELS
+        if metadata_only
+        else REQUIRED_METADATA_LABELS
+    )
+    for label in required_metadata_labels:
         if label not in status_text:
             errors.append(f"NF-06: missing metadata label '{label}'")
     depth_matches = re.findall(r"阅读深度[：:]\s*([a-z]+)", status_text, flags=re.I)
@@ -324,24 +376,53 @@ def validate_note(raw: str) -> tuple[list[str], list[str], dict[str, object]]:
     else:
         reading_depth = depth_matches[0].lower()
     full_text_sha_labels = re.findall(r"全文SHA-256\s*[：:]", status_text)
-    full_text_sha_matches = re.findall(
-        r"全文SHA-256\s*[：:]\s*([0-9a-f]{64})(?![0-9A-Fa-f])",
-        status_text,
-    )
-    if len(full_text_sha_labels) != 1 or len(full_text_sha_matches) != 1:
-        errors.append(
-            "NF-06: full-text SHA-256 must occur exactly once as "
-            "'全文SHA-256：' followed by 64 lowercase hex characters"
-        )
+    if metadata_only:
+        if full_text_sha_labels or SHA_RE.search(raw):
+            errors.append(
+                "NF-06: metadata-only note must not contain a full-text/PDF "
+                "SHA-256 or any 64-hex content hash"
+            )
         full_text_sha256 = None
     else:
-        full_text_sha256 = full_text_sha_matches[0]
+        full_text_sha_matches = re.findall(
+            r"全文SHA-256\s*[：:]\s*([0-9a-f]{64})(?![0-9A-Fa-f])",
+            status_text,
+        )
+        if len(full_text_sha_labels) != 1 or len(full_text_sha_matches) != 1:
+            errors.append(
+                "NF-06: full-text SHA-256 must occur exactly once as "
+                "'全文SHA-256：' followed by 64 lowercase hex characters"
+            )
+            full_text_sha256 = None
+        else:
+            full_text_sha256 = full_text_sha_matches[0]
     access_match = re.search(
         r"访问层级[：:]\s*([a-z_]+)",
         status_text,
         flags=re.I,
     )
     access_level = access_match.group(1).lower() if access_match else None
+    if metadata_only:
+        if access_level != "metadata_only":
+            errors.append(
+                "NF-06: metadata-only root marker requires "
+                "'访问层级：metadata_only'"
+            )
+        if reading_depth != "map":
+            errors.append("NF-07: metadata-only note reading depth must be map")
+        if not re.search(r"全文状态\s*[：:]\s*未获取全文", status_text):
+            errors.append(
+                "NF-06: metadata-only note must visibly state "
+                "'全文状态：未获取全文' in 资料与阅读状态"
+            )
+        if re.search(
+            r"(?:display\s*:\s*none|visibility\s*:\s*hidden)",
+            status_html,
+            flags=re.I,
+        ):
+            errors.append("NF-06: metadata-only full-text disclosure must not be hidden")
+    elif access_level != "full_text":
+        errors.append("NF-06: full-text note requires '访问层级：full_text'")
     if "DOI或稳定标识" in status_text and not (
         DOI_RE.search(status_text) or URL_RE.search(status_text) or "unresolved" in status_text
     ):
@@ -359,8 +440,13 @@ def validate_note(raw: str) -> tuple[list[str], list[str], dict[str, object]]:
         data_rows: list[list[str]] = []
     else:
         data_rows = claim_rows[header_index + 1 :]
-        if not data_rows:
+        if not data_rows and not metadata_only:
             errors.append("NF-08: claim table has no data rows")
+        if metadata_only and data_rows:
+            errors.append(
+                "NF-08: metadata-only note must not contain claim data rows; "
+                "full-text evidence was not acquired"
+            )
     seen_claim_ids: set[str] = set()
     for idx, row in enumerate(data_rows, start=1):
         if len(row) != len(CLAIM_HEADERS):
@@ -433,9 +519,26 @@ def validate_note(raw: str) -> tuple[list[str], list[str], dict[str, object]]:
                 errors.append(f"NF-15/16: reconstruction log lacks '{required}'")
 
     provenance = re.sub(r"<[^>]+>", " ", section_text(raw, "溯源"))
-    for required in ("证据账本", "本地PDF", "SHA-256", "Agent推断"):
-        if required not in provenance:
-            errors.append(f"NF-17: provenance lacks '{required}'")
+    if metadata_only:
+        if not re.search(r"元数据来源\s*[：:]\s*\S+", provenance):
+            errors.append("NF-17: metadata-only provenance lacks '元数据来源：<value>'")
+        if not re.search(
+            r"元数据核验时间\s*[：:]\s*\d{4}-\d{2}-\d{2}",
+            provenance,
+        ):
+            errors.append(
+                "NF-17: metadata-only provenance lacks a dated "
+                "'元数据核验时间：YYYY-MM-DD'"
+            )
+        for forbidden in ("本地PDF", "全文SHA-256", "PDF SHA-256"):
+            if forbidden in provenance:
+                errors.append(
+                    f"NF-17: metadata-only provenance must not contain '{forbidden}'"
+                )
+    else:
+        for required in ("证据账本", "本地PDF", "SHA-256", "Agent推断"):
+            if required not in provenance:
+                errors.append(f"NF-17: provenance lacks '{required}'")
 
     summary = {
         "schema_version": "9" if not parser.root_tags else parser.root_tags[0][1].get("data-schema-version"),
@@ -445,6 +548,8 @@ def validate_note(raw: str) -> tuple[list[str], list[str], dict[str, object]]:
         "math_block_count": len(parser.math_blocks),
         "reading_depth": reading_depth,
         "access_level": access_level,
+        "root_access_level": root_access_level,
+        "note_projection": "metadata_only" if metadata_only else "full_text",
         "full_text_sha256": full_text_sha256,
     }
     if not parser.math_blocks:

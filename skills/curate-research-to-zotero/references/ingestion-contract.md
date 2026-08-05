@@ -91,6 +91,12 @@ Do not commit downloaded research documents unless their redistribution license 
 - A note declared as `zotero_html_schema_9` must satisfy
   [zotero-note-html.md](zotero-note-html.md); structure validation does not
   replace scientific evidence review.
+- `source.access_level`, the native importer bundle `access_level`, and the
+  validated note projection must agree. `metadata_only` requires root
+  `data-access-level="metadata_only"`, visible `全文状态：未获取全文`, metadata
+  provenance, no PDF object, no 64-hex/full-text/PDF hash, and no claim-table
+  data rows. `full_text` retains the strict verified PDF and 64-hex full-text
+  hash requirements; old full-text notes may omit the root access marker.
 - A Zotero `add` decision requires an exact approved library and collection key before write time.
 - Readback starts as `not_attempted`; it changes only from observed Zotero state.
 

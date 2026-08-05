@@ -18,6 +18,14 @@ manifestations, fuse heterogeneous rankings, and emit
 `ScholarDiscoveryResult/v1`. Read [contracts.md](references/contracts.md) before
 creating machine-readable input.
 
+For the first pass over a metadata-only corpus, use `compile-topic` with a
+`ResearchTopicNeedSet/v1`. Every need must carry domain-grounded `criteria.must`
+anchors plus confirm and refute queries; structural gap IDs, private/internal
+field names, and generic fallback queries are rejected. Run `preflight` before
+execution to report missing OpenAlex configuration, anonymous Semantic Scholar
+rate-limit risk, and manual Scholar obligations without exposing credential
+values.
+
 For `PaperUnderstandingGap/v1`, use `compile-understanding-gap`. The compiler
 maps exactly six missing-detail types to fixed confirm/refute query intent,
 preserves the complete content-addressed gap and provenance in the request, and

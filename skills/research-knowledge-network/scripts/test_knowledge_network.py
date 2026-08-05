@@ -1959,6 +1959,115 @@ class KnowledgeNetworkTest(unittest.TestCase):
             status["coverage"]["evidence_backed_active_claim_ids"],
             ["claim-covered"],
         )
+        self.assertEqual(
+            status["coverage"]["decisive_evidence_polarities"], ["supports"]
+        )
+
+    def test_non_support_evidence_does_not_satisfy_decisive_coverage(self):
+        for polarity in ("qualifies", "contradicts", "not_tested"):
+            with self.subTest(polarity=polarity):
+                network_id = f"coverage-{polarity}"
+                self.init_network(network_id, ["doe-route"], [])
+                self.add_source(network_id, "source-01")
+                self.add_entity(network_id)
+                self.add_claim(
+                    network_id,
+                    "claim-doe",
+                    impact="high",
+                    dimensions=["doe-route"],
+                )
+                evidence = self.add_evidence(
+                    network_id,
+                    "claim-doe",
+                    "source-01",
+                    evidence_id="evidence-doe",
+                    polarity=polarity,
+                )
+                self.assertEqual(evidence[0], 0, evidence[2])
+                status = self.parse_status(network_id)
+                self.assertEqual(status["coverage"]["covered_dimensions"], [])
+                self.assertEqual(
+                    status["coverage"]["evidence_backed_active_claim_ids"], []
+                )
+                self.assertEqual(
+                    status["high_impact_claims_with_no_decisive_evidence"], 1
+                )
+                self.assertIn("unmet_coverage", status["completion"]["blockers"])
+
+    def test_claimless_high_priority_explicit_gap_blocks_completion(self):
+        cases = (
+            ("p0", ["--priority", "P0"], "low"),
+            ("p1", ["--priority", "P1"], "low"),
+            (
+                "decision",
+                ["--priority", "P2", "--decision-impact", "high"],
+                "low",
+            ),
+            ("legacy", [], "medium"),
+        )
+        for suffix, extra, impact in cases:
+            with self.subTest(case=suffix):
+                network_id = f"blocking-gap-{suffix}"
+                gap_id = f"gap-{suffix}"
+                self.init_network(network_id, [], [])
+                result = invoke(
+                    self.root,
+                    network_id,
+                    [
+                        "record-gap",
+                        "--gap-id",
+                        gap_id,
+                        "--gap-type",
+                        "explicit",
+                        "--impact",
+                        impact,
+                        "--status",
+                        "open",
+                        "--source",
+                        "doe-real-fixture",
+                        "--description",
+                        "Decision-relevant DoE gap",
+                        *extra,
+                    ],
+                )
+                self.assertEqual(result[0], 0, result[2])
+                status = self.parse_status(network_id)
+                self.assertFalse(status["completion"]["can_complete"])
+                self.assertIn(
+                    "open_high_priority_explicit_gap",
+                    status["completion"]["blockers"],
+                )
+                self.assertEqual(
+                    status["open_high_priority_explicit_gap_ids"], [gap_id]
+                )
+
+    def test_claimless_p2_low_explicit_gap_does_not_block_status_completion(self):
+        self.init_network(self.network_id, [], [])
+        result = invoke(
+            self.root,
+            self.network_id,
+            [
+                "record-gap",
+                "--gap-id",
+                "gap-p2-low",
+                "--gap-type",
+                "explicit",
+                "--impact",
+                "low",
+                "--priority",
+                "P2",
+                "--status",
+                "open",
+                "--source",
+                "doe-real-fixture",
+                "--description",
+                "Non-blocking follow-up",
+            ],
+        )
+        self.assertEqual(result[0], 0, result[2])
+        status = self.parse_status(self.network_id)
+        self.assertTrue(status["completion"]["can_complete"])
+        self.assertEqual(status["open_high_priority_explicit_gap_ids"], [])
 
     def test_collective_coverage_derives_two_aggregate_gaps_not_cartesian(self):
         dimensions = [

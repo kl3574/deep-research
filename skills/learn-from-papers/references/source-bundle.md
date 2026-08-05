@@ -18,6 +18,9 @@ per-page private text artifacts and integrity verification.
     - text/markdown via plain UTF-8 file split on form-feed (`\f`) for pages
     - PDF via `pdfinfo` + `pdftotext` (required); optional `pdftoppm` when
       `--render-pages` is set
+    - Poppler version probing tries `--version` first and falls back to `-v`
+      (required by releases such as Poppler 26.01.0); a probe is accepted only
+      when it exits successfully and emits a recognizable version banner
 - `verify`
   - Inputs: `--bundle`, `--source`
   - Verifies:
@@ -78,3 +81,15 @@ and exact `artifact_sha256`.
 
 - `bundle_id` must equal `paper-source-bundle-<bundle_digest[:16]>`
 - `generated_at` must be canonical UTC (`...Z`)
+
+## Normalized-source handoff
+
+Run `$scholarly-document-normalization` after acquisition and before building a
+bundle when extraction is blank, pathological, mixed, or layout-risky. Never
+overwrite or relabel the acquired PDF. A bundle built from a searchable-PDF
+derivative binds the derivative bytes; retain the acquisition artifact, raw-PDF
+quality object, normalization lineage, and derivative quality object as separate
+upstream records. `review_required` remains true for OCR because extractability
+does not establish transcription, equation, figure, table, or reading-order
+accuracy. A raw `native_ok` quality object is the explicit no-normalization
+artifact.

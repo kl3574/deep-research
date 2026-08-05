@@ -27,6 +27,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
@@ -211,7 +212,35 @@ def normalize_note(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
-def load_and_validate(bundle_path: Path) -> tuple[dict[str, Any], Path, Path, str]:
+class _RootAccessLevelParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.seen_root = False
+        self.access_level: str | None = None
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> None:
+        if self.seen_root:
+            return
+        self.seen_root = True
+        values = {key.lower(): value or "" for key, value in attrs}
+        if tag.lower() == "div":
+            self.access_level = values.get("data-access-level", "").strip().lower() or None
+
+
+def note_root_access_level(note_html: str) -> str | None:
+    parser = _RootAccessLevelParser()
+    parser.feed(note_html)
+    parser.close()
+    return parser.access_level
+
+
+def load_and_validate(
+    bundle_path: Path,
+) -> tuple[dict[str, Any], Path | None, Path, str | None]:
     try:
         bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -226,16 +255,30 @@ def load_and_validate(bundle_path: Path) -> tuple[dict[str, Any], Path, Path, st
     note = bundle.get("note")
     if not isinstance(source_id, str) or not source_id.strip():
         raise BundleError("source_id must be a non-empty string")
-    if not all(isinstance(value, dict) for value in (target, item, pdf, note)):
-        raise BundleError("target, item, pdf, and note must be objects")
+    if not all(isinstance(value, dict) for value in (target, item, note)):
+        raise BundleError("target, item, and note must be objects")
     if not item.get("title") or not (item.get("DOI") or item.get("url")):
         raise BundleError("item requires title and DOI or URL")
 
-    pdf_path = Path(str(pdf.get("local_path") or "")).expanduser().resolve()
-    pdf_hash = require_hash(pdf_path, pdf.get("sha256"), "pdf")
-    with pdf_path.open("rb") as handle:
-        if b"%PDF-" not in handle.read(1024):
-            raise BundleError("pdf has no %PDF- signature in its first 1024 bytes")
+    access_level = bundle.get("access_level", "full_text")
+    if access_level not in {"full_text", "metadata_only"}:
+        raise BundleError("access_level must be full_text or metadata_only")
+    pdf_path: Path | None = None
+    pdf_hash: str | None = None
+    if access_level == "full_text":
+        if not isinstance(pdf, dict):
+            raise BundleError("full_text bundle requires pdf object")
+        pdf_path = Path(str(pdf.get("local_path") or "")).expanduser().resolve()
+        pdf_hash = require_hash(pdf_path, pdf.get("sha256"), "pdf")
+        with pdf_path.open("rb") as handle:
+            if b"%PDF-" not in handle.read(1024):
+                raise BundleError("pdf has no %PDF- signature in its first 1024 bytes")
+    else:
+        if pdf not in (None, {}):
+            raise BundleError("metadata_only bundle must not declare a PDF")
+        reason = bundle.get("metadata_only_reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise BundleError("metadata_only bundle requires metadata_only_reason")
 
     note_path = Path(str(note.get("html_path") or "")).expanduser().resolve()
     require_hash(note_path, note.get("sha256"), "note")
@@ -245,9 +288,32 @@ def load_and_validate(bundle_path: Path) -> tuple[dict[str, Any], Path, Path, st
         raise BundleError("note must be UTF-8") from exc
     if not note_html.strip():
         raise BundleError("note is empty")
-    note_errors, _, _ = validate_note(note_html)
+    note_errors, _, note_summary = validate_note(note_html)
     if note_errors:
         raise BundleError(f"note HTML contract failed: {note_errors}")
+    if not isinstance(note_summary, dict):
+        raise BundleError("note HTML validator returned no access-level summary")
+    root_access_level = note_root_access_level(note_html)
+    summary_access_level = note_summary.get("access_level")
+    summary_projection = note_summary.get("note_projection")
+    if access_level == "metadata_only":
+        if (
+            root_access_level != "metadata_only"
+            or summary_access_level != "metadata_only"
+            or summary_projection != "metadata_only"
+        ):
+            raise BundleError(
+                "bundle access_level=metadata_only does not match the note's "
+                "root data-access-level and validated projection"
+            )
+    elif root_access_level not in (None, "full_text") or summary_access_level not in (
+        None,
+        "full_text",
+    ):
+        raise BundleError(
+            "bundle access_level=full_text conflicts with the note's "
+            "root data-access-level or validated projection"
+        )
 
     return bundle, pdf_path, note_path, pdf_hash
 
@@ -299,8 +365,8 @@ def poll_new_parent(group_id: int, item: dict[str, Any], timeout: float = 10.0) 
 
 def import_bundle(
     bundle: dict[str, Any],
-    pdf_path: Path,
-    pdf_hash: str,
+    pdf_path: Path | None,
+    pdf_hash: str | None,
     *,
     group_id: int,
     collection_key: str,
@@ -331,29 +397,32 @@ def import_bundle(
     if status != 201:
         raise BundleError(f"saveItems returned {status}", EXIT_PARTIAL)
 
-    pdf_record = bundle["pdf"]
-    attachment_metadata = {
-        "sessionID": session_id,
-        "parentItemID": source_id,
-        "title": pdf_record.get("title") or "Full Text PDF",
-        "url": pdf_record.get("source_url") or item.get("url") or "",
-    }
-    metadata_header = json.dumps(attachment_metadata, ensure_ascii=False)
-    status, _ = request_json(
-        "/connector/saveAttachment",
-        method="POST",
-        raw_body=pdf_path.read_bytes(),
-        headers={
-            "Content-Type": "application/pdf",
-            "X-Metadata": metadata_header,
-        },
-        timeout=60.0,
-    )
-    if status != 201:
-        raise BundleError(
-            f"parent was created but saveAttachment returned {status}",
-            EXIT_PARTIAL,
+    if pdf_path is not None:
+        if pdf_hash is None:
+            raise BundleError("full-text import is missing its validated PDF hash")
+        pdf_record = bundle["pdf"]
+        attachment_metadata = {
+            "sessionID": session_id,
+            "parentItemID": source_id,
+            "title": pdf_record.get("title") or "Full Text PDF",
+            "url": pdf_record.get("source_url") or item.get("url") or "",
+        }
+        metadata_header = json.dumps(attachment_metadata, ensure_ascii=False)
+        status, _ = request_json(
+            "/connector/saveAttachment",
+            method="POST",
+            raw_body=pdf_path.read_bytes(),
+            headers={
+                "Content-Type": "application/pdf",
+                "X-Metadata": metadata_header,
+            },
+            timeout=60.0,
         )
+        if status != 201:
+            raise BundleError(
+                f"parent was created but saveAttachment returned {status}",
+                EXIT_PARTIAL,
+            )
 
     parent = poll_new_parent(group_id, item)
     parent_data = parent.get("data", {})
@@ -389,16 +458,20 @@ def import_bundle(
             f"expected one matching child note, found {len(note_matches)}",
             EXIT_PARTIAL,
         )
-    if len(attachment_matches) != 1:
+    expected_attachments = 1 if pdf_path is not None else 0
+    if len(attachment_matches) != expected_attachments:
         raise BundleError(
-            f"expected one PDF attachment, found {len(attachment_matches)}",
+            f"expected {expected_attachments} PDF attachment(s), "
+            f"found {len(attachment_matches)}",
             EXIT_PARTIAL,
         )
 
-    attachment = attachment_matches[0]
+    attachment = attachment_matches[0] if attachment_matches else None
     stored_hash: str | None = None
     stored_path: str | None = None
-    if storage_root is not None:
+    if storage_root is not None and attachment is not None:
+        if pdf_hash is None:
+            raise BundleError("stored-file verification is missing source PDF hash")
         attachment_key = str(attachment["key"])
         filename = str(attachment.get("data", {}).get("filename") or "")
         candidate = storage_root / attachment_key / filename
@@ -418,7 +491,8 @@ def import_bundle(
         "parent_item_key": parent_key,
         "collection_key": collection_key,
         "note_key": note_matches[0]["key"],
-        "attachment_key": attachment["key"],
+        "attachment_key": attachment["key"] if attachment is not None else None,
+        "access_level": "full_text" if attachment is not None else "metadata_only",
         "source_pdf_sha256": pdf_hash,
         "stored_pdf_sha256": stored_hash,
         "stored_pdf_path": stored_path,
@@ -472,10 +546,15 @@ def main() -> int:
                 "collection_path": actual_path,
             },
             "item_title": bundle["item"].get("title"),
-            "pdf_path": str(pdf_path),
+            "access_level": bundle.get("access_level", "full_text"),
+            "pdf_path": str(pdf_path) if pdf_path is not None else None,
             "pdf_sha256": pdf_hash,
             "note_path": str(note_path),
-            "side_effects": {"parents": 1, "pdf_attachments": 1, "child_notes": 1},
+            "side_effects": {
+                "parents": 1,
+                "pdf_attachments": 1 if pdf_path is not None else 0,
+                "child_notes": 1,
+            },
         }
         if not args.yes:
             print(json.dumps(preview, ensure_ascii=False, indent=2))

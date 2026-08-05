@@ -30,6 +30,14 @@ versions. Explain conflicts; never vote them away.
 
 ## Conditional routes
 
+- For a compound real-world run, initialize `ResearchScenario/v1` with
+  `scripts/research_pipeline.py` and keep each stage in a new immutable
+  `ResearchPipelineExecution/v1` state. Use
+  [scenario-pipeline.md](references/scenario-pipeline.md). Do not send a raw
+  missing-dimension field name to scholarly search: compile initial queries from
+  competency-question-backed semantic `topic_needs`, then run network gap discovery
+  only after reviewed evidence has populated the graph.
+
 - Send one decision-critical paper at a time to `$learn-from-papers`; Tier B
   supporting papers still need full-text locators, while Tier C orientation
   cannot carry decisive claims. Pass Tier A an epistemic task with target,
@@ -47,6 +55,14 @@ versions. Explain conflicts; never vote them away.
   user-supplied export. Never scrape Scholar HTML, bypass robots or CAPTCHA, or
   relabel API results as Scholar results. Autonomous discovery uses documented
   scholarly APIs and reports provider/coverage limits.
+- Route accepted candidate identities to `$scholarly-source-acquisition` for a
+  legal, hash-verified full-text attempt. Before `$learn-from-papers`, route each
+  acquired local PDF through `$scholarly-document-normalization`: a validated
+  `native_ok` quality artifact is explicit skip evidence; any OCR/searchable-PDF
+  derivative must retain original/derivative lineage and `review_required`.
+  Route a
+  validated final network to `$research-network-publish` for privacy-safe HTML;
+  neither companion owns evidence acceptance, graph mutation, or Zotero writes.
 - If acquisition, notes, or Zotero delivery is requested, run the read-only
   preflight in [delivery-handoff.md](references/delivery-handoff.md). Inventory
   the exact Zotero target before searching, validate one golden bundle before
@@ -77,6 +93,14 @@ otherwise keep equivalent temporary state. For compound work, validate a private
 `ResearchHandoff/v1` with `scripts/validate_research_handoff.py`. The ledger and
 handoff record state; they do not browse, invoke models, execute source content,
 or authorize writes.
+
+Treat each mutating ledger command's JSON envelope as the commit receipt. Check
+its pre/post event counts and state digests plus `committed` and `partial`; an
+exit failure is not proof that no append occurred. Never retry a partial commit
+or an existing target blindly. Run `status`, follow its machine-readable recovery
+plan, and use `resume` to repair caches and append a recovery acknowledgement.
+Finalization remains blocked while any action is active and must keep those
+action IDs visible.
 
 Stop targeted work only when promised coverage is met, consequential claims have
 fit evidence or remain explicitly unresolved, contrary/boundary evidence is

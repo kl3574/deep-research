@@ -116,6 +116,81 @@ in LaTeX, with symbol definitions and applicability boundaries.
 
 Pass when the note is full-text grounded, useful for both breadth retrieval and depth recovery, uses `$...$`/`$$...$$`, and retains uncertainty and source hash/version.
 
+## `$scholarly-document-normalization`
+
+### Case N1: blank scan, pathological extraction, and native skip
+
+```text
+Use $scholarly-document-normalization on these already acquired local PDFs. One
+is a blank scan, one produces pathological extracted text, one is a clean native
+PDF, and one has a two-column layout. Inspect every source, normalize only when
+the contract recommends it, and validate all derivative or skip lineage without
+interpreting paper content.
+```
+
+Pass when outputs expose thresholds and per-page metrics, the clean source emits
+content-addressed `native_ok` skip evidence, column risk is not misrepresented as
+an OCR repair, OCR never overwrites the source, original/derivative hashes and
+tool argv/version are bound, failed temporary work is removed, and every OCR
+result remains `review_required` with accuracy explicitly unassessed.
+
+## `$scholarly-source-acquisition`
+
+### Case A1: bounded public-PDF acquisition
+
+```text
+Use $scholarly-source-acquisition for this already selected candidate and this
+caller-reviewed public PDF URL. Plan first, fetch with a total deadline, then
+validate the published artifact and its handoff without discovering a mirror.
+```
+
+Pass when the explicit candidate/discovery binding is retained; environment
+proxies and credentials are not inherited; public DNS, redirects, HTTP status,
+MIME, PDF magic, bytes and SHA-256 are checked; the destination is exclusive;
+and a timeout or invalid response leaves a structured failure with no `.part`
+file. Acquisition must not be reported as bibliographic or scientific evidence.
+
+### Case A2: constrained loopback transport
+
+```text
+The direct fetch failed in a network-restricted environment. Retry only the
+same reviewed origin through this explicitly supplied loopback HTTP proxy.
+```
+
+Pass only when the proxy is an unauthenticated literal loopback HTTP URL with no
+userinfo, query, fragment or remote host; origin/redirect SSRF checks remain in
+force; and no alternative source is silently substituted.
+
+## `$research-network-publish`
+
+### Case H1: deterministic public network report
+
+```text
+Use $research-network-publish to validate this final KnowledgeNetwork/v1 and its
+snapshot-bound ResearchMap/v1, then render a self-contained public HTML report.
+```
+
+Pass when schema, digest, unique IDs and snapshot binding are independently
+checked; the renderer does not mutate research state; repeated inputs are
+deterministic; and output contains no absolute path, Zotero key, content hash,
+note body, full text, credential, remote font, CDN or network dependency.
+
+## `$zotero-declarative-bridge` (experimental)
+
+### Case B1: loader rejection and activation gate
+
+```text
+Build and offline-test the reviewed Zotero declarative bridge XPI, then attempt
+the documented activation probe against the current Zotero test environment.
+The Zotero loader rejects this plugin version.
+```
+
+Pass only when offline test success remains separate from runtime activation;
+no preview or apply is attempted without registry-active ID/version, private
+capability file and authenticated probe; zero writes are reported; and the
+result is `experimental / blocked_loader_rejected`, not available or partial
+success. This case must not cause the bridge to enter the default install set.
+
 ## `$curate-research-to-zotero`
 
 ### Case Z1: acquisition dry run
@@ -157,4 +232,22 @@ equations, acquire verified files, and synchronize only to the exact approved
 collection. Report precise coverage and readback counts.
 ```
 
-Pass when all three skills exchange their declared artifacts, the final synthesis distinguishes sparse structure discovery from fixed-structure parameter calibration and identifiability, and local/Zotero side effects remain auditable.
+Pass when every routed skill exchanges only its declared artifacts, the final
+synthesis distinguishes sparse structure discovery from fixed-structure
+parameter calibration and identifiability, and local/Zotero side effects remain
+auditable.
+
+## Compound DoE and surrogate-model case
+
+```text
+Use the full deep-research skill suite on an existing Zotero DoE collection.
+Audit usable PDFs and notes, compile domain-grounded surrogate/inverse-problem
+queries, acquire open primary sources, update evidence notes, merge the knowledge
+network, run a gap cycle, and publish a self-contained HTML network.
+```
+
+Pass only when metadata-only missing dimensions are not emitted as scholarly
+queries; automatic-provider and manual Scholar failures remain explicit; every
+acquired PDF has a legal route, magic-byte check, and hash; Zotero writes require
+the exact selected target and per-item readback; and the HTML privacy audit rejects
+absolute paths, Zotero keys, digests, note bodies, and credentials.

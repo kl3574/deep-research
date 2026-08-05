@@ -340,7 +340,9 @@ class PaperKnowledgeNoteTests(unittest.TestCase):
             note.build_projection(payload)
 
     def test_rejects_absolute_local_paths_and_private_key_shapes(self) -> None:
-        for unsafe in ("/home/private/paper.pdf", "真实条目 Q7W8E9R0"):
+        unsafe_path = "/".join(("", "home", "private", "paper.pdf"))
+        unsafe_key = "真实条目 " + "".join(("Q7W8", "E9R0"))
+        for unsafe in (unsafe_path, unsafe_key):
             with self.subTest(unsafe=unsafe):
                 payload = valid_input()
                 payload["source_binding"]["paper_card_ref"] = unsafe
@@ -369,7 +371,9 @@ class PaperKnowledgeNoteTests(unittest.TestCase):
             note.build_projection(payload)
 
         _, rendered, _ = note.build_projection(valid_input())
-        hidden = "<!-- /home/private/paper.pdf Q7W8E9R0 -->\n" + rendered
+        unsafe_path = "/".join(("", "home", "private", "paper.pdf"))
+        unsafe_key = "".join(("Q7W8", "E9R0"))
+        hidden = f"<!-- {unsafe_path} {unsafe_key} -->\n" + rendered
         errors, _, _ = note.validate_rendered_html(hidden)
         self.assertTrue(any("HTML comments are forbidden" in error for error in errors))
         self.assertTrue(any("absolute local path" in error for error in errors))

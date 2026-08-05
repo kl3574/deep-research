@@ -1,0 +1,4 @@
+interface:
+  display_name: "Scholarly Document Normalization"
+  short_description: "Classify PDF text quality and trace OCR lineage"
+  default_prompt: "Use $scholarly-document-normalization to inspect this local scholarly PDF, normalize it only when required, and validate the derivative lineage without interpreting the paper."

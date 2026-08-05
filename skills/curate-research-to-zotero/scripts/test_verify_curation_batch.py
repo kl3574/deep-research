@@ -3,11 +3,53 @@
 from __future__ import annotations
 
 import copy
+import importlib.util
+import json
 from pathlib import Path
 import tempfile
 import unittest
 
 import verify_curation_batch as verify
+
+
+PAPER_NOTE_PATH = Path(__file__).with_name("paper_knowledge_note.py")
+PAPER_NOTE_SPEC = importlib.util.spec_from_file_location(
+    "paper_knowledge_note_for_batch_test",
+    PAPER_NOTE_PATH,
+)
+assert PAPER_NOTE_SPEC is not None and PAPER_NOTE_SPEC.loader is not None
+paper_note = importlib.util.module_from_spec(PAPER_NOTE_SPEC)
+PAPER_NOTE_SPEC.loader.exec_module(paper_note)
+
+FINAL_HANDOFF_EXAMPLE = (
+    Path(__file__).resolve().parents[2]
+    / "learn-from-papers"
+    / "examples"
+    / "paper_understanding_note_input.example.json"
+)
+
+
+def metadata_note() -> str:
+    return """<div data-schema-version="9" data-access-level="metadata_only">
+<h1>文献笔记｜Metadata Fixture</h1>
+<h2>资料与阅读状态</h2><p>标题：Metadata Fixture；作者：甲；年份：2024；期刊或载体：测试期刊；DOI或稳定标识：10.1000/test；版本与出版状态：正式版；访问层级：metadata_only；全文状态：未获取全文；阅读深度：map；核验时间：2026-08-05。</p>
+<h2>为什么重要</h2><p>该题录可能相关，但尚无全文证据。</p>
+<h2>一句话结论</h2><p>未获取全文，不能形成科学结论。</p>
+<h2>心智模型</h2><p>当前只保留书目信息，等待合法全文。</p>
+<h2>关键主张与证据</h2><p>未获取全文，未形成全文证据主张。</p><table><tr><th>Claim ID</th><th>性质</th><th>主张</th><th>证据与精确定位</th><th>条件</th><th>置信度与理由</th></tr></table>
+<h2>方法或推导</h2><p>未获取全文，方法与推导均未核验。</p>
+<h2>结果</h2><p>未获取全文，结果未核验。</p>
+<h2>假设、失败边界与竞争解释</h2><p>题录信息不能替代全文证据。</p>
+<h2>知识图谱关系</h2><p>仅登记候选来源，不建立证据支持关系。</p>
+<h2>复用</h2><p>取得全文后必须重新深读和核验。</p>
+<h2>溯源</h2><p>元数据来源：https://doi.org/10.1000/test；元数据核验时间：2026-08-05；Agent推断：未形成全文主张。</p>
+</div>"""
+
+
+def paper_knowledge_note() -> str:
+    payload = json.loads(FINAL_HANDOFF_EXAMPLE.read_text(encoding="utf-8"))
+    _, rendered, _ = paper_note.build_projection(payload)
+    return rendered
 
 
 class CurationBatchTests(unittest.TestCase):
@@ -91,6 +133,54 @@ class CurationBatchTests(unittest.TestCase):
             "entries": [self.entry()],
         }
 
+    def blocked_entry(self, entry_id: str, decision: str) -> dict[str, object]:
+        entry = self.entry(entry_id)
+        entry["canonical_identity"] = {
+            "type": "doi",
+            "value": f"10.1000/{entry_id}",
+        }
+        for key in ("bundle_path", "bundle_sha256", "note_artifact"):
+            entry.pop(key)
+        entry["pdf_artifacts"] = []
+        entry.update(
+            {
+                "decision": decision,
+                "handler": "none",
+                "gate_status": "blocked",
+                "fulltext_status": "metadata_only",
+                "expected_effect": {
+                    "new_parent_count": 0,
+                    "target_membership": False,
+                    "note_action": "no_op",
+                    "attachment_action": "no_op",
+                },
+            }
+        )
+        if decision == "blocked_unsupported_operation":
+            entry["existing_parent"] = {
+                "key": "ZXCVBNMA",
+                "version": 4,
+                "in_target": False,
+            }
+        return entry
+
+    def mixed_batch(self) -> dict[str, object]:
+        batch = self.batch()
+        golden = []
+        for index in range(1, 15):
+            entry = self.entry(f"golden-{index:02d}")
+            entry["canonical_identity"] = {
+                "type": "doi",
+                "value": f"10.1000/golden-{index:02d}",
+            }
+            golden.append(entry)
+        batch["entries"] = golden + [
+            self.blocked_entry("blocked-duplicate", "blocked_duplicate_conflict"),
+            self.blocked_entry("blocked-version", "blocked_version_conflict"),
+            self.blocked_entry("blocked-operation", "blocked_unsupported_operation"),
+        ]
+        return batch
+
     def success_execution(
         self, batch: dict[str, object]
     ) -> dict[str, object]:
@@ -105,7 +195,6 @@ class CurationBatchTests(unittest.TestCase):
             if state == "write_authorized":
                 event["evidence"] = {"approved_batch_digest": digest}
             events.append(event)
-        entry = batch["entries"][0]
         return {
             "schema": "CurationExecution/v1",
             "batch_digest": digest,
@@ -119,9 +208,14 @@ class CurationBatchTests(unittest.TestCase):
             "results": [
                 {
                     "entry_id": entry["entry_id"],
-                    "status": "readback_verified",
+                    "status": (
+                        "blocked"
+                        if entry["decision"] in verify.BLOCKED_DECISIONS
+                        else "readback_verified"
+                    ),
                     "observed_effect": copy.deepcopy(entry["expected_effect"]),
                 }
+                for entry in batch["entries"]
             ],
         }
 
@@ -141,6 +235,133 @@ class CurationBatchTests(unittest.TestCase):
         self.assertEqual(
             [], verify.validate_execution(self.success_execution(batch), batch)
         )
+
+    def test_mixed_batch_14_golden_3_blocked_readback_passes(self) -> None:
+        batch = self.mixed_batch()
+        frozen_batch = copy.deepcopy(batch)
+        digest = verify.digest_value(batch)
+        execution = self.success_execution(batch)
+
+        self.assertEqual([], verify.validate_batch(batch))
+        self.assertEqual(digest, execution["batch_digest"])
+        self.assertEqual([], verify.validate_execution(execution, batch))
+        self.assertEqual(frozen_batch, batch)
+        statuses = {
+            result["entry_id"]: result["status"] for result in execution["results"]
+        }
+        self.assertEqual(
+            14, sum(value == "readback_verified" for value in statuses.values())
+        )
+        self.assertEqual(3, sum(value == "blocked" for value in statuses.values()))
+
+    def test_mixed_batch_blocked_results_fail_closed(self) -> None:
+        batch = self.mixed_batch()
+        base = self.success_execution(batch)
+        cases: dict[str, tuple[dict[str, object], str]] = {}
+
+        missing = copy.deepcopy(base)
+        missing["results"] = [
+            result
+            for result in missing["results"]
+            if result["entry_id"] != "blocked-duplicate"
+        ]
+        cases["missing"] = (missing, "lacks blocked result")
+
+        wrong_status = copy.deepcopy(base)
+        next(
+            result
+            for result in wrong_status["results"]
+            if result["entry_id"] == "blocked-version"
+        )["status"] = "readback_verified"
+        cases["wrong_status"] = (wrong_status, "status must be blocked")
+
+        mismatch = copy.deepcopy(base)
+        next(
+            result
+            for result in mismatch["results"]
+            if result["entry_id"] == "blocked-operation"
+        )["observed_effect"]["target_membership"] = True
+        cases["mismatch"] = (mismatch, "effect mismatch")
+
+        mutated = copy.deepcopy(base)
+        next(
+            result
+            for result in mutated["results"]
+            if result["entry_id"] == "blocked-duplicate"
+        )["observed_effect"] = {
+            "new_parent_count": 1,
+            "target_membership": True,
+            "note_action": "create",
+            "attachment_action": "create",
+        }
+        cases["mutated"] = (mutated, "reports mutation")
+
+        for name, (execution, expected_error) in cases.items():
+            with self.subTest(name=name):
+                errors = verify.validate_execution(execution, batch)
+                self.assertTrue(
+                    any(expected_error in error for error in errors),
+                    errors,
+                )
+
+    def test_mixed_batch_does_not_allow_blocked_status_for_golden_entry(self) -> None:
+        batch = self.mixed_batch()
+        execution = self.success_execution(batch)
+        execution["results"][0]["status"] = "blocked"
+
+        errors = verify.validate_execution(execution, batch)
+
+        self.assertTrue(any("lacks readback result" in error for error in errors))
+
+    def test_paper_knowledge_note_v2_five_section_branch(self) -> None:
+        self.note.write_text(paper_knowledge_note(), encoding="utf-8")
+        batch = self.batch()
+        batch["entries"][0]["note_artifact"]["sha256"] = verify.sha256_file(
+            self.note
+        )
+
+        self.assertEqual([], verify.validate_batch(batch))
+
+    def test_metadata_only_marker_branch(self) -> None:
+        self.note.write_text(metadata_note(), encoding="utf-8")
+        batch = self.batch()
+        entry = batch["entries"][0]
+        entry["decision"] = "metadata_only_create"
+        entry["fulltext_status"] = "metadata_only"
+        entry["pdf_artifacts"] = []
+        entry["expected_effect"]["attachment_action"] = "no_op"
+        entry["note_artifact"]["sha256"] = verify.sha256_file(self.note)
+
+        self.assertEqual([], verify.validate_batch(batch))
+
+    def test_note_contract_marker_and_section_mixes_are_rejected(self) -> None:
+        cases = {
+            "pkn_with_metadata_marker": paper_knowledge_note().replace(
+                'data-note-contract="PaperKnowledgeNote/v2"',
+                'data-note-contract="PaperKnowledgeNote/v2" data-access-level="metadata_only"',
+                1,
+            ),
+            "legacy_with_pkn_contract": self.note.read_text(encoding="utf-8").replace(
+                'data-schema-version="9"',
+                'data-schema-version="9" data-note-contract="PaperKnowledgeNote/v2"',
+                1,
+            ),
+            "pkn_sections_with_metadata_marker": paper_knowledge_note()
+            .replace(' data-note-contract="PaperKnowledgeNote/v2"', "", 1)
+            .replace(
+                'data-schema-version="9"',
+                'data-schema-version="9" data-access-level="metadata_only"',
+                1,
+            ),
+        }
+        for name, content in cases.items():
+            with self.subTest(name=name):
+                self.note.write_text(content, encoding="utf-8")
+                batch = self.batch()
+                batch["entries"][0]["note_artifact"][
+                    "sha256"
+                ] = verify.sha256_file(self.note)
+                self.assertTrue(verify.validate_batch(batch))
 
     def test_target_drift_and_schema_mismatch(self) -> None:
         batch = self.batch()

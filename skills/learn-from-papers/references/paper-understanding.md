@@ -44,6 +44,10 @@
   the exact bound dossier claim statement and `locator` is the canonical
   source-rooted dossier locator. Domain, contribution, math, and algorithm
   evidence references must resolve in that registry.
+- Draft generators must project claim `statement`, `scope`, `confidence`,
+  `verifier_status`, and evidence IDs from the authoritative dossier. Never
+  hard-code `medium`, same-context rationale, or a passed status after the
+  dossier has changed verification state.
 - Each evidence row carries exactly one locator copied verbatim from the
   validated dossier. Do not concatenate several valid locators into a new
   bracketed string; use several evidence rows instead. When a printed equation,
@@ -59,7 +63,7 @@
 
 ## CLI workflow
 
-From `/home/lkx/deep-research/skills/learn-from-papers`:
+From the repository's `skills/learn-from-papers` directory:
 
 ```bash
 python scripts/paper_understanding.py create \
@@ -98,6 +102,9 @@ python scripts/paper_understanding.py project-note-input \
 `--shadow-root` and `--audit-root` are opt-in. With neither flag, the command
 writes no copies. All requested outputs are preflighted and committed together
 as private `0600` files; any failure rolls back the set.
+All output paths are required to be absolute. Normalize them in an orchestrator
+before invoking `create`, `validate`, or `project-note-input`; a relative path is
+a contract failure, not an invitation to retry in an arbitrary working directory.
 
 ## `project-note-input` rules
 

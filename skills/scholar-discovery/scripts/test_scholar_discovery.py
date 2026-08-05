@@ -8,7 +8,9 @@ from unittest import mock
 from scholar_discovery import (
     ContractError,
     HTTP_USER_AGENT,
+    build_preflight,
     build_result,
+    compile_topic_need_set,
     compile_understanding_gap_request,
     compile_plan,
     execute_request_set,
@@ -203,6 +205,92 @@ def batch_fixture(request, query, candidates, status="succeeded"):
 
 
 class ScholarDiscoveryTest(unittest.TestCase):
+    def test_compiles_domain_grounded_topic_needs_to_request_set(self):
+        topic_needs = {
+            "schema": "ResearchTopicNeedSet/v1",
+            "schema_version": "v1",
+            "topic_id": "doe-surrogate",
+            "question": "Which sampling and surrogate routes fit morphology inverse problems?",
+            "as_of": "2026-08-05T00:00:00Z",
+            "google_scholar_policy": "manual_optional",
+            "automatic_providers": ["crossref", "semantic_scholar"],
+            "network_ref": {
+                "network_id": "KN-DOE",
+                "snapshot_id": "KN-DOE-S1",
+                "sha256": "a" * 64,
+            },
+            "needs": [
+                {
+                    "gap_id": "gap-inverse-doe",
+                    "paper_need": "Find adaptive surrogate designs for morphology inverse problems",
+                    "criteria": {
+                        "must": ["inverse problem", "surrogate"],
+                        "should": ["adaptive sampling", "morphology"],
+                        "must_not": ["unrelated clinical study"],
+                    },
+                    "query_seeds": [
+                        {
+                            "objective": "confirm",
+                            "query": "inverse problem surrogate adaptive sampling morphology",
+                        },
+                        {
+                            "objective": "refute",
+                            "query": "inverse problem surrogate failure posterior bias limitation",
+                        },
+                    ],
+                }
+            ],
+        }
+        request_set = compile_topic_need_set(topic_needs)
+        self.assertEqual(request_set["schema"], "ScholarDiscoveryRequestSet/v1")
+        self.assertEqual(len(request_set["requests"]), 1)
+        request = request_set["requests"][0]
+        self.assertEqual(request["gap_hypothesis_id"], "gap-inverse-doe")
+        self.assertNotIn("network dimension", json.dumps(request).lower())
+        validate_request_set(request_set)
+
+    def test_topic_compiler_rejects_structural_placeholder_query(self):
+        topic_needs = {
+            "schema": "ResearchTopicNeedSet/v1",
+            "schema_version": "v1",
+            "topic_id": "bad-topic",
+            "question": "Bad structural topic",
+            "as_of": "2026-08-05T00:00:00Z",
+            "network_ref": {
+                "network_id": "KN-1",
+                "snapshot_id": "KN-1-S1",
+                "sha256": "a" * 64,
+            },
+            "needs": [
+                {
+                    "gap_id": "gap-bad",
+                    "paper_need": "Fill a missing field",
+                    "criteria": {"must": ["network"], "should": [], "must_not": []},
+                    "query_seeds": [
+                        {"objective": "confirm", "query": "network dimension validation_target"},
+                        {"objective": "refute", "query": "network dimension failure limitation"},
+                    ],
+                }
+            ],
+        }
+        with self.assertRaisesRegex(ContractError, "structural placeholder"):
+            compile_topic_need_set(topic_needs)
+
+    def test_preflight_reports_provider_and_manual_scholar_without_secrets(self):
+        request_set = request_set_fixture()
+        with mock.patch.dict(
+            os.environ,
+            {"OPENALEX_API_KEY": "", "SEMANTIC_SCHOLAR_API_KEY": "secret-value"},
+            clear=False,
+        ):
+            preflight = build_preflight(request_set)
+        openalex = next(
+            row for row in preflight["automatic_providers"] if row["provider"] == "openalex"
+        )
+        self.assertFalse(openalex["configured"])
+        self.assertEqual(preflight["google_scholar"]["automatic"], False)
+        self.assertNotIn("secret-value", json.dumps(preflight))
+
     def test_compiles_all_understanding_gap_types_to_targeted_queries(self):
         query_pairs = set()
         for gap_type in UNDERSTANDING_GAP_PROJECTION_BY_TYPE:

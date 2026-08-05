@@ -87,6 +87,33 @@ jobs:
           -s skills/network-gap-discovery/scripts
           -p 'test_*.py'
 
+      - name: Run scholarly-source-acquisition tests
+        run: >-
+          python -m unittest discover
+          -s skills/scholarly-source-acquisition/scripts
+          -p 'test_*.py'
+
+      - name: Run scholarly-document-normalization tests
+        run: >-
+          python -m unittest discover
+          -s skills/scholarly-document-normalization/scripts
+          -p 'test_*.py'
+
+      - name: Run research-network-publish tests
+        run: >-
+          python -m unittest discover
+          -s skills/research-network-publish/scripts
+          -p 'test_*.py'
+
+      - name: Run Zotero declarative bridge Python tests
+        run: >-
+          python -m unittest discover
+          -s skills/zotero-declarative-bridge/scripts
+          -p 'test_*.py'
+
+      - name: Run Zotero declarative bridge JavaScript tests
+        run: node --test skills/zotero-declarative-bridge/scripts/test_bridge_core.js
+
       - name: Run six-skill workflow routing evaluations
         run: >-
           python -m unittest discover
@@ -112,7 +139,11 @@ jobs:
             skills/research-knowledge-network \
             skills/scholar-discovery \
             skills/network-gap-discovery \
-            skills/curate-research-to-zotero
+            skills/curate-research-to-zotero \
+            skills/scholarly-source-acquisition \
+            skills/scholarly-document-normalization \
+            skills/research-network-publish \
+            skills/zotero-declarative-bridge
           do
             test -s "$skill/SKILL.md"
             test -s "$skill/agents/openai.yaml"

@@ -210,6 +210,17 @@ DISCOVERY_STATUSES = {
     "pending",
 }
 READ_DEPTHS = {"full_text", "evidence"}
+CANDIDATE_SIGNAL_MAX_TOTAL = 64
+CANDIDATE_SIGNAL_TIER_BUDGETS = {
+    "explicit_high_impact": 24,
+    "explicit": 8,
+    "unmet_gate": 4,
+    "single_source": 12,
+    "isolate": 6,
+    "low_confidence": 6,
+    "structural": 4,
+}
+CANDIDATE_SIGNAL_TIER_ORDER = tuple(CANDIDATE_SIGNAL_TIER_BUDGETS)
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 INTERNAL_QUERY_BLOCKLIST = {
     "completion.gate_checks.",
@@ -1054,6 +1065,10 @@ def _build_semantic_search_spec(
 
     if explicit_gap:
         gap = gap_lookup.get(ref)
+        if ref.startswith("derived:missing-dimension:") or (
+            gap is not None and gap.get("gap_type") == "deterministic_structural"
+        ):
+            return [], True
         if gap is not None:
             terms.extend(
                 _collect_semantic_terms(
@@ -1239,6 +1254,150 @@ def connected_components(
     return sorted(components, key=lambda item: (-len(item), item))
 
 
+def _gap_declared_priority(gap: dict[str, Any]) -> str:
+    declared = gap.get("declared_priority")
+    if declared in {"P0", "P1", "P2", "P3"}:
+        return str(declared)
+    if gap.get("decision_impact") == "high":
+        return "decision_high"
+    if gap.get("priority") == "decision_critical" or gap.get("impact") == "high":
+        return "legacy_high"
+    if gap.get("impact") == "medium":
+        return "legacy_medium"
+    return "low"
+
+
+def _gap_signal_tier(gap: dict[str, Any]) -> str:
+    gap_id = str(gap.get("gap_id") or "")
+    rule = str(gap.get("derivation_rule") or "")
+    if rule == "single_independent_source" or gap_id.startswith(
+        "derived:single-source:"
+    ):
+        return "single_source"
+    if rule == "isolated_claim" or gap_id.startswith("derived:isolated:"):
+        return "isolate"
+    if gap.get("gap_type") == "explicit" and gap.get("claim_id") is None:
+        priority = _gap_declared_priority(gap)
+        if priority in {
+            "P0",
+            "P1",
+            "decision_high",
+            "legacy_high",
+            "legacy_medium",
+        }:
+            return "explicit_high_impact"
+        return "explicit"
+    if gap.get("gap_type") == "explicit":
+        return "explicit"
+    return "structural"
+
+
+def _candidate_signal_context(
+    signal: dict[str, Any], network: dict[str, Any]
+) -> tuple[str, str, str, str]:
+    gap_lookup = {
+        str(gap.get("gap_id")): gap
+        for gap in network["gaps"]
+        if gap.get("gap_id")
+    }
+    kind = str(signal.get("kind") or "")
+    ref = str(signal.get("refs", [""])[0])
+    if kind == "explicit_open_gap":
+        gap = gap_lookup.get(ref, {})
+        tier = _gap_signal_tier(gap)
+        priority = _gap_declared_priority(gap)
+        claim_id = gap.get("claim_id")
+        if isinstance(claim_id, str) and claim_id:
+            subject = claim_id if claim_id.startswith("claim:") else f"claim:{claim_id}"
+        else:
+            label = str(gap.get("description") or gap.get("reason") or ref)
+            normalized = re.sub(r"\W+", " ", label.casefold()).strip()
+            subject = f"gap-semantic:{normalized or ref}"
+        label = str(gap.get("description") or gap.get("reason") or ref)
+        return tier, priority, subject, label
+    if kind == "unmet_declared_gate":
+        return "unmet_gate", "decision_high", ref, str(signal.get("reason") or ref)
+    if kind == "topological_isolate":
+        return "isolate", "low", ref, str(signal.get("reason") or ref)
+    if kind == "low_confidence_relation":
+        return "low_confidence", "low", ref, str(signal.get("reason") or ref)
+    return "structural", "low", ref, str(signal.get("reason") or ref)
+
+
+def _candidate_signal_sort_key(signal: dict[str, Any]) -> tuple[Any, ...]:
+    priority_order = {
+        "P0": 0,
+        "decision_high": 1,
+        "legacy_high": 2,
+        "P1": 3,
+        "legacy_medium": 4,
+        "P2": 5,
+        "P3": 6,
+        "low": 7,
+    }
+    return (
+        CANDIDATE_SIGNAL_TIER_ORDER.index(str(signal["tier"])),
+        priority_order.get(str(signal["source_priority"]), 8),
+        str(signal.get("semantic_label") or "").casefold(),
+        str(signal["signal_id"]),
+    )
+
+
+def _bounded_candidate_signals(
+    signals: list[dict[str, Any]], network: dict[str, Any]
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    enriched: list[dict[str, Any]] = []
+    for source in signals:
+        signal = dict(source)
+        tier, priority, subject, label = _candidate_signal_context(signal, network)
+        signal.update(
+            {
+                "tier": tier,
+                "source_priority": priority,
+                "dedupe_key": subject,
+                "semantic_label": label,
+            }
+        )
+        enriched.append(signal)
+
+    deduplicated: list[dict[str, Any]] = []
+    seen_subjects: set[str] = set()
+    duplicate_by_tier: Counter[str] = Counter()
+    for signal in sorted(enriched, key=_candidate_signal_sort_key):
+        subject = str(signal["dedupe_key"])
+        if subject in seen_subjects:
+            duplicate_by_tier[str(signal["tier"])] += 1
+            continue
+        seen_subjects.add(subject)
+        deduplicated.append(signal)
+
+    selected: list[dict[str, Any]] = []
+    selected_by_tier: Counter[str] = Counter()
+    budget_suppressed_by_tier: Counter[str] = Counter()
+    for signal in deduplicated:
+        tier = str(signal["tier"])
+        if (
+            len(selected) >= CANDIDATE_SIGNAL_MAX_TOTAL
+            or selected_by_tier[tier] >= CANDIDATE_SIGNAL_TIER_BUDGETS[tier]
+        ):
+            budget_suppressed_by_tier[tier] += 1
+            continue
+        selected.append(signal)
+        selected_by_tier[tier] += 1
+
+    suppressed_by_tier = Counter(duplicate_by_tier)
+    suppressed_by_tier.update(budget_suppressed_by_tier)
+    summary = {
+        "raw_count": len(signals),
+        "deduplicated_count": len(deduplicated),
+        "selected_count": len(selected),
+        "suppressed_count": len(signals) - len(selected),
+        "selected_by_tier": dict(sorted(selected_by_tier.items())),
+        "suppressed_by_tier": dict(sorted(suppressed_by_tier.items())),
+    }
+    return selected, summary
+
+
 def scan_network(value: Any) -> dict[str, Any]:
     network = validate_network(value)
     nodes = {
@@ -1327,6 +1486,7 @@ def scan_network(value: Any) -> dict[str, Any]:
                 "reason": "confidence may require independent evidence",
             }
         )
+    selected_signals, signal_summary = _bounded_candidate_signals(signals, network)
     probe = {
         "schema": PROBE_SCHEMA,
         "network_ref": network_ref(network),
@@ -1347,7 +1507,14 @@ def scan_network(value: Any) -> dict[str, Any]:
         "dangling_relation_ids": sorted(set(dangling)),
         "low_confidence_relation_ids": sorted(set(low_confidence)),
         "relation_ids_without_provenance": sorted(set(missing_provenance)),
-        "candidate_signals": signals,
+        "candidate_signals": selected_signals,
+        "candidate_signal_policy": {
+            "max_total": CANDIDATE_SIGNAL_MAX_TOTAL,
+            "tier_order": list(CANDIDATE_SIGNAL_TIER_ORDER),
+            "tier_budgets": dict(CANDIDATE_SIGNAL_TIER_BUDGETS),
+            "legacy_probe_strategy": "deterministic_bounded_projection",
+        },
+        "candidate_signal_summary": signal_summary,
         "probe_families": PROBE_FAMILIES,
         "novelty_claimed": False,
     }
@@ -1363,6 +1530,17 @@ def validate_probe(value: Any) -> dict[str, Any]:
         raise ContractError("probe.novelty_claimed must be false")
     if not isinstance(probe.get("candidate_signals"), list):
         raise ContractError("probe.candidate_signals must be a list")
+    policy = probe.get("candidate_signal_policy")
+    if policy is not None:
+        policy = require_dict(policy, "probe.candidate_signal_policy")
+        max_total = policy.get("max_total")
+        if (
+            not isinstance(max_total, int)
+            or not 0 < max_total <= CANDIDATE_SIGNAL_MAX_TOTAL
+        ):
+            raise ContractError("probe candidate signal max_total is invalid")
+        if len(probe["candidate_signals"]) > max_total:
+            raise ContractError("probe candidate signals exceed max_total")
     return probe
 
 
@@ -1391,23 +1569,27 @@ def generate_hypotheses_from_probe(
         raise ContractError("probe network_ref does not match network")
     index = network_reference_index(network)
     hypotheses: list[dict[str, Any]] = []
-    for offset, signal in enumerate(sorted(probe["candidate_signals"], key=lambda item: item["signal_id"])):
+    selected_signals, generation_summary = _bounded_candidate_signals(
+        probe["candidate_signals"], network
+    )
+    for offset, signal in enumerate(selected_signals):
         signature = signal_hypothesis_signature(signal)
         hypothesis_id = f"KGH-{offset + 1:03d}"
-        if signal["kind"] == "topological_isolate":
+        tier = str(signal["tier"])
+        if tier == "isolate":
             target_kind = "node"
             target_signature = signature
-            decision_impact = "medium"
+            decision_impact = "low"
             uncertainty = "medium"
-        elif signal["kind"] == "low_confidence_relation":
+        elif tier == "low_confidence":
             target_kind = "relation"
             target_signature = signature
             decision_impact = "medium"
             uncertainty = "high"
-        elif signal["kind"] == "explicit_open_gap":
+        elif tier in {"explicit_high_impact", "explicit"}:
             target_kind = "relation"
             target_signature = signature
-            decision_impact = "high"
+            decision_impact = "high" if tier == "explicit_high_impact" else "medium"
             uncertainty = "medium"
         else:
             target_kind = "assumption"
@@ -1490,7 +1672,11 @@ def generate_hypotheses_from_probe(
             "decision_impact": decision_impact,
             "uncertainty": uncertainty,
             "searchability": "medium",
-            "cross_branch_blocking": True,
+            "cross_branch_blocking": tier
+            in {"explicit_high_impact", "explicit", "unmet_gate"},
+            "source_signal_kind": signal["kind"],
+            "source_signal_tier": tier,
+            "source_priority": signal["source_priority"],
             "dependencies": [],
             "status": "proposed",
             "status_basis": [],
@@ -1508,6 +1694,11 @@ def generate_hypotheses_from_probe(
         "round_id": round_id or timestamp_now(),
         "generated_at": timestamp_now(),
         "method_families": ["competency_coverage", "abc_bridge", "counterevidence_boundary"],
+        "candidate_budget": {
+            "max_total": CANDIDATE_SIGNAL_MAX_TOTAL,
+            "tier_budgets": dict(CANDIDATE_SIGNAL_TIER_BUDGETS),
+            "selection_summary": generation_summary,
+        },
         "hypotheses": hypotheses,
     }
 
@@ -1582,6 +1773,12 @@ def validate_hypotheses(
         structural_only = item.get("structural_only")
         if structural_only is not None and structural_only not in {True, False}:
             raise ContractError(f"{label}.structural_only must be boolean if present")
+        source_signal_tier = item.get("source_signal_tier")
+        if (
+            source_signal_tier is not None
+            and source_signal_tier not in CANDIDATE_SIGNAL_TIER_BUDGETS
+        ):
+            raise ContractError(f"{label}.source_signal_tier is invalid")
         needs_semantic_enrichment = item.get("needs_semantic_enrichment")
         if (
             needs_semantic_enrichment is not None
@@ -1709,6 +1906,25 @@ def priority_components(hypothesis: dict[str, Any]) -> dict[str, int]:
             hypothesis["searchability"]
         ],
         "cross_branch_blocking": 3 if hypothesis["cross_branch_blocking"] else 0,
+        "signal_tier": {
+            "explicit_high_impact": 12,
+            "explicit": 6,
+            "unmet_gate": 4,
+            "single_source": 0,
+            "isolate": -4,
+            "low_confidence": -2,
+            "structural": -2,
+        }.get(str(hypothesis.get("source_signal_tier")), 0),
+        "declared_priority": {
+            "P0": 6,
+            "decision_high": 5,
+            "legacy_high": 5,
+            "P1": 4,
+            "legacy_medium": 3,
+            "P2": 1,
+            "P3": 0,
+            "low": 0,
+        }.get(str(hypothesis.get("source_priority")), 0),
         "terminal_status_penalty": -100 if hypothesis["status"] not in ACTIVE_STATUSES else 0,
     }
 
@@ -1721,7 +1937,14 @@ def prioritize(value: Any, network: dict[str, Any] | None = None) -> dict[str, A
         hypothesis["priority_components"] = components
         hypothesis["priority_score"] = sum(components.values())
     output["hypotheses"].sort(
-        key=lambda item: (-item["priority_score"], item["hypothesis_id"])
+        key=lambda item: (
+            -item["priority_score"],
+            CANDIDATE_SIGNAL_TIER_ORDER.index(item["source_signal_tier"])
+            if item.get("source_signal_tier") in CANDIDATE_SIGNAL_TIER_ORDER
+            else len(CANDIDATE_SIGNAL_TIER_ORDER),
+            str(item.get("target_signature") or "").casefold(),
+            item["hypothesis_id"],
+        )
     )
     output["priority_order"] = [item["hypothesis_id"] for item in output["hypotheses"]]
     return output

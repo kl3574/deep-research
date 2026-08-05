@@ -10,13 +10,14 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import io
 import json
 import os
 import re
 import stat
 import sys
 import tempfile
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,6 +42,34 @@ LEDGER_NAMES = (
     "conflicts",
     "errors",
 )
+COMMAND_JOURNAL_NAME = "commands.jsonl"
+MUTATING_COMMANDS = {
+    "init",
+    "record-gap",
+    "set-gap-status",
+    "start-action",
+    "finish-action",
+    "record-round",
+    "record-source",
+    "record-claim",
+    "record-conflict",
+    "resolve-conflict",
+    "record-error",
+    "resolve-error",
+    "set-coverage",
+    "resume",
+    "finalize",
+}
+CREATE_TARGET_COMMANDS = {
+    "init",
+    "record-gap",
+    "start-action",
+    "record-round",
+    "record-source",
+    "record-claim",
+    "record-conflict",
+    "record-error",
+}
 MODES = {"targeted", "scoping", "rapid", "systematic"}
 ACCESS_LEVELS = {"full_text", "partial_text", "abstract_only", "metadata_only"}
 INSPECTION_STATES = {"inspected", "discovery_only"}
@@ -211,6 +240,10 @@ class Paths:
         return self.base / f"{name}.jsonl"
 
     @property
+    def command_journal(self) -> Path:
+        return self.base / COMMAND_JOURNAL_NAME
+
+    @property
     def lock_file(self) -> Path:
         return self.root / "runs" / ".locks" / f"{self.run_id}.lock"
 
@@ -322,6 +355,330 @@ def _read_bundle(
             raise FileNotFoundError(f"run ledger missing: {ledger}")
         records[name] = _read_jsonl(ledger)
     return state, records
+
+
+def _state_digest(
+    state: dict[str, Any], records: dict[str, list[dict[str, Any]]]
+) -> str:
+    """Digest immutable contract plus append-only research facts, not caches."""
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "run_id": state.get("run_id"),
+        "contract": state.get("contract"),
+        "ledgers": {name: records[name] for name in LEDGER_NAMES},
+    }
+    canonical = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(canonical).hexdigest()
+
+
+def _empty_observation() -> dict[str, Any]:
+    return {
+        "event_count": 0,
+        "ledger_counts": {name: 0 for name in LEDGER_NAMES},
+        "state_digest": None,
+        "lifecycle": "uninitialized",
+        "active_actions": [],
+        "cache_warnings": [],
+        "validation_errors": [],
+    }
+
+
+def _observe_ledger(paths: Paths) -> dict[str, Any]:
+    if not paths.state.is_file():
+        return _empty_observation()
+    state, records = _read_bundle(paths)
+    errors = _validate_bundle(paths, state, records)
+    summary = _summary(state, records, errors)
+    counts = {name: len(records[name]) for name in LEDGER_NAMES}
+    return {
+        "event_count": sum(counts.values()),
+        "ledger_counts": counts,
+        "state_digest": _state_digest(state, records),
+        "lifecycle": summary["lifecycle"],
+        "active_actions": summary["active_actions"],
+        "cache_warnings": _cache_warnings(state, records, summary),
+        "validation_errors": errors,
+    }
+
+
+def _read_command_journal(paths: Paths) -> list[dict[str, Any]]:
+    path = paths.command_journal
+    if not path.exists():
+        return []
+    if path.is_symlink():
+        raise ValueError(f"command journal must not be a symbolic link: {path}")
+    resolved = path.resolve(strict=False)
+    if paths.root != resolved and paths.root not in resolved.parents:
+        raise ValueError("command journal escapes the authorized root")
+    if not path.is_file():
+        raise ValueError(f"command journal must be a regular file: {path}")
+    return _read_jsonl(path)
+
+
+def _command_journal_errors(paths: Paths, rows: list[dict[str, Any]]) -> list[str]:
+    errors: list[str] = []
+    expected_sequence = 1
+    started: set[str] = set()
+    finished: set[str] = set()
+    recovered: set[str] = set()
+    for index, row in enumerate(rows, start=1):
+        prefix = f"{COMMAND_JOURNAL_NAME} line {index}"
+        if row.get("schema_version") != SCHEMA_VERSION:
+            errors.append(f"{prefix}: schema_version mismatch")
+        if row.get("run_id") != paths.run_id:
+            errors.append(f"{prefix}: run_id mismatch")
+        if row.get("journal_sequence") != expected_sequence:
+            errors.append(
+                f"{prefix}: journal_sequence must be contiguous from 1"
+            )
+        expected_sequence += 1
+        command_id = row.get("command_id")
+        if not isinstance(command_id, str) or not command_id:
+            errors.append(f"{prefix}: command_id must be non-empty")
+            continue
+        phase = row.get("phase")
+        if phase == "started":
+            if command_id in started:
+                errors.append(f"{prefix}: duplicate started command_id")
+            started.add(command_id)
+            if row.get("command") not in MUTATING_COMMANDS:
+                errors.append(f"{prefix}: unknown mutating command")
+        elif phase == "finished":
+            if command_id not in started:
+                errors.append(f"{prefix}: finished command has no start")
+            if command_id in finished:
+                errors.append(f"{prefix}: duplicate finished command_id")
+            finished.add(command_id)
+            if not isinstance(row.get("committed"), bool):
+                errors.append(f"{prefix}: committed must be boolean")
+            if not isinstance(row.get("partial"), bool):
+                errors.append(f"{prefix}: partial must be boolean")
+        elif phase == "recovered":
+            if command_id not in started:
+                errors.append(f"{prefix}: recovered command has no start")
+            if command_id in recovered:
+                errors.append(f"{prefix}: duplicate recovered command_id")
+            recovered.add(command_id)
+        else:
+            errors.append(f"{prefix}: invalid phase")
+        for field in ("pre_event_count", "post_event_count"):
+            value = row.get(field)
+            if value is not None and (
+                not isinstance(value, int) or isinstance(value, bool) or value < 0
+            ):
+                errors.append(f"{prefix}: {field} must be null or non-negative")
+        for field in ("pre_state_digest", "post_state_digest"):
+            value = row.get(field)
+            if value is not None and (
+                not isinstance(value, str) or not PROTOCOL_REF_RE.fullmatch(value)
+            ):
+                errors.append(f"{prefix}: {field} must be null or sha256 digest")
+    return errors
+
+
+def _append_command_journal(
+    paths: Paths, rows: list[dict[str, Any]], **payload: Any
+) -> dict[str, Any]:
+    sequence = len(rows) + 1
+    row = {
+        "schema_version": SCHEMA_VERSION,
+        "run_id": paths.run_id,
+        "journal_sequence": sequence,
+        "recorded_at": _utcnow(),
+        **payload,
+    }
+    proposed = [*rows, row]
+    errors = _command_journal_errors(paths, proposed)
+    if errors:
+        raise ValueError("; ".join(errors))
+    paths.command_journal.parent.mkdir(parents=True, exist_ok=True)
+    _append_jsonl(paths.command_journal, row)
+    rows.append(row)
+    return row
+
+
+def _journal_command_states(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    states: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for row in rows:
+        command_id = row.get("command_id")
+        if not isinstance(command_id, str):
+            continue
+        if row.get("phase") == "started":
+            states[command_id] = {
+                "command_id": command_id,
+                "command": row.get("command"),
+                "target_ref": row.get("target_ref"),
+                "started_at": row.get("recorded_at"),
+                "pre_event_count": row.get("pre_event_count"),
+                "pre_state_digest": row.get("pre_state_digest"),
+                "phase": "started",
+                "committed": None,
+                "partial": None,
+                "exit_code": None,
+                "recovered": False,
+            }
+            order.append(command_id)
+        elif command_id in states and row.get("phase") == "finished":
+            states[command_id].update(
+                {
+                    "phase": "finished",
+                    "post_event_count": row.get("post_event_count"),
+                    "post_state_digest": row.get("post_state_digest"),
+                    "committed": row.get("committed"),
+                    "partial": row.get("partial"),
+                    "exit_code": row.get("exit_code"),
+                    "batch_context": row.get("batch_context"),
+                    "diagnostic": row.get("diagnostic"),
+                }
+            )
+        elif command_id in states and row.get("phase") == "recovered":
+            states[command_id]["recovered"] = True
+            states[command_id]["recovered_at"] = row.get("recorded_at")
+    return [states[command_id] for command_id in order]
+
+
+def _command_target_ref(args: argparse.Namespace) -> str:
+    for field, prefix in (
+        ("gap_id", "gap"),
+        ("action_id", "action"),
+        ("round_id", "round"),
+        ("source_id", "source"),
+        ("relation_id", "relation"),
+        ("conflict_id", "conflict"),
+        ("error_id", "error"),
+    ):
+        value = getattr(args, field, None)
+        if isinstance(value, str) and value:
+            return f"{prefix}:{value}"
+    return f"run:{args.run_id}"
+
+
+def _target_exists(paths: Paths, target_ref: str) -> bool:
+    if not paths.state.is_file():
+        return False
+    _, records = _read_bundle(paths)
+    prefix, _, identifier = target_ref.partition(":")
+    if prefix == "gap":
+        return identifier in _gap_state(records)
+    if prefix == "action":
+        return identifier in _action_state(records)
+    key_by_prefix = {
+        "round": ("rounds", "round_id"),
+        "source": ("sources", "source_id"),
+        "relation": ("claims", "relation_id"),
+        "conflict": ("conflicts", "conflict_id"),
+        "error": ("errors", "error_id"),
+    }
+    if prefix in key_by_prefix:
+        ledger, key = key_by_prefix[prefix]
+        return identifier in _ids(records, key, ledger)
+    return prefix == "run"
+
+
+def _recovery_argv(paths: Paths, command: str) -> list[str]:
+    return [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--root",
+        str(paths.root),
+        "--run-id",
+        paths.run_id,
+        command,
+    ]
+
+
+def _execution_recovery_plan(
+    paths: Paths,
+    *,
+    command: str,
+    target_ref: str,
+    exit_code: int,
+    committed: bool,
+    partial: bool,
+    observation: dict[str, Any],
+) -> dict[str, Any]:
+    target_exists = _target_exists(paths, target_ref)
+    commands: list[dict[str, Any]] = []
+    classification = "none"
+    do_not_retry = False
+    safe_to_retry_after_status = False
+    if partial:
+        classification = "partial_commit"
+        do_not_retry = True
+        commands = [
+            {"purpose": "derive committed facts", "argv": _recovery_argv(paths, "status")},
+            {"purpose": "repair caches and acknowledge recovery", "argv": _recovery_argv(paths, "resume")},
+        ]
+    elif exit_code != 0 and target_exists and command in CREATE_TARGET_COMMANDS:
+        classification = "already_committed_target"
+        do_not_retry = True
+        commands = [
+            {"purpose": "inspect the existing target", "argv": _recovery_argv(paths, "status")}
+        ]
+    elif exit_code != 0:
+        classification = "no_commit"
+        safe_to_retry_after_status = True
+        commands = [
+            {"purpose": "confirm no facts were appended", "argv": _recovery_argv(paths, "status")}
+        ]
+    return {
+        "classification": classification,
+        "target_ref": target_ref,
+        "target_exists": target_exists,
+        "do_not_retry": do_not_retry,
+        "safe_to_retry_after_status": safe_to_retry_after_status,
+        "commands": commands,
+        "active_action_ids": [
+            row.get("action_id") for row in observation.get("active_actions", [])
+        ],
+        "note": (
+            "No rollback is claimed; ledger facts are append-only."
+            if classification != "none"
+            else "No recovery is required."
+        ),
+    }
+
+
+def _command_recovery_status(
+    paths: Paths, observation: dict[str, Any]
+) -> dict[str, Any]:
+    rows = _read_command_journal(paths)
+    errors = _command_journal_errors(paths, rows)
+    states = _journal_command_states(rows) if not errors else []
+    unresolved = [
+        state
+        for state in states
+        if not state.get("recovered")
+        and (
+            state.get("phase") == "started"
+            or (state.get("phase") == "finished" and state.get("partial") is True)
+        )
+    ]
+    recovery_commands: list[dict[str, Any]] = []
+    if unresolved:
+        recovery_commands = [
+            {"purpose": "derive committed facts", "argv": _recovery_argv(paths, "status")},
+            {"purpose": "repair and acknowledge recovery", "argv": _recovery_argv(paths, "resume")},
+        ]
+    return {
+        "journal_available": paths.command_journal.is_file(),
+        "journal_errors": errors,
+        "needs_recovery": bool(unresolved),
+        "unresolved_commands": unresolved,
+        "last_command": states[-1] if states else None,
+        "recent_commands": states[-10:],
+        "recovery_plan": {
+            "commands": recovery_commands,
+            "active_action_ids": [
+                row.get("action_id")
+                for row in observation.get("active_actions", [])
+            ],
+            "note": "Audit derived state before retrying any unresolved command.",
+        },
+    }
 
 
 def _ordered_records(
@@ -2164,6 +2521,7 @@ def command_init(args: argparse.Namespace) -> int:
     paths.base.mkdir(parents=True)
     for name in LEDGER_NAMES:
         paths.ledger(name).touch()
+    paths.command_journal.touch()
     state = {
         "schema_version": SCHEMA_VERSION,
         "run_id": paths.run_id,
@@ -2635,6 +2993,9 @@ def command_resume(args: argparse.Namespace) -> int:
                 "unresolved_gaps": summary["coverage"]["unresolved_gaps"],
                 "active_actions": summary["active_actions"],
                 "ready_gap_ids": summary["ready_gap_ids"],
+                "prior_command_recovery": getattr(
+                    args, "_command_recovery_before", None
+                ),
             },
             indent=2,
         )
@@ -2677,14 +3038,27 @@ def _status_payload(paths: Paths) -> tuple[dict[str, Any], int]:
     state, records = _read_bundle(paths)
     errors = _validate_bundle(paths, state, records)
     summary = _summary(state, records, errors)
-    return {
+    observation = {
+        "event_count": sum(len(records[name]) for name in LEDGER_NAMES),
+        "ledger_counts": {name: len(records[name]) for name in LEDGER_NAMES},
+        "state_digest": _state_digest(state, records),
+        "lifecycle": summary["lifecycle"],
+        "active_actions": summary["active_actions"],
+        "cache_warnings": _cache_warnings(state, records, summary),
+        "validation_errors": errors,
+    }
+    command_recovery = _command_recovery_status(paths, observation)
+    payload = {
         "schema_version": SCHEMA_VERSION,
         "run_id": paths.run_id,
         "contract": state.get("contract"),
         "summary": summary,
         "validation_errors": errors,
-        "cache_warnings": _cache_warnings(state, records, summary),
-    }, 1 if errors else 0
+        "cache_warnings": observation["cache_warnings"],
+        "ledger_observation": observation,
+        "command_recovery": command_recovery,
+    }
+    return payload, 1 if errors or command_recovery["journal_errors"] else 0
 
 
 def command_status(args: argparse.Namespace) -> int:
@@ -2967,6 +3341,200 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _run_mutating_command(args: argparse.Namespace, paths: Paths) -> int:
+    pre = _observe_ledger(paths)
+    prior_recovery = (
+        _command_recovery_status(paths, pre) if paths.base.exists() else {
+            "journal_available": False,
+            "journal_errors": [],
+            "needs_recovery": False,
+            "unresolved_commands": [],
+            "last_command": None,
+            "recent_commands": [],
+            "recovery_plan": {"commands": [], "active_action_ids": [], "note": "No prior run exists."},
+        }
+    )
+    setattr(args, "_command_recovery_before", prior_recovery)
+    target_ref = _command_target_ref(args)
+    started_at = _utcnow()
+    journal_rows = _read_command_journal(paths) if paths.base.exists() else []
+    command_id = f"command-{len(journal_rows) + 1:06d}"
+    started_written = False
+    if paths.base.exists():
+        _append_command_journal(
+            paths,
+            journal_rows,
+            command_id=command_id,
+            phase="started",
+            command=args.command,
+            target_ref=target_ref,
+            started_at=started_at,
+            pre_event_count=pre["event_count"],
+            pre_state_digest=pre["state_digest"],
+            post_event_count=None,
+            post_state_digest=None,
+        )
+        started_written = True
+
+    stdout_buffer = io.StringIO()
+    stderr_buffer = io.StringIO()
+    caught: Exception | None = None
+    code = 1
+    with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
+        try:
+            code = args.func(args)
+        except (
+            AttributeError,
+            FileNotFoundError,
+            json.JSONDecodeError,
+            KeyError,
+            OSError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            caught = exc
+            print(f"{exc.__class__.__name__}: {exc}", file=sys.stderr)
+            code = 1
+
+    post = _observe_ledger(paths)
+    committed = post["event_count"] > pre["event_count"]
+    partial = bool(
+        committed
+        and (
+            code != 0
+            or post["cache_warnings"]
+            or post["validation_errors"]
+        )
+    )
+    batch_context = {
+        "mode": "single_command",
+        "attempted_operations": 1,
+        "successful_prefix": 1 if committed else 0,
+        "failed_index": 1 if code != 0 else None,
+        "rollback_claimed": False,
+    }
+
+    journal_failure: Exception | None = None
+    recovered_command_ids: list[str] = []
+    try:
+        if paths.base.exists() and not started_written:
+            journal_rows = _read_command_journal(paths)
+            command_id = f"command-{len(journal_rows) + 1:06d}"
+            _append_command_journal(
+                paths,
+                journal_rows,
+                command_id=command_id,
+                phase="started",
+                command=args.command,
+                target_ref=target_ref,
+                started_at=started_at,
+                pre_event_count=pre["event_count"],
+                pre_state_digest=pre["state_digest"],
+                post_event_count=None,
+                post_state_digest=None,
+            )
+            started_written = True
+        if paths.base.exists() and started_written:
+            if args.command == "resume" and code == 0:
+                for pending in prior_recovery.get("unresolved_commands", []):
+                    pending_id = pending.get("command_id")
+                    if not isinstance(pending_id, str) or pending_id == command_id:
+                        continue
+                    _append_command_journal(
+                        paths,
+                        journal_rows,
+                        command_id=pending_id,
+                        phase="recovered",
+                        command=pending.get("command"),
+                        target_ref=pending.get("target_ref"),
+                        pre_event_count=pending.get("pre_event_count"),
+                        pre_state_digest=pending.get("pre_state_digest"),
+                        post_event_count=post["event_count"],
+                        post_state_digest=post["state_digest"],
+                        recovery_command_id=command_id,
+                    )
+                    recovered_command_ids.append(pending_id)
+            diagnostic = stderr_buffer.getvalue().strip()
+            _append_command_journal(
+                paths,
+                journal_rows,
+                command_id=command_id,
+                phase="finished",
+                command=args.command,
+                target_ref=target_ref,
+                pre_event_count=pre["event_count"],
+                pre_state_digest=pre["state_digest"],
+                post_event_count=post["event_count"],
+                post_state_digest=post["state_digest"],
+                exit_code=code,
+                committed=committed,
+                partial=partial,
+                batch_context=batch_context,
+                diagnostic=diagnostic[:1000] or None,
+            )
+    except (OSError, TypeError, ValueError) as exc:
+        journal_failure = exc
+        code = 1
+        partial = committed
+        print(
+            f"command journal failure after research command: {exc}",
+            file=stderr_buffer,
+        )
+
+    recovery_plan = _execution_recovery_plan(
+        paths,
+        command=args.command,
+        target_ref=target_ref,
+        exit_code=code,
+        committed=committed,
+        partial=partial,
+        observation=post,
+    )
+    captured_output = stdout_buffer.getvalue().strip()
+    command_result: dict[str, Any] | None = None
+    if captured_output:
+        try:
+            parsed = json.loads(captured_output)
+            if isinstance(parsed, dict):
+                command_result = parsed
+        except json.JSONDecodeError:
+            command_result = None
+    payload: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "run_id": paths.run_id,
+        "command": args.command,
+        "command_id": command_id if started_written else None,
+        "target_ref": target_ref,
+        "exit_code": code,
+        "committed": committed,
+        "partial": partial,
+        "pre_event_count": pre["event_count"],
+        "post_event_count": post["event_count"],
+        "pre_state_digest": pre["state_digest"],
+        "post_state_digest": post["state_digest"],
+        "pre_ledger_counts": pre["ledger_counts"],
+        "post_ledger_counts": post["ledger_counts"],
+        "active_actions_before": pre["active_actions"],
+        "active_actions_after": post["active_actions"],
+        "cache_warnings_after": post["cache_warnings"],
+        "batch_context": batch_context,
+        "recovery_plan": recovery_plan,
+        "recovered_command_ids": recovered_command_ids,
+        "command_output": captured_output or None,
+        "journal_failure": str(journal_failure) if journal_failure else None,
+        "exception": caught.__class__.__name__ if caught else None,
+    }
+    if command_result is not None:
+        payload["result"] = command_result
+        for key, value in command_result.items():
+            payload.setdefault(key, value)
+    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    diagnostic_output = stderr_buffer.getvalue()
+    if diagnostic_output:
+        print(diagnostic_output, file=sys.stderr, end="")
+    return code
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     try:
@@ -2977,9 +3545,11 @@ def main(argv: list[str] | None = None) -> int:
     except SystemExit as exc:
         return int(exc.code) if isinstance(exc.code, int) else 2
     try:
-        read_only = args.command in {"status", "suggest-next", "validate"}
+        read_only = args.command not in MUTATING_COMMANDS
         with _run_lock(_paths(args), exclusive=not read_only):
-            return args.func(args)
+            if read_only:
+                return args.func(args)
+            return _run_mutating_command(args, _paths(args))
     except (
         AttributeError,
         FileNotFoundError,

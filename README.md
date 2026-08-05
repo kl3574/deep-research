@@ -1,6 +1,6 @@
 # deep-research
 
-一套面向 Codex agent 的可审计深度调研技能，覆盖六个正交能力：
+一套面向 Codex agent 的可审计深度调研技能，覆盖九个正交能力：
 
 ```text
 研究问题
@@ -8,13 +8,16 @@
   → $research-knowledge-network：持久化证据网络、coverage 与缺口派生、冲突建模
   → $network-gap-discovery：开放世界查漏、缺失内容假设、反证与 patch proposal
   → $scholar-discovery：多源学术发现、查询留痕、保守去重与候选排序
+  → $scholarly-source-acquisition：合法全文获取、PDF身份与哈希验证
+  → $scholarly-document-normalization：本地PDF文本质量分类、OCR衍生与谱系验证
   → $learn-from-papers：对关键单篇论文进行证据级深读与重建
   → $curate-research-to-zotero：快照、下载、导入、读回，持续同步目标库
+  → $research-network-publish：验证网络的隐私安全自包含 HTML 发布
 ```
 
 “深度”不是堆积来源，而是把时间和模型开销放在真正控制结论的瓶颈上；“可信”不是固定来源排行榜，而是版本、范围、局部适配和失败边界都能被持续验收。
 
-## 六个技能
+## 九个默认技能与一个实验执行器
 
 | 技能 | 职责 | 典型输入 | 核心产物 |
 | --- | --- | --- | --- |
@@ -23,11 +26,24 @@
 | `$research-knowledge-network` | 将来源证据、实体、主张、关系持久化为可审计网络并派生知识缺口 | evidence card、术语表、实验摘要、审稿点 | 证据网络、coverage 概览、冲突视图、可复验缺口列表 |
 | `$network-gap-discovery` | 在开放世界假设下自主提出并反证可能缺失的节点、关系、边界或证据 | `KnowledgeNetwork/v1`、competency questions、既有 gap | gap hypotheses、定向检索请求、`NetworkPatchProposal/v2` |
 | `$scholar-discovery` | 对一个明确证据需要执行可复现的多源论文发现 | gap search test、主题条件、种子论文 | query plan、检索账本、去重 work families、排序候选与失败状态 |
+| `$scholarly-source-acquisition` | 将已接受候选合法获取为可复验全文资产 | DOI、开放URL、候选身份 | acquisition plan、PDF magic/大小/哈希、失败状态 |
+| `$scholarly-document-normalization` | 分类本地PDF文本质量并生成可追溯OCR衍生物 | 已获取PDF、可选source bundle | 逐页质量、显式skip或searchable PDF谱系、review gate |
 | `$curate-research-to-zotero` | 保存经审核的研究资产 | 来源清单、本地文件、Zotero 目标 | 文件哈希、ingestion manifest、PDF/元数据/笔记同步与 readback |
+| `$research-network-publish` | 将验证网络投影为可分享视图 | `KnowledgeNetwork/v1`、可选研究地图 | 自包含 HTML、coverage/gap/conflict 视图、隐私审计 |
 
-六个技能可独立调用，或由 `$deep-research` 统筹。Google Scholar 仅支持用户
+九个技能可独立调用，或由 `$deep-research` 统筹。Google Scholar 仅支持用户
 手工检索与导出导入；自主检索使用有正式接口的学术数据源，不能抓取 Scholar
 结果页或绕过 CAPTCHA。
+
+实验性配套执行器 `$zotero-declarative-bridge` 只负责已审核 manifest 的
+existing-parent collection membership、子笔记与 PDF 附件事务。其 `0.1.1`
+离线协议测试通过，但 Zotero `9.0.6` loader 在本次真实测试中拒绝插件；它未
+激活且执行了 `0` 次写入，因此不属于默认 Codex 安装集，也不得作为可用交付
+路径宣传。详情见 [v0.6.0 release notes](docs/releases/v0.6.0.md)。
+
+设计取舍与高质量外部方案的一手证据对照见
+[外部同类系统审计](docs/analogous-systems-review.md)。审计区分报告生成、科学
+RAG、主动筛选、研究知识图谱与完整 Zotero 读写闭环，避免把相邻能力夸大为等价实现。
 
 ## 核心方法
 
@@ -52,17 +68,21 @@
 ## 安装
 
 ```bash
-git clone --branch v0.5.0 --depth 1 https://github.com/kl3574/deep-research.git
+git clone --branch v0.6.0 --depth 1 https://github.com/kl3574/deep-research.git
 cd deep-research
 mkdir -p ~/.codex/skills
 stamp="$(date +%Y%m%d%H%M%S)"
-for skill in deep-research learn-from-papers research-knowledge-network network-gap-discovery scholar-discovery curate-research-to-zotero; do
+for skill in deep-research learn-from-papers research-knowledge-network network-gap-discovery scholar-discovery scholarly-source-acquisition scholarly-document-normalization curate-research-to-zotero research-network-publish; do
   if [ -e "$HOME/.codex/skills/$skill" ] || [ -L "$HOME/.codex/skills/$skill" ]; then
     mv "$HOME/.codex/skills/$skill" "$HOME/.codex/skills/${skill}.backup-${stamp}"
   fi
   cp -a "skills/$skill" "$HOME/.codex/skills/$skill"
 done
 ```
+
+默认循环故意不安装 `zotero-declarative-bridge`。只有兼容 Zotero loader 的
+激活、probe、preview、apply 与 readback 在隔离夹具上全部通过后，才能另行
+评估其安装；离线 XPI 构建或单元测试不是启用证据。
 
 固定 tag、保留旧安装备份并复制实体目录，避免开发分支漂移或重复技能根。
 重启 Codex 会话后技能才会被重新发现。
@@ -133,6 +153,26 @@ skills/
 │   ├── agents/openai.yaml
 │   ├── references/
 │   └── scripts/
+├── scholarly-source-acquisition/
+│   ├── SKILL.md
+│   ├── agents/openai.yaml
+│   ├── references/
+│   └── scripts/
+├── scholarly-document-normalization/
+│   ├── SKILL.md
+│   ├── agents/openai.yaml
+│   ├── references/
+│   └── scripts/
+├── research-network-publish/
+│   ├── SKILL.md
+│   ├── agents/openai.yaml
+│   ├── references/
+│   └── scripts/
+├── zotero-declarative-bridge/        # experimental; not installed by default
+│   ├── SKILL.md
+│   ├── agents/openai.yaml
+│   ├── references/
+│   └── scripts/
 └── curate-research-to-zotero/
     ├── SKILL.md
     ├── agents/openai.yaml
@@ -161,6 +201,11 @@ python -m unittest discover -s skills/learn-from-papers/scripts -p 'test_*.py'
 python -m unittest discover -s skills/research-knowledge-network/scripts -p 'test_*.py'
 python -m unittest discover -s skills/network-gap-discovery/scripts -p 'test_*.py'
 python -m unittest discover -s skills/scholar-discovery/scripts -p 'test_*.py'
+python -m unittest discover -s skills/scholarly-source-acquisition/scripts -p 'test_*.py'
+python -m unittest discover -s skills/scholarly-document-normalization/scripts -p 'test_*.py'
+python -m unittest discover -s skills/research-network-publish/scripts -p 'test_*.py'
+python -m unittest discover -s skills/zotero-declarative-bridge/scripts -p 'test_*.py'
+node --test skills/zotero-declarative-bridge/scripts/test_bridge_core.js
 python -m unittest discover -s skills/curate-research-to-zotero/scripts -p 'test_*.py'
 python -m unittest discover -s evals/real-world -p 'test_*.py'
 python -m unittest discover -s evals/learn-from-papers -p 'test_*.py'

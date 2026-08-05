@@ -177,3 +177,13 @@ Run `project-note-input` only for downstream machines that explicitly ingest
 `map` readings can still produce dossier records and audit traces, but they remain
 non-projectable to note-input and should be recorded as terminal coverage when used
 as basis for downstream automation.
+
+## Batch verification request projection
+
+Build claim requests only from the authoritative top-level `claims` array.
+`claim_id` deliberately recurs in `evidence_records` and
+`unresolved_terminal_states`; recursive object indexing can select a non-claim
+row and silently preserve stale statements or scopes. Bind a frozen request
+digest, preserve failed verifier results, and generate a new request digest after
+any claim change. Do not upgrade verification state until the new request is
+independently reviewed.

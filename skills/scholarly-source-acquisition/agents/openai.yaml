@@ -1,0 +1,5 @@
+interface:
+  display_name: "Scholarly Source Acquisition"
+  short_description: "Acquire open scholarly PDFs with audited handoffs"
+  default_prompt: "Use $scholarly-source-acquisition to safely acquire this explicit scholarly PDF candidate and produce a verified source-bundle handoff."
+

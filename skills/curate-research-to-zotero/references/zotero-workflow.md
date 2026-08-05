@@ -16,11 +16,19 @@ collection-creation or explicit-target capabilities. If a supported
 collection-create route is absent, ask the user to create/select the collection
 in the desktop UI, then repeat the readback gate.
 
-For existing-note updates and approved child-note creation under an existing
-parent, Zotero Desktop's official
+For existing-parent membership, note, and PDF mutations, prefer the constrained
+`$zotero-declarative-bridge` plugin after separate code review and visible
+installation. It uses Zotero's official plugin and JavaScript APIs but exposes
+only three manifest operations behind a private capability, HMAC, single-use
+preview, transaction repreflight, and readback. It does not expose arbitrary
+JavaScript, edit SQLite, or obtain sync credentials.
+
+When that reviewed plugin is unavailable, existing-note updates and approved
+child-note creation can use Zotero Desktop's official
 [**Tools → Developer → Run JavaScript** surface](https://www.zotero.org/support/dev/client_coding/javascript_api)
-is a no-key route when the user can paste and run the generated script in the
-app. Prefer it for an approved local batch because all notes can be rechecked
+as a user-operated no-key fallback when the user can paste and run the generated
+script in the app. Do not drive this surface with blind UI automation. The
+fallback can recheck
 and updated or created inside one Zotero database transaction:
 
 1. stage and validate migration manifest v2, including `group_id`,

@@ -420,6 +420,26 @@ def span_id(digest: str) -> str:
     return f"{SPAN_PREFIX}{digest[:16]}"
 
 
+def _version_banner(
+    completed: subprocess.CompletedProcess[str],
+    *,
+    command: str,
+    executable: str,
+) -> str | None:
+    tool_names = {Path(command).name.casefold(), Path(executable).name.casefold()}
+    for stream in (completed.stdout, completed.stderr):
+        for raw_line in (stream or "").splitlines():
+            line = raw_line.strip()
+            folded = line.casefold()
+            for tool_name in tool_names:
+                prefix = f"{tool_name} version "
+                if folded.startswith(prefix):
+                    version = line[len(prefix) :].strip()
+                    if version and version[0].isdigit():
+                        return line
+    return None
+
+
 def _run_tool_version(command: str, *, required: bool = False) -> dict[str, Any]:
     executable = shutil.which(command)
     if executable is None:
@@ -433,43 +453,42 @@ def _run_tool_version(command: str, *, required: bool = False) -> dict[str, Any]
             "version": None,
         }
 
-    try:
-        completed = subprocess.run(
-            [executable, "--version"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        status = "failed"
-        if required:
-            raise ContractError(f"required tool failed to run: {command}") from exc
-        return {
-            "command": command,
-            "available": False,
-            "status": status,
-            "version": None,
-        }
+    last_version = None
+    last_exception: OSError | subprocess.TimeoutExpired | None = None
+    for version_flag in ("--version", "-v"):
+        try:
+            completed = subprocess.run(
+                [executable, version_flag],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            last_exception = exc
+            continue
 
-    payload = (completed.stdout or completed.stderr or "").strip().splitlines()
-    version = payload[0].strip() if payload else None
-    status = "ok" if completed.returncode == 0 else "failed"
-    if required and status != "ok":
+        version = _version_banner(completed, command=command, executable=executable)
+        if version is not None:
+            last_version = version
+        if completed.returncode == 0 and version is not None:
+            return {
+                "command": command,
+                "available": True,
+                "status": "ok",
+                "version": version,
+            }
+
+    if required and last_exception is not None and last_version is None:
+        raise ContractError(f"required tool failed to run: {command}") from last_exception
+    if required:
         raise ContractError(f"required tool is unavailable: {command}")
-    if status != "ok" and not required and completed.returncode != 0:
-        return {
-            "command": command,
-            "available": False,
-            "status": "failed",
-            "version": version,
-        }
     return {
         "command": command,
-        "available": True,
-        "status": "ok",
-        "version": version,
+        "available": False,
+        "status": "failed",
+        "version": last_version,
     }
 
 

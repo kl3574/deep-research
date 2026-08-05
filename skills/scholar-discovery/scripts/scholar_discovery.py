@@ -27,6 +27,8 @@ PLAN_SCHEMA = "ScholarQueryPlan/v1"
 BATCH_SCHEMA = "ScholarResultBatch/v1"
 RESULT_SCHEMA = "ScholarDiscoveryResult/v1"
 RESULT_SET_SCHEMA = "ScholarDiscoveryResultSet/v1"
+TOPIC_NEED_SET_SCHEMA = "ResearchTopicNeedSet/v1"
+PREFLIGHT_SCHEMA = "ScholarDiscoveryPreflight/v1"
 REQUEST_SET_SCHEMA_VERSION = "v1"
 PAPER_UNDERSTANDING_GAP_SCHEMA = "PaperUnderstandingGap/v1"
 
@@ -135,6 +137,11 @@ SENSITIVE_GAP_QUERY_PATTERNS = (
     re.compile(r"\b(?=[A-Z0-9]{8}\b)(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*[0-9])[A-Z0-9]{8}\b"),
     re.compile(r"\b[0-9a-f]{32,64}\b", re.I),
     re.compile(r"\b(?:gap|relation|node|entity)[:_-][A-Za-z0-9._-]+", re.I),
+)
+STRUCTURAL_PLACEHOLDER_PATTERNS = (
+    re.compile(r"\bnetwork\s+dimension\b", re.I),
+    re.compile(r"\bsemantic\s+enrichment\s+required\b", re.I),
+    re.compile(r"\b(?:missing[-_ ]dimension|validation_target|surrogate_family|task_type)\b", re.I),
 )
 
 ENDPOINT_HINTS = {
@@ -591,6 +598,241 @@ def compile_understanding_gap_request(
         "understanding_gap": gap,
     }
     return validate_request(request)
+
+
+def _topic_defaults(value: Any, label: str) -> dict[str, Any]:
+    if value is None:
+        value = {}
+    result = copy.deepcopy(require_dict(value, label))
+    result.setdefault("years", {"from": None, "to": None})
+    for key in ("authors", "venues", "languages", "work_types"):
+        result.setdefault(key, [])
+    result.setdefault("open_access", None)
+    return result
+
+
+def _seed_defaults(value: Any, label: str) -> dict[str, Any]:
+    if value is None:
+        value = {}
+    result = copy.deepcopy(require_dict(value, label))
+    for key in ("doi", "arxiv", "pmid", "openalex", "semantic_scholar", "titles"):
+        result.setdefault(key, [])
+    return result
+
+
+def _budget_defaults(value: Any, label: str) -> dict[str, Any]:
+    if value is None:
+        value = {}
+    result = copy.deepcopy(require_dict(value, label))
+    result.setdefault("max_rounds", 2)
+    result.setdefault("max_queries", 12)
+    result.setdefault("max_candidates", 100)
+    result.setdefault("timeout_seconds", 900)
+    return result
+
+
+def _assert_topic_query_is_semantic(
+    query: str,
+    criteria_must: list[str],
+    label: str,
+) -> None:
+    _assert_safe_gap_query_text(query, label)
+    if any(pattern.search(query) for pattern in STRUCTURAL_PLACEHOLDER_PATTERNS):
+        raise ContractError(f"{label} contains a structural placeholder instead of domain terms")
+    normalized = " ".join(query.casefold().split())
+    anchors = [" ".join(term.casefold().split()) for term in criteria_must]
+    if not anchors or not any(anchor in normalized for anchor in anchors):
+        raise ContractError(f"{label} must contain at least one criteria.must domain anchor")
+    if len(normalized.split()) < 3:
+        raise ContractError(f"{label} is too broad for targeted discovery")
+
+
+def compile_topic_need_set(value: Any) -> dict[str, Any]:
+    """Compile domain-grounded topic needs into one validated request set."""
+    document = copy.deepcopy(require_dict(value, "topic_need_set"))
+    if document.get("schema") != TOPIC_NEED_SET_SCHEMA:
+        raise ContractError(f"topic_need_set.schema must equal {TOPIC_NEED_SET_SCHEMA}")
+    if document.get("schema_version", REQUEST_SET_SCHEMA_VERSION) != REQUEST_SET_SCHEMA_VERSION:
+        raise ContractError("topic_need_set.schema_version is unsupported")
+    require_string(document.get("topic_id"), "topic_need_set.topic_id")
+    require_string(document.get("question"), "topic_need_set.question")
+    as_of = require_timestamp(document.get("as_of"), "topic_need_set.as_of")
+    google_policy = require_string(
+        document.get("google_scholar_policy", "manual_optional"),
+        "topic_need_set.google_scholar_policy",
+    ).lower()
+    if google_policy not in GOOGLE_POLICIES:
+        raise ContractError(
+            f"topic_need_set.google_scholar_policy must be one of {sorted(GOOGLE_POLICIES)}"
+        )
+    automatic = [
+        normalize_provider(provider, f"topic_need_set.automatic_providers[{index}]")
+        for index, provider in enumerate(
+            require_string_list(
+                document.get("automatic_providers", ["crossref", "semantic_scholar"]),
+                "topic_need_set.automatic_providers",
+            )
+        )
+    ]
+    if GOOGLE_PROVIDER in automatic:
+        raise ContractError("Google Scholar must never be an automatic provider")
+
+    network_ref_value = validate_network_ref(
+        document.get("network_ref"), "topic_need_set.network_ref"
+    )
+    needs = document.get("needs")
+    if not isinstance(needs, list) or not needs:
+        raise ContractError("topic_need_set.needs must be a non-empty list")
+    if len(needs) > 50:
+        raise ContractError("topic_need_set.needs exceeds the bounded limit of 50")
+
+    requests: list[dict[str, Any]] = []
+    seen_gap_ids: set[str] = set()
+    for index, raw_need in enumerate(needs):
+        label = f"topic_need_set.needs[{index}]"
+        need = require_dict(raw_need, label)
+        gap_id = require_string(need.get("gap_id"), f"{label}.gap_id")
+        if gap_id in seen_gap_ids:
+            raise ContractError(f"duplicate topic need gap_id: {gap_id}")
+        seen_gap_ids.add(gap_id)
+        if gap_id.startswith("derived:missing-dimension:"):
+            raise ContractError(f"{label}.gap_id is structural and must be semantically seeded first")
+        paper_need = require_string(need.get("paper_need"), f"{label}.paper_need")
+        _assert_safe_gap_query_text(paper_need, f"{label}.paper_need")
+        criteria = copy.deepcopy(require_dict(need.get("criteria"), f"{label}.criteria"))
+        for group in ("must", "should", "must_not"):
+            criteria[group] = require_string_list(
+                criteria.get(group, []), f"{label}.criteria.{group}"
+            )
+            for term_index, term in enumerate(criteria[group]):
+                _assert_safe_gap_query_text(term, f"{label}.criteria.{group}[{term_index}]")
+        if not criteria["must"]:
+            raise ContractError(f"{label}.criteria.must must contain a domain anchor")
+
+        query_seeds = copy.deepcopy(need.get("query_seeds"))
+        if not isinstance(query_seeds, list) or not query_seeds:
+            raise ContractError(f"{label}.query_seeds must be a non-empty list")
+        objectives: set[str] = set()
+        for query_index, seed in enumerate(query_seeds):
+            seed = require_dict(seed, f"{label}.query_seeds[{query_index}]")
+            objective = require_string(
+                seed.get("objective"), f"{label}.query_seeds[{query_index}].objective"
+            )
+            if objective not in QUERY_OBJECTIVES:
+                raise ContractError(f"{label}.query_seeds[{query_index}].objective is unsupported")
+            query = require_string(
+                seed.get("query"), f"{label}.query_seeds[{query_index}].query"
+            )
+            _assert_topic_query_is_semantic(
+                query,
+                criteria["must"],
+                f"{label}.query_seeds[{query_index}].query",
+            )
+            objectives.add(objective)
+        if not {"confirm", "refute"}.issubset(objectives):
+            raise ContractError(f"{label}.query_seeds must include confirm and refute")
+
+        stable_need = {
+            "gap_id": gap_id,
+            "paper_need": paper_need,
+            "criteria": criteria,
+            "query_seeds": query_seeds,
+        }
+        request_id = "SDR-TOPIC-" + sha256_json(stable_need)[:16]
+        request = {
+            "schema": REQUEST_SCHEMA,
+            "request_id": request_id,
+            "paper_need": paper_need,
+            "intent": need.get("intent", "topic_set"),
+            "effort": need.get("effort", "diligent"),
+            "criteria": criteria,
+            "metadata_filters": _topic_defaults(
+                need.get("metadata_filters"), f"{label}.metadata_filters"
+            ),
+            "seeds": _seed_defaults(need.get("seeds"), f"{label}.seeds"),
+            "routes": {
+                "automatic": list(dict.fromkeys(automatic)),
+                "google_scholar": google_policy,
+            },
+            "budgets": _budget_defaults(need.get("budgets"), f"{label}.budgets"),
+            "query_seeds": query_seeds,
+            "as_of": as_of,
+            "gap_ref": {
+                "gap_id": gap_id,
+                "network_id": network_ref_value["network_id"],
+            },
+            "gap_hypothesis_id": gap_id,
+        }
+        requests.append(validate_request(request))
+
+    request_set = {
+        "schema": REQUEST_SET_SCHEMA,
+        "schema_version": REQUEST_SET_SCHEMA_VERSION,
+        "request_set_id": "",
+        "request_set_digest": "",
+        "requests": requests,
+        "network_id": network_ref_value["network_id"],
+        "network_snapshot_sha256": network_ref_value["sha256"],
+        "network_ref": network_ref_value,
+        "generated_at": as_of,
+    }
+    digest = canonical_request_set_digest(request_set)
+    request_set["request_set_digest"] = digest
+    request_set["request_set_id"] = f"request-set-{digest[:16]}"
+    return validate_request_set(request_set)
+
+
+def build_preflight(value: Any) -> dict[str, Any]:
+    request_set = validate_request_set(copy.deepcopy(value))
+    providers = sorted(
+        {
+            provider
+            for request in request_set["requests"]
+            for provider in request["routes"]["automatic"]
+        }
+    )
+    checks = []
+    for provider in providers:
+        configured = True
+        limitations: list[str] = []
+        if provider == "openalex" and not os.getenv(OPENALEX_API_KEY_ENV, "").strip():
+            configured = False
+            limitations = ["missing_api_key"]
+        elif provider == "semantic_scholar" and not os.getenv(
+            SEMANTIC_SCHOLAR_API_KEY_ENV, ""
+        ).strip():
+            limitations = ["anonymous_rate_limit_risk"]
+        elif provider not in EXECUTABLE_PROVIDERS:
+            configured = False
+            limitations = ["provider_not_implemented"]
+        checks.append(
+            {
+                "provider": provider,
+                "configured": configured,
+                "limitations": limitations,
+            }
+        )
+    google_policies = sorted(
+        {request["routes"]["google_scholar"] for request in request_set["requests"]}
+    )
+    return {
+        "schema": PREFLIGHT_SCHEMA,
+        "schema_version": REQUEST_SET_SCHEMA_VERSION,
+        "request_set_id": request_set["request_set_id"],
+        "request_set_digest": request_set["request_set_digest"],
+        "automatic_providers": checks,
+        "google_scholar": {
+            "execution": "user_manual_export",
+            "policies": google_policies,
+            "automatic": False,
+            "manual_artifact_required": any(
+                policy == "manual_required" for policy in google_policies
+            ),
+        },
+        "ready_automatic_provider_count": sum(
+            1 for check in checks if check["configured"]
+        ),
+    }
 
 
 def validate_request_set(value: Any) -> dict[str, Any]:
@@ -2461,6 +2703,19 @@ def parser() -> argparse.ArgumentParser:
     )
     compile_gap.add_argument("--output", required=True)
 
+    compile_topic = subcommands.add_parser(
+        "compile-topic",
+        help="compile a domain-grounded ResearchTopicNeedSet/v1",
+    )
+    compile_topic.add_argument("--topic-needs", required=True)
+    compile_topic.add_argument("--output", required=True)
+
+    preflight = subcommands.add_parser(
+        "preflight", help="report provider configuration without network access"
+    )
+    preflight.add_argument("--request-set", required=True)
+    preflight.add_argument("--output", required=True)
+
     validate = subcommands.add_parser("validate", help="validate one contract")
     validate.add_argument("--input", required=True)
 
@@ -2494,6 +2749,16 @@ def main(argv: list[str] | None = None) -> int:
                     as_of=args.as_of,
                     google_scholar_policy=args.google_scholar_policy,
                 ),
+            )
+        elif args.command == "compile-topic":
+            write_json(
+                args.output,
+                compile_topic_need_set(load_json(args.topic_needs)),
+            )
+        elif args.command == "preflight":
+            write_json(
+                args.output,
+                build_preflight(load_json(args.request_set)),
             )
         else:
             validated = validate_any(load_json(args.input))

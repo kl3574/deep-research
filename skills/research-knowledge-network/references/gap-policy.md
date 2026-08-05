@@ -39,3 +39,12 @@ Completion is allowed only when:
 - no open high-impact gaps
 - no open conflicts
 - no unmet promised coverage dimensions/benchmarks
+- no latest open claimless explicit gap declared `P0` or `P1`
+- no latest open claimless explicit gap with `decision_impact=high`
+
+Decisive coverage is support-only: only active `supports` evidence can satisfy
+a promised dimension/profile. `qualifies`, `contradicts`, and `not_tested` are
+retained for boundaries and conflicts but never fill coverage. For schema-v1
+gap rows that predate `priority` and `decision_impact`, `impact=high|medium` is
+the explicit compatibility mapping to a blocking P0/P1-class gap; `impact=low`
+remains non-blocking. Transitions preserve the optional priority fields.

@@ -1,0 +1,5 @@
+interface:
+  display_name: "Research Network Publish"
+  short_description: "Publish verified research networks as safe HTML"
+  default_prompt: "Use research-network-publish to validate an existing KnowledgeNetwork/v1 and render a deterministic, self-contained HTML publication without changing research state."
+

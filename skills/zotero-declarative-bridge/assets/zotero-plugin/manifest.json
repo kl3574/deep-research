@@ -1,0 +1,14 @@
+{
+  "manifest_version": 2,
+  "name": "Zotero Declarative Bridge",
+  "version": "0.1.1",
+  "description": "Constrained, capability-bound local transactions for reviewed Zotero manifests.",
+  "author": "deep-research",
+  "applications": {
+    "zotero": {
+      "id": "zotero-declarative-bridge@deep-research.local",
+      "strict_min_version": "9.0",
+      "strict_max_version": "9.0.*"
+    }
+  }
+}

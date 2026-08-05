@@ -20,8 +20,19 @@ Separate acquisition from authorized Zotero writes.
 
 Load [zotero-workflow.md](references/zotero-workflow.md). Approve the exact target, batch, files, conflicts, and effects; immediately probe and dry-run.
 
-- New records/PDFs: use a documented route and supported [import_zotero_bundle.py](scripts/import_zotero_bundle.py).
-- Existing/missing child notes: use [prepare_note_migration.py](scripts/prepare_note_migration.py) and its manifest-bound Desktop transaction. [update_existing_note.py](scripts/update_existing_note.py) is a gated fallback.
+- New records/PDFs: use a documented route and supported [import_zotero_bundle.py](scripts/import_zotero_bundle.py). A metadata-only parent must set `access_level=metadata_only`, omit `pdf`, include `metadata_only_reason`, and use the explicit schema-9 `data-access-level="metadata_only"` note projection with visible missing-full-text disclosure and metadata provenance. That projection contains no PDF/full-text hash or claim row and is never full-text evidence. Full-text and `PaperKnowledgeNote/v2` notes retain the strict verified-PDF and 64-hex full-text-hash contract.
+- Existing-parent collection membership, child-note creation/update, or PDF
+  attachment: stage the existing closed manifests here, then prefer the
+  orthogonal `$zotero-declarative-bridge` execution layer. It accepts only
+  those three operations and adds capability, preview, version/hash, readback,
+  and idempotence guards without arbitrary JavaScript or SQLite access.
+- Missing local PDFs on already verified parents: use the closed, byte-bound
+  [attachment repair workflow](references/attachment-repair.md) and
+  [zotero_attachment_repair.py](scripts/zotero_attachment_repair.py) to produce
+  the source manifest. It only adds a verified PDF to the exact existing parent
+  or records a metadata-only skip; it never replaces an attachment or edits
+  parent metadata.
+- Existing/missing child notes: use [prepare_note_migration.py](scripts/prepare_note_migration.py), then compile that manifest for the declarative bridge. The generated Run JavaScript transaction and [update_existing_note.py](scripts/update_existing_note.py) remain user-operated gated fallbacks when the reviewed bridge plugin is unavailable.
 
 Stop on ambiguity or drift. Never expose credentials, edit SQLite, publish private artifacts, duplicate parents, or destructively alter records without separate approval.
 

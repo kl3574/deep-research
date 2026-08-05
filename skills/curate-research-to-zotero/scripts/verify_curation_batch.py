@@ -12,6 +12,8 @@ import re
 import sys
 from typing import Any
 
+from verify_note_html import validate_note
+
 
 DIGEST_RE = re.compile(r"^(?:sha256:)?([0-9a-f]{64})$")
 ITEM_KEY_RE = re.compile(r"^[A-Z0-9]{8}$")
@@ -51,6 +53,14 @@ NOTE_SECTIONS = [
     "知识图谱关系",
     "复用",
     "溯源",
+]
+PAPER_KNOWLEDGE_NOTE_CONTRACT = "PaperKnowledgeNote/v2"
+PAPER_KNOWLEDGE_NOTE_SECTIONS = [
+    "适用场景与结论",
+    "工作流程与 I/O / 数据流",
+    "数学原理与推导",
+    "算法原理",
+    "证据、边界与溯源",
 ]
 SUCCESS_STATES = [
     "mapped",
@@ -236,7 +246,10 @@ def validate_target_fingerprint(
 class _NoteParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
+        self.seen_root = False
         self.schema_version: str | None = None
+        self.note_contract: str | None = None
+        self.access_level: str | None = None
         self.capture = False
         self.parts: list[str] = []
         self.headings: list[str] = []
@@ -244,8 +257,15 @@ class _NoteParser(HTMLParser):
     def handle_starttag(
         self, tag: str, attrs: list[tuple[str, str | None]]
     ) -> None:
-        if tag == "div" and self.schema_version is None:
-            self.schema_version = dict(attrs).get("data-schema-version")
+        if not self.seen_root:
+            self.seen_root = True
+            values = {key: value or "" for key, value in attrs}
+            if tag == "div":
+                self.schema_version = values.get("data-schema-version")
+                self.note_contract = values.get("data-note-contract") or None
+                self.access_level = (
+                    values.get("data-access-level", "").strip().lower() or None
+                )
         if tag == "h2":
             self.capture = True
             self.parts = []
@@ -510,8 +530,76 @@ def validate_entry(
             else:
                 if parser.schema_version != "9":
                     errors.append(f"{label}.note_artifact: root is not schema 9")
-                if parser.headings != NOTE_SECTIONS:
-                    errors.append(f"{label}.note_artifact: section order mismatch")
+                if parser.note_contract == PAPER_KNOWLEDGE_NOTE_CONTRACT:
+                    note_errors, _, summary = validate_note(
+                        note_path.read_text(encoding="utf-8")
+                    )
+                    errors.extend(
+                        f"{label}.note_artifact: {error}" for error in note_errors
+                    )
+                    if parser.access_level == "metadata_only":
+                        errors.append(
+                            f"{label}.note_artifact: PaperKnowledgeNote/v2 "
+                            "cannot use the metadata-only marker"
+                        )
+                    if parser.headings != PAPER_KNOWLEDGE_NOTE_SECTIONS:
+                        errors.append(
+                            f"{label}.note_artifact: PaperKnowledgeNote/v2 "
+                            "section order mismatch"
+                        )
+                    if isinstance(summary, dict) and summary.get("access_level") != "full_text":
+                        errors.append(
+                            f"{label}.note_artifact: PaperKnowledgeNote/v2 "
+                            "must validate as full_text"
+                        )
+                    if fulltext != "fulltext_verified":
+                        errors.append(
+                            f"{label}.note_artifact: PaperKnowledgeNote/v2 "
+                            "requires fulltext_verified entry status"
+                        )
+                elif parser.note_contract is not None:
+                    errors.append(
+                        f"{label}.note_artifact: unsupported data-note-contract "
+                        f"'{parser.note_contract}'"
+                    )
+                elif parser.access_level == "metadata_only":
+                    note_errors, _, summary = validate_note(
+                        note_path.read_text(encoding="utf-8")
+                    )
+                    errors.extend(
+                        f"{label}.note_artifact: {error}" for error in note_errors
+                    )
+                    if parser.headings != NOTE_SECTIONS:
+                        errors.append(
+                            f"{label}.note_artifact: metadata-only section order mismatch"
+                        )
+                    if not isinstance(summary, dict) or summary.get(
+                        "note_projection"
+                    ) != "metadata_only":
+                        errors.append(
+                            f"{label}.note_artifact: metadata-only marker did not "
+                            "validate as metadata_only"
+                        )
+                    if fulltext != "metadata_only":
+                        errors.append(
+                            f"{label}.note_artifact: metadata-only marker requires "
+                            "metadata_only entry status"
+                        )
+                elif parser.access_level in (None, "full_text"):
+                    if parser.headings != NOTE_SECTIONS:
+                        errors.append(
+                            f"{label}.note_artifact: legacy section order mismatch"
+                        )
+                    if fulltext == "metadata_only":
+                        errors.append(
+                            f"{label}.note_artifact: metadata_only entry requires "
+                            "the explicit metadata-only marker"
+                        )
+                else:
+                    errors.append(
+                        f"{label}.note_artifact: unsupported data-access-level "
+                        f"'{parser.access_level}'"
+                    )
 
     pdfs = entry.get("pdf_artifacts", [])
     if not isinstance(pdfs, list):
@@ -620,6 +708,56 @@ def validate_observed_target(
     ):
         errors.append("target_drift: mutable state fingerprint differs")
     return errors
+
+
+def _strict_json_equal(left: Any, right: Any) -> bool:
+    try:
+        return canonical_json_bytes(left) == canonical_json_bytes(right)
+    except (TypeError, ValueError):
+        return False
+
+
+def _is_blocked_entry(entry: dict[str, Any]) -> bool:
+    return entry.get("decision") in BLOCKED_DECISIONS
+
+
+def _is_no_mutation_effect(effect: Any) -> bool:
+    return (
+        isinstance(effect, dict)
+        and set(effect)
+        == {
+            "new_parent_count",
+            "target_membership",
+            "note_action",
+            "attachment_action",
+        }
+        and effect.get("new_parent_count") == 0
+        and not isinstance(effect.get("new_parent_count"), bool)
+        and isinstance(effect.get("target_membership"), bool)
+        and effect.get("note_action") == "no_op"
+        and effect.get("attachment_action") == "no_op"
+    )
+
+
+def _validate_blocked_result(
+    entry_id: str,
+    entry: dict[str, Any],
+    result: dict[str, Any] | None,
+    errors: list[str],
+) -> None:
+    expected_effect = entry.get("expected_effect")
+    if not _is_no_mutation_effect(expected_effect):
+        errors.append(f"execution: blocked entry {entry_id} expects mutation")
+    if result is None:
+        errors.append(f"execution: blocked entry {entry_id} lacks blocked result")
+        return
+    if result.get("status") != "blocked":
+        errors.append(f"execution: blocked entry {entry_id} status must be blocked")
+    observed_effect = result.get("observed_effect")
+    if not _strict_json_equal(observed_effect, expected_effect):
+        errors.append(f"execution: blocked entry {entry_id} effect mismatch")
+    if not _is_no_mutation_effect(observed_effect):
+        errors.append(f"execution: blocked entry {entry_id} reports mutation")
 
 
 def validate_execution(execution: Any, batch: dict[str, Any]) -> list[str]:
@@ -742,22 +880,34 @@ def validate_execution(execution: Any, batch: dict[str, Any]) -> list[str]:
         if result.get("status") not in RESULT_STATUSES:
             errors.append(f"{label}.status: invalid")
 
+    blocked_entries = {
+        entry_id: entry
+        for entry_id, entry in entry_map.items()
+        if _is_blocked_entry(entry)
+    }
+    golden_entries = {
+        entry_id: entry
+        for entry_id, entry in entry_map.items()
+        if not _is_blocked_entry(entry) and entry.get("gate_status") == "golden"
+    }
     if final_state in SUCCESS_STATES[3:]:
-        blocked = [
-            entry["entry_id"]
-            for entry in entries
-            if entry.get("gate_status") != "golden"
-        ]
-        if blocked:
+        for entry_id, entry in blocked_entries.items():
+            _validate_blocked_result(
+                entry_id, entry, result_map.get(entry_id), errors
+            )
+        unclassified = sorted(set(entry_map) - set(blocked_entries) - set(golden_entries))
+        if unclassified:
             errors.append(
-                f"execution: success path contains blocked entries {blocked}"
+                f"execution: success path contains non-golden actionable entries {unclassified}"
             )
     if final_state == "readback_verified":
-        for entry_id, entry in entry_map.items():
+        for entry_id, entry in golden_entries.items():
             result = result_map.get(entry_id)
             if result is None or result.get("status") != "readback_verified":
                 errors.append(f"execution: {entry_id} lacks readback result")
-            elif result.get("observed_effect") != entry.get("expected_effect"):
+            elif not _strict_json_equal(
+                result.get("observed_effect"), entry.get("expected_effect")
+            ):
                 errors.append(f"execution: {entry_id} readback effect mismatch")
     if final_state == "partial_commit":
         statuses = {value.get("status") for value in result_map.values()}

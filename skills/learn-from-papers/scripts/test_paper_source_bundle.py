@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest import TestCase, main
 from subprocess import CompletedProcess
 from unittest.mock import patch
@@ -173,6 +174,86 @@ class PaperSourceBundleTests(TestCase):
             with self.assertRaises(module.ContractError):
                 module.build_bundle(source=str(fake_pdf), output=str(fake_pdf.with_suffix(".json")))
 
+    def test_poppler_26_version_probe_falls_back_to_dash_v(self) -> None:
+        executable = "/tmp/fake_pdfinfo_poppler_26"
+
+        def fake_run(cmd, *args, **kwargs):  # type: ignore[no-untyped-def]
+            if cmd[1:] == ["--version"]:
+                return CompletedProcess(cmd, 99, stdout="", stderr="unknown option --version")
+            if cmd[1:] == ["-v"]:
+                return CompletedProcess(
+                    cmd,
+                    0,
+                    stdout="",
+                    stderr="pdfinfo version 26.01.0\nCopyright 2005-2026 The Poppler Developers",
+                )
+            raise AssertionError(f"unexpected command: {cmd}")
+
+        with patch.object(module.shutil, "which", return_value=executable), patch.object(
+            module.subprocess, "run", side_effect=fake_run
+        ) as run:
+            result = module._run_tool_version("pdfinfo", required=True)
+
+        self.assertEqual(
+            [call.args[0] for call in run.call_args_list],
+            [[executable, "--version"], [executable, "-v"]],
+        )
+        self.assertEqual(
+            result,
+            {
+                "command": "pdfinfo",
+                "available": True,
+                "status": "ok",
+                "version": "pdfinfo version 26.01.0",
+            },
+        )
+
+    def test_version_probe_does_not_accept_two_failed_attempts(self) -> None:
+        executable = "/tmp/fake_pdftotext_failed"
+
+        def fake_run(cmd, *args, **kwargs):  # type: ignore[no-untyped-def]
+            return CompletedProcess(
+                cmd,
+                1,
+                stdout="",
+                stderr="pdftotext version unavailable",
+            )
+
+        with patch.object(module.shutil, "which", return_value=executable), patch.object(
+            module.subprocess, "run", side_effect=fake_run
+        ):
+            result = module._run_tool_version("pdftotext", required=False)
+            with self.assertRaises(module.ContractError):
+                module._run_tool_version("pdftotext", required=True)
+
+        self.assertFalse(result["available"])
+        self.assertEqual(result["status"], "failed")
+
+    def test_version_probe_rejects_successful_non_version_output(self) -> None:
+        executable = "/tmp/fake_pdftoppm_help_only"
+
+        with patch.object(module.shutil, "which", return_value=executable), patch.object(
+            module.subprocess,
+            "run",
+            return_value=CompletedProcess(
+                [],
+                0,
+                stdout="unrelated version 2.0\nusage: pdftoppm [options]",
+                stderr="",
+            ),
+        ):
+            result = module._run_tool_version("pdftoppm", required=False)
+
+        self.assertEqual(
+            result,
+            {
+                "command": "pdftoppm",
+                "available": False,
+                "status": "failed",
+                "version": None,
+            },
+        )
+
     def test_example_manifest_roundtrip(self) -> None:
         example = json.loads(EXAMPLE_PATH.read_text(encoding="utf-8"))
         fixture_source = "alpha\fbeta"
@@ -254,6 +335,70 @@ class PaperSourceBundleTests(TestCase):
         self.assertEqual(manifest["source"]["format"], "pdf")
         self.assertEqual(manifest["page_count"], 2)
         self.assertEqual(len(manifest["rendered_pages"]), 2)
+
+    def test_pdf_verify_uses_dash_v_fallback_with_stderr_banner(self) -> None:
+        with TemporaryDirectory(prefix="paper_bundle_verify_poppler_") as tmp_dir:
+            workspace = Path(tmp_dir)
+            pdf_path = workspace / "paper.pdf"
+            pdf_path.write_text("%PDF-1.7 fake", encoding="utf-8")
+            bundle_path = workspace / "bundle.json"
+            fake_tools = {
+                "pdfinfo": "/tmp/fake_pdfinfo_verify_fallback",
+                "pdftotext": "/tmp/fake_pdftotext_verify_fallback",
+                "pdftoppm": "/tmp/fake_pdftoppm_verify_fallback",
+            }
+
+            def fake_which(name: str) -> str:
+                return fake_tools[name]
+
+            def fake_run(cmd, *args, **kwargs):  # type: ignore[no-untyped-def]
+                command = str(cmd[0])
+                if cmd[1:] == ["--version"]:
+                    return CompletedProcess(
+                        cmd,
+                        1,
+                        stdout="",
+                        stderr="unknown option --version",
+                    )
+                if cmd[1:] == ["-v"]:
+                    return CompletedProcess(
+                        cmd,
+                        0,
+                        stdout="",
+                        stderr=f"{Path(command).name} version 26.01.0\nCopyright Poppler",
+                    )
+                if command == fake_tools["pdfinfo"] and cmd[1:] == [str(pdf_path)]:
+                    return CompletedProcess(cmd, 0, stdout="Pages: 1")
+                if command == fake_tools["pdftotext"]:
+                    return CompletedProcess(cmd, 0, stdout="page 1 text")
+                raise AssertionError(f"unexpected command: {cmd}")
+
+            with patch.object(module.shutil, "which", side_effect=fake_which), patch.object(
+                module.subprocess, "run", side_effect=fake_run
+            ) as run:
+                manifest = module.build_bundle(
+                    source=str(pdf_path),
+                    output=str(bundle_path),
+                    generated_at=self.generated_at,
+                )
+                run.reset_mock()
+                verified = module.verify_bundle(bundle=str(bundle_path), source=str(pdf_path))
+
+            version_calls = [
+                call.args[0]
+                for call in run.call_args_list
+                if len(call.args[0]) == 2 and call.args[0][1] in {"--version", "-v"}
+            ]
+            self.assertEqual(
+                version_calls,
+                [
+                    [fake_tools["pdfinfo"], "--version"],
+                    [fake_tools["pdfinfo"], "-v"],
+                    [fake_tools["pdftotext"], "--version"],
+                    [fake_tools["pdftotext"], "-v"],
+                ],
+            )
+            self.assertEqual(verified["bundle_id"], manifest["bundle_id"])
 
     def test_verify_pdf_rejects_mutated_page_payload(self) -> None:
         pdf_path = Path("/tmp/paper_bundle_verify_pdf_mutation/paper.pdf")

@@ -198,8 +198,9 @@ class ProvenanceGateTests(unittest.TestCase):
                 manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
                 manifests = prepare.load_projection_manifests([manifest_path])
                 used: set[str] = set()
+                note_key = "".join(("ABCD", "1234"))
                 entry = {
-                    "note_key": "ABCD1234",
+                    "note_key": note_key,
                     **prepare.projection_binding_for_html(
                         rendered,
                         html_path,
@@ -211,13 +212,13 @@ class ProvenanceGateTests(unittest.TestCase):
                     entry,
                     staged_html=rendered,
                     status="create_verified",
-                    note_key="ABCD1234",
+                    note_key=note_key,
                 )
                 desktop.verify_projection_gate_entry(
                     entry,
                     staged_html=rendered,
                     status="create_verified",
-                    label="ABCD1234",
+                    label=note_key,
                 )
 
                 disk = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -228,7 +229,7 @@ class ProvenanceGateTests(unittest.TestCase):
                         entry,
                         staged_html=rendered,
                         status="create_verified",
-                        note_key="ABCD1234",
+                        note_key=note_key,
                     )
 
 

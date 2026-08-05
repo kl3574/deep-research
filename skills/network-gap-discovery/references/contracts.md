@@ -76,6 +76,14 @@ structural counts, existing open gaps, unmet gates, isolates, components,
 dangling relations, low-confidence edges, missing provenance, and fixed probe
 families. Every structural signal is a candidate, not a negative fact.
 
+New v1 producers also emit additive `candidate_signal_policy` and
+`candidate_signal_summary` fields. The policy fixes a maximum of 64 selected
+signals with per-tier budgets, preserves the complete open-gap/isolate inventory
+outside `candidate_signals`, deduplicates signals sharing one semantic subject,
+and orders explicit high-impact gaps before derived single-source/isolate noise.
+Consumers must continue to accept older v1 probes; generation applies the same
+deterministic bounded projection when these additive fields are absent.
+
 ## `KnowledgeGapHypotheses/v1`
 
 ```json
@@ -124,6 +132,13 @@ families. Every structural signal is a candidate, not a negative fact.
 
 Only `implicit_candidate` belongs here. Explicit and deterministic gaps remain
 authoritative records in `research-knowledge-network` and may be grounds.
+
+Generated hypotheses may carry additive `source_signal_kind`,
+`source_signal_tier`, `source_priority`, and top-level `candidate_budget`
+metadata. These fields affect transparent triage only, never truth status or
+patch eligibility. Priority ordering uses explicit tier and declared P0/P1 or
+decision-impact metadata before semantic tie-breaking; it does not let hashed
+or stable internal IDs mask authoritative gaps.
 
 `structural_only` hypotheses describe structural signals that are resolved in graph/schema
 logic rather than online search (for example, declared completion-gate failures).

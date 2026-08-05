@@ -161,6 +161,94 @@ def semantic_gap_network_fixture():
     return attach_network_content_sha256(network)
 
 
+def doe_surrogate_noise_network_fixture(single_source_count=96, isolate_count=24):
+    nodes = [{"node_id": "source:DOE", "kind": "source", "label": "DoE corpus"}]
+    relations = []
+    gaps = [
+        {
+            "gap_id": "gap:morphology_specific_benchmark",
+            "gap_type": "explicit",
+            "status": "open",
+            "impact": "high",
+            "declared_priority": "P0",
+            "description": "Cross-route morphology benchmark under one simulator budget",
+        },
+        {
+            "gap_id": "gap:stopping_and_calibration",
+            "gap_type": "explicit",
+            "status": "open",
+            "impact": "high",
+            "declared_priority": "P0",
+            "description": "Executable stopping and uncertainty calibration certificate",
+        },
+        {
+            "gap_id": "gap:batch_pending_failures",
+            "gap_type": "explicit",
+            "status": "open",
+            "impact": "medium",
+            "declared_priority": "P1",
+            "description": "Batch pending and simulator failure handling",
+        },
+    ]
+    for index in range(single_source_count):
+        claim_id = f"DOE-{index:03d}"
+        node_id = f"claim:{claim_id}"
+        nodes.append(
+            {
+                "node_id": node_id,
+                "kind": "claim",
+                "label": f"DoE reviewed claim {index:03d}",
+            }
+        )
+        relations.append(
+            {
+                "relation_id": f"REL-DOE-{index:03d}",
+                "from_id": node_id,
+                "to_id": "source:DOE",
+                "predicate": "supports",
+                "status": "supported",
+                "confidence": "high",
+                "provenance": [
+                    {"source_id": "SRC-DOE", "locator": f"p.{index + 1}"}
+                ],
+            }
+        )
+        gaps.append(
+            {
+                "gap_id": f"derived:single-source:{claim_id}",
+                "gap_type": "deterministic_structural",
+                "status": "open",
+                "impact": "medium",
+                "claim_id": claim_id,
+                "derivation_rule": "single_independent_source",
+                "description": f"Claim {claim_id} has one independent source stream",
+            }
+        )
+    for index in range(isolate_count):
+        nodes.append(
+            {
+                "node_id": f"claim:ISOLATE-{index:03d}",
+                "kind": "claim",
+                "label": f"Unconnected DoE boundary {index:03d}",
+            }
+        )
+    network = {
+        "schema": "KnowledgeNetwork/v1",
+        "network_id": "DOE-NOISE",
+        "snapshot_id": "DOE-NOISE-S1",
+        "sources": [{"source_id": "SRC-DOE"}],
+        "nodes": nodes,
+        "relations": relations,
+        "gaps": gaps,
+        "completion": {
+            "status": "partial",
+            "open_gap_ids": [gap["gap_id"] for gap in gaps],
+            "gate_checks": {"corpus_snapshotted": True},
+        },
+    }
+    return attach_network_content_sha256(network)
+
+
 def hypotheses_fixture(network=None):
     network = network or network_fixture()
     return {
@@ -1197,6 +1285,56 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
         self.assertEqual(first["hypotheses"], second["hypotheses"])
         self.assertEqual(first["hypotheses"][0]["hypothesis_id"], "KGH-001")
 
+    def test_doe_noise_fixture_is_bounded_deduplicated_and_explicit_first(self):
+        network = doe_surrogate_noise_network_fixture()
+        probe = scan_network(network)
+        policy = probe["candidate_signal_policy"]
+        summary = probe["candidate_signal_summary"]
+        self.assertLessEqual(len(probe["candidate_signals"]), policy["max_total"])
+        self.assertGreater(summary["suppressed_count"], 0)
+        self.assertLessEqual(
+            summary["selected_by_tier"].get("single_source", 0),
+            policy["tier_budgets"]["single_source"],
+        )
+        self.assertLessEqual(
+            summary["selected_by_tier"].get("isolate", 0),
+            policy["tier_budgets"]["isolate"],
+        )
+        dedupe_keys = [item["dedupe_key"] for item in probe["candidate_signals"]]
+        self.assertEqual(len(dedupe_keys), len(set(dedupe_keys)))
+
+        hypotheses = generate_hypotheses_from_probe(probe, network, "DOE-ROUND")
+        self.assertLessEqual(
+            len(hypotheses["hypotheses"]), hypotheses["candidate_budget"]["max_total"]
+        )
+        prioritized = prioritize(hypotheses, network)
+        explicit = prioritized["hypotheses"][:3]
+        self.assertTrue(
+            all(
+                item["source_signal_tier"] == "explicit_high_impact"
+                for item in explicit
+            )
+        )
+        self.assertEqual(
+            {item["grounds"][0]["ref_id"] for item in explicit},
+            {
+                "gap:morphology_specific_benchmark",
+                "gap:stopping_and_calibration",
+                "gap:batch_pending_failures",
+            },
+        )
+        first_single_source = next(
+            item
+            for item in prioritized["hypotheses"]
+            if item["source_signal_tier"] == "single_source"
+        )
+        self.assertTrue(
+            all(
+                item["priority_score"] > first_single_source["priority_score"]
+                for item in explicit
+            )
+        )
+
     def test_rejects_non_implicit_hypothesis(self):
         document = hypotheses_fixture()
         document["hypotheses"][0]["gap_type"] = "deterministic_structural"
@@ -1437,6 +1575,42 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
         )
         self.assertEqual(output["hypotheses"][0]["next_action"], "structural_only")
         self.assertEqual(output["hypotheses"][0]["status"], "no_signal")
+
+    def test_derived_missing_dimension_is_not_compiled_as_scholar_query(self):
+        network = network_fixture()
+        gap_id = "derived:missing-dimension:validation_target"
+        network["gaps"] = [
+            {
+                "gap_id": gap_id,
+                "gap_type": "deterministic_structural",
+                "status": "open",
+                "reason": "network dimension validation_target.",
+            }
+        ]
+        network["completion"]["open_gap_ids"] = [gap_id]
+        attach_network_content_sha256(network)
+
+        document = generate_hypotheses_from_probe(scan_network(network), network)
+        matching = [
+            hypothesis
+            for hypothesis in document["hypotheses"]
+            if any(ground["ref_id"] == gap_id for ground in hypothesis["grounds"])
+        ]
+        self.assertEqual(len(matching), 1)
+        self.assertTrue(matching[0]["structural_only"])
+        self.assertEqual(matching[0]["next_action"], "structural_only")
+
+        structural_doc = {
+            "schema": document["schema"],
+            "network_ref": document["network_ref"],
+            "round_id": document["round_id"],
+            "generated_at": document["generated_at"],
+            "method_families": document["method_families"],
+            "hypotheses": matching,
+        }
+        request_set = emit_search_requests(structural_doc, network)
+        self.assertEqual(request_set["requests"], [])
+        self.assertNotIn("network dimension", json.dumps(request_set).lower())
 
     def test_generated_semantic_queries_are_id_free_and_topic_grounded(self):
         network = semantic_gap_network_fixture()

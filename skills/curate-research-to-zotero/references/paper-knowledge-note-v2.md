@@ -138,17 +138,36 @@ The renderer performs no Zotero request:
 
 ```bash
 python scripts/paper_knowledge_note.py preview \
-  /absolute/private/PaperUnderstandingNoteInput.json
+  /absolute/private/PaperUnderstandingNoteInput.json \
+  --understanding /absolute/private/PaperUnderstanding.json \
+  --validation-record /absolute/private/PaperUnderstandingValidation.json \
+  --source-bundle /absolute/private/PaperSourceBundle.json \
+  --source /absolute/private/paper.pdf \
+  --dossier /absolute/private/PaperReadingDossier.json
 
 python scripts/paper_knowledge_note.py render \
   /absolute/private/PaperUnderstandingNoteInput.json \
   --output /absolute/private/paper-note.schema9.html \
-  --manifest /absolute/private/paper-note.projection.json
+  --manifest /absolute/private/paper-note.projection.json \
+  --understanding /absolute/private/PaperUnderstanding.json \
+  --validation-record /absolute/private/PaperUnderstandingValidation.json \
+  --source-bundle /absolute/private/PaperSourceBundle.json \
+  --source /absolute/private/paper.pdf \
+  --dossier /absolute/private/PaperReadingDossier.json
 
 python scripts/paper_knowledge_note.py verify \
   /absolute/private/PaperUnderstandingNoteInput.json \
-  /absolute/private/paper-note.schema9.html
+  /absolute/private/paper-note.schema9.html \
+  --understanding /absolute/private/PaperUnderstanding.json \
+  --validation-record /absolute/private/PaperUnderstandingValidation.json \
+  --source-bundle /absolute/private/PaperSourceBundle.json \
+  --source /absolute/private/paper.pdf \
+  --dossier /absolute/private/PaperReadingDossier.json
 ```
+
+These live provenance arguments are mandatory for all three commands. Keep the
+examples synchronized with `paper_knowledge_note.py -h`; a note-input path alone
+is not sufficient validation evidence.
 
 `render` creates both outputs exclusively with mode `0600`. It never overwrites
 an existing file. `PaperKnowledgeNoteProjection/v1` is content-addressed: its

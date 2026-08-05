@@ -564,6 +564,7 @@ class ResearchRunTests(unittest.TestCase):
         self.assertEqual(state["schema_version"], module.SCHEMA_VERSION)
         for name in module.LEDGER_NAMES:
             self.assertTrue((run_dir / f"{name}.jsonl").is_file())
+        self.assertTrue((run_dir / module.COMMAND_JOURNAL_NAME).is_file())
         event = json.loads((run_dir / "events.jsonl").read_text(encoding="utf-8"))
         self.assertEqual(event["record_id"], "event:init")
         self.assertEqual(event["sequence"], 1)
@@ -1356,8 +1357,122 @@ class ResearchRunTests(unittest.TestCase):
         payload = json.loads(output)
         self.assertEqual(payload["summary"]["counts"]["sources"], 1)
         self.assertIn("run.json summary cache is stale", payload["cache_warnings"])
-        self.assertEqual(invoke(self.root, self.run_id, ["resume"])[0], 0)
+        recovery = payload["command_recovery"]
+        self.assertTrue(recovery["needs_recovery"])
+        self.assertTrue(recovery["unresolved_commands"][0]["committed"])
+        self.assertTrue(recovery["unresolved_commands"][0]["partial"])
+        code, resume_output, error = invoke(self.root, self.run_id, ["resume"])
+        self.assertEqual(code, 0, error)
+        resume_payload = json.loads(resume_output)
+        self.assertEqual(len(resume_payload["recovered_command_ids"]), 1)
         self.assertEqual(self.status()["cache_warnings"], [])
+        self.assertFalse(self.status()["command_recovery"]["needs_recovery"])
+
+    def test_first_success_second_failure_and_retry_conflict_are_explicit(self) -> None:
+        self.init_run(
+            coverage_gap_ids=["gap-first", "gap-counter"],
+            counterevidence_gap_ids=["gap-counter"],
+        )
+        first = [
+            "record-gap",
+            "--gap-id",
+            "gap-first",
+            "--description",
+            "First gap",
+            "--acceptance-criteria",
+            "One terminal action",
+            "--coverage-role",
+            "promised",
+            "--decision-impact",
+            "high",
+            "--priority",
+            "1",
+        ]
+        code, output, error = invoke(self.root, self.run_id, first)
+        self.assertEqual(code, 0, error)
+        first_payload = json.loads(output)
+        self.assertTrue(first_payload["committed"])
+        self.assertEqual(first_payload["pre_event_count"], 1)
+        self.assertEqual(first_payload["post_event_count"], 2)
+        self.assertEqual(first_payload["batch_context"]["successful_prefix"], 1)
+
+        mismatch = [
+            "record-gap",
+            "--gap-id",
+            "gap-counter",
+            "--description",
+            "Counterevidence gap",
+            "--acceptance-criteria",
+            "A contrary evidence check",
+            "--coverage-role",
+            "promised",
+            "--decision-impact",
+            "high",
+            "--priority",
+            "1",
+        ]
+        code, output, error = invoke(self.root, self.run_id, mismatch)
+        self.assertEqual(code, 1)
+        self.assertIn("counterevidence", error)
+        mismatch_payload = json.loads(output)
+        self.assertFalse(mismatch_payload["committed"])
+        self.assertEqual(mismatch_payload["pre_event_count"], 2)
+        self.assertEqual(mismatch_payload["post_event_count"], 2)
+        self.assertEqual(
+            mismatch_payload["recovery_plan"]["classification"], "no_commit"
+        )
+        self.assertFalse(mismatch_payload["batch_context"]["rollback_claimed"])
+
+        code, output, error = invoke(self.root, self.run_id, first)
+        self.assertEqual(code, 1)
+        self.assertIn("gap_id already exists", error)
+        retry_payload = json.loads(output)
+        self.assertFalse(retry_payload["committed"])
+        self.assertEqual(retry_payload["post_event_count"], 2)
+        self.assertEqual(
+            retry_payload["recovery_plan"]["classification"],
+            "already_committed_target",
+        )
+        self.assertTrue(retry_payload["recovery_plan"]["do_not_retry"])
+        status = self.status()
+        recent = status["command_recovery"]["recent_commands"]
+        self.assertEqual(
+            [row["command"] for row in recent[-3:]],
+            ["record-gap", "record-gap", "record-gap"],
+        )
+        self.assertEqual(status["ledger_observation"]["event_count"], 2)
+
+    def test_failed_finalize_reports_active_actions_without_masking_them(self) -> None:
+        self.init_run()
+        self.assertEqual(self.record_gap("gap-primary"), 0)
+        self.assertEqual(self.start_action("action-active", "gap-primary"), 0)
+        self.assertEqual(
+            self.set_coverage(
+                status="partial", basis="partial_limit", gap="gap-primary"
+            ),
+            0,
+        )
+        finalize = [
+            "finalize",
+            "--outcome",
+            "partial",
+            "--stop-reason",
+            "scope_limited",
+            "--summary",
+            "Active work cannot be hidden by terminalization",
+        ]
+        code, output, error = invoke(self.root, self.run_id, finalize)
+        self.assertEqual(code, 1)
+        self.assertTrue(error)
+        payload = json.loads(output)
+        self.assertFalse(payload["committed"])
+        self.assertEqual(
+            [row["action_id"] for row in payload["active_actions_after"]],
+            ["action-active"],
+        )
+        self.assertEqual(
+            payload["recovery_plan"]["active_action_ids"], ["action-active"]
+        )
 
     def test_finalization_retry_repairs_stale_cache(self) -> None:
         self.prepare_complete_run()

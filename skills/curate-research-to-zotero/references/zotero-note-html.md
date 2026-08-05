@@ -22,6 +22,30 @@ Use one root and one title:
 </div>
 ```
 
+The legacy full-text form above remains valid without a root access marker. A
+metadata-only projection is a separate, explicit branch:
+
+```html
+<div data-schema-version="9" data-access-level="metadata_only">
+  <h1>文献笔记｜&lt;paper title&gt;</h1>
+  ...
+</div>
+```
+
+`data-access-level="metadata_only"` is not a decorative tag. It must agree
+with `访问层级：metadata_only`, and `资料与阅读状态` must visibly contain
+`全文状态：未获取全文`. Its `阅读深度` is `map`. The claim table retains the
+exact header for deterministic projection but has no data rows. The entire note
+must contain no local-PDF field, full-text/PDF hash, 64-hex content hash, or
+full-text evidence claim. `溯源` instead requires nonempty `元数据来源` and a
+dated `元数据核验时间：YYYY-MM-DD`. Metadata-derived orientation is never
+full-text evidence.
+
+`PaperKnowledgeNote/v2` is always a full-text projection and cannot use the
+metadata-only marker. A legacy full-text note, whether its root marker is absent
+or explicitly `full_text`, continues to require exactly one
+`全文SHA-256：<64 lowercase hex>` and at least one evidence claim row.
+
 The following Chinese section names are required, in this order:
 
 1. `资料与阅读状态`
@@ -49,6 +73,10 @@ material, but it cannot replace the required sections.
 - the real local full-text path and SHA-256, when a file was read;
 - `map`, `evidence`, or `reconstruction` reading depth;
 - verification time and offline/current-status limitations.
+
+For metadata-only notes, replace the local full-text path/hash with the exact
+visible missing-full-text declaration above; do not insert a placeholder or
+fabricated hash merely to satisfy the full-text branch.
 
 `关键主张与证据` is a table. Each row includes:
 
