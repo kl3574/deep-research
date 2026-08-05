@@ -42,4 +42,3 @@ version, and time; and treat model suggestions as proposals. Evaluate withheld
 node/edge recovery, Precision@K, alias and already-covered false positives,
 unknown-vs-negative accuracy, locator audit, replay determinism, and zero
 novelty overclaim.
-
