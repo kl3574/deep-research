@@ -1,4 +1,4 @@
 interface:
   display_name: "Learn from Papers"
-  short_description: "Deep-read and verify one academic paper"
-  default_prompt: "Use $learn-from-papers to read this paper efficiently, reconstruct its reasoning, and report evidence-linked insights."
+  short_description: "Source-rooted deep reading of one paper"
+  default_prompt: "Use $learn-from-papers to answer a precise question about this paper with scoped claims, exact locators, conflict checks, and honest verification state."

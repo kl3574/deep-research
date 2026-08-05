@@ -1,6 +1,15 @@
-# Document manifest
+# Document graph and manifest
 
 Build this before a complete read or whenever PDF extraction and printed pagination differ.
+
+For evidence/reconstruction work, first materialize and verify `PaperSourceBundle/v1`; do not treat extracted text as authoritative merely because a parser succeeded:
+
+```bash
+python skills/learn-from-papers/scripts/paper_source_bundle.py build \
+  --source paper.pdf --output work/source-bundle.json --render-pages
+python skills/learn-from-papers/scripts/paper_source_bundle.py verify \
+  --bundle work/source-bundle.json --source paper.pdf
+```
 
 ## Identity and integrity
 
@@ -41,6 +50,11 @@ Inventory:
 - appendices and supplementary sections;
 - data/code links and claimed availability.
 
+Model the inventory as a small document graph: components are nodes; `defines`,
+`reports`, `visualizes`, `depends_on`, `corrects`, `contradicts`, and `supplements`
+are edges. Retrieval follows the subquestion across these edges rather than
+concatenating an arbitrary top-N context.
+
 For each artifact use `not_relevant`, `inspected`, `evidence-extracted`, `reconstructed`, or `unresolved`. “Code available” means the paper reports a link; use `code-retrieved` and `code-executed` only after those actions actually occurred.
 
 ## Extraction quality
@@ -71,3 +85,4 @@ references independently followed
 ```
 
 This is an inspection accounting record, not evidence that every page received equal analytical depth.
+It also does not certify semantic entailment; that belongs to the atomic claim check.

@@ -69,6 +69,12 @@ jobs:
           -s skills/learn-from-papers/scripts
           -p 'test_*.py'
 
+      - name: Run learn-from-papers quality evaluations
+        run: >-
+          python -m unittest discover
+          -s evals/learn-from-papers
+          -p 'test_*.py'
+
       - name: Run scholar-discovery tests
         run: >-
           python -m unittest discover
@@ -79,6 +85,12 @@ jobs:
         run: >-
           python -m unittest discover
           -s skills/network-gap-discovery/scripts
+          -p 'test_*.py'
+
+      - name: Run six-skill workflow routing evaluations
+        run: >-
+          python -m unittest discover
+          -s evals/research-workflow
           -p 'test_*.py'
 
       - name: Run reproducibility-harness tests

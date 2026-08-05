@@ -66,6 +66,15 @@ object ids or route internals. Avoid IDs like `gap:`, `relation:`, `node:`,
 `completion.gate_checks.`, `unmet_declared_gate:`, and phrase patterns like
 `"No evidence ... at this snapshot"`.
 
+## Canonical network reference
+
+Every `KnowledgeNetwork/v1` input must carry the RKN export field
+`content_sha256`. It is the canonical SHA-256 of the export payload before that
+field is inserted. `network_ref.sha256` and every mirrored
+`network_snapshot_sha256` must equal this field exactly. Do not hash the final
+JSON envelope, because doing so includes the digest field itself and conflicts
+with the RKN snapshot identity.
+
 ## `NetworkPatchProposal/v1`
 
 ```json
@@ -112,11 +121,18 @@ and is maintained alongside `stop_reason`.
 
 ## `ReviewedEvidenceSet/v1`
 
+This contract is audit-only. Public decisive commands do not accept it and do
+not accept caller-constructed reviewed records. They deterministically derive
+records from verified reading artifacts.
+
 `consume-reviewed-evidence` requires reviewed evidence that targets the same
 `request_set_id`, `request_set_digest`, and `network_id` as the cycle review set.
 `consume-reviewed-evidence` and `propose-patch` also require the cycle state to
-carry `report_set_id` and `report_set_digest`, and validate against
-an explicit `PaperReadingReportSet/v1` input.
+carry `report_set_id` and `report_set_digest`, and validate against an explicit
+`PaperReadingReportSet/v2` input using the authoritative
+`learn-from-papers/scripts/paper_reading_dossier.py::validate_report_set_v2`
+validator. `PaperReadingReportSet/v1` remains valid for standalone audit but is
+rejected on both decisive paths.
 `ReviewedEvidenceSet/v1` carries `evidence_set_digest = sha256(canonical_payload)`,
 where canonical payload excludes only `evidence_set_id` and `evidence_set_digest`.
 `consume-reviewed-evidence` and `propose-patch` require exact `evidence_set_digest`
@@ -148,12 +164,20 @@ Example `ReviewedEvidenceSet/v1` object now includes `evidence_set_digest`:
   and review request set to share `request_set_id`, `request_set_digest`,
   `network_id`, `network_snapshot_sha256`, and `network_ref` exactly.
 
-- `ReviewedEvidence` entries also carry `source_id` and `source_digest` and must
-  match the candidate source selected from the active review request, including
-  `source_ref`, `exact_locator`, `read_depth`, and url/doi identity.
-- `ReviewedEvidence` entries also carry `reading_report_id`, `reading_report_digest`,
-  `passage_id`, and `passage_digest`, and must resolve to valid entries in the
-  active `PaperReadingReportSet/v1`.
+- `ReviewedEvidence` entries carry `source_id` and `source_digest` and match the
+  candidate selected from the active request. `acquisition_locator` preserves
+  the DOI/URL/identifier used to acquire the paper; it is identity only.
+- `evidence_locator` and legacy `exact_locator` must both equal the canonical,
+  source-rooted locator in the selected v2 evidence binding. They must not equal
+  a DOI or URL.
+- V2 entries bind `reading_report_id`, `reading_report_digest`, `evidence_id`,
+  `span_id`, `span_hash`, `source_bundle_id`, `source_bundle_digest`, and
+  `source_artifact_sha256` to one validated report projection.
+- The caller supplies `outcome` only as a checked projection. The controller
+  derives the only allowed value from `relation`: `supports -> supports`,
+  `refutes -> contradicts`, and `qualifies|not_tested -> unknown`. Any flip fails.
+  `already_covered` is rejected until an explicit coverage-disposition contract
+  exists.
 
 - `consume-reviewed-evidence` and `consume-results` stop reasons are limited to
   `manual_required`, `review_pending`, `provider_pending`, `budget_exhausted`,
@@ -165,50 +189,66 @@ Example `ReviewedEvidenceSet/v1` object now includes `evidence_set_digest`:
 - `results` cycle saturation still uses consecutive no-progress rounds logic, but
   does not trigger when the cycle remains `awaiting` manual result capture.
 
-`claim_support_eligible` must be `true` for reviewed evidence consumed by this skill.
+`claim_support_eligible` must exactly match the report projection. Only
+`supports` with `claim_support_eligible: true`, `projection_status: decisive`,
+and `verifier_status: passed` can be proposed as a patch.
 
-## `PaperReadingReport/v1` and `PaperReadingReportSet/v1`
+## `PaperReadingReport/v2` and `PaperReadingReportSet/v2`
 
-`PaperReadingReport/v1` records the reviewed source and passage-level grounding used by reviewed evidence.
+The v2 projection is owned and strictly validated by `$learn-from-papers`. This
+skill dynamically imports its validator rather than maintaining a competing
+schema. Each report binds one atomic claim to a hypothesis, target signature,
+scope, relation, eligibility decision, actual evidence locator, and one or more
+source-span bindings. The set binds the immutable source bundle, artifact SHA,
+dossier, network snapshot, and review-request set.
+
+Identity has two orthogonal chains. `review_source` contains the discovery-side
+`source_id`, `source_digest`, and `acquisition_locator` and selects the exact
+source record in the review request. `source_ref` is the immutable source-bundle
+artifact filename and must never be compared with the request's candidate-slot
+`source_ref`.
 
 ```json
 {
-  "schema": "PaperReadingReportSet/v1",
-  "schema_version": "1.0",
-  "network_id": "KN-001",
-  "network_snapshot_sha256": "<64 lowercase hex>",
+  "schema": "PaperReadingReportSet/v2",
+  "schema_version": "v2",
   "network_ref": {
     "network_id": "KN-001",
     "snapshot_id": "KN-001-S001",
     "sha256": "<64 lowercase hex>"
   },
   "generated_at": "2026-08-05T00:00:00Z",
-  "report_set_id": "report-set-9f...",
+  "source_bundle_id": "paper-source-bundle-...",
+  "source_bundle_digest": "<64 lowercase hex>",
+  "source_artifact_sha256": "<64 lowercase hex>",
+  "source_ref": "local-paper.pdf",
+  "review_source": {
+    "source_id": "SRC-...",
+    "source_digest": "<64 lowercase hex>",
+    "acquisition_locator": "10.1000/example"
+  },
+  "report_set_id": "reading-report-set-v2-...",
   "report_set_digest": "<64 lowercase hex>",
   "reports": [
     {
-      "schema": "PaperReadingReport/v1",
-      "report_id": "reading-report-9f8...",
+      "schema": "PaperReadingReport/v2",
+      "report_id": "reading-report-v2-...",
       "report_digest": "<64 lowercase hex>",
       "review_request_id": "LRR-....",
       "review_request_digest": "<64 lowercase hex>",
-      "source_id": "SRC-....",
-      "source_digest": "<64 lowercase hex>",
-      "source_ref": "study-doi",
-      "exact_locator": "10.1000/example-doi",
-      "reading_depth": "full_text",
-      "producer": "learn-from-papers",
-      "protocol_version": "1.0",
-      "source_artifact_sha256": "<64 lowercase hex>",
-      "passages": [
+      "hypothesis_id": "KGH-001",
+      "target_id": "entity:A ? entity:C",
+      "relation": "supports",
+      "claim_support_eligible": true,
+      "projection_status": "decisive",
+      "actual_evidence_locator": "source-passages/page-0001.txt chars 10:40",
+      "evidence_bindings": [
         {
-          "passage_id": "passage-abc...",
-          "passage_digest": "<64 lowercase hex>",
-          "locator_type": "page",
-          "exact_locator": "p.1",
-          "claim_summary": "Claim context summary",
-          "evidence_summary": "Evidence summary",
-          "passage_sha256": "<64 lowercase hex>"
+          "evidence_id": "evidence-1",
+          "exact_locator": "source-passages/page-0001.txt chars 10:40",
+          "page": 1, "start_char": 10, "end_char": 40,
+          "span_id": "source-passages-span-...",
+          "span_hash": "<64 lowercase hex>"
         }
       ]
     }
@@ -216,13 +256,100 @@ Example `ReviewedEvidenceSet/v1` object now includes `evidence_set_digest`:
 }
 ```
 
-`consume-reviewed-evidence` and `propose-patch` validate `reading_report_digest` and
-passage hashes, and require status-basis provenance to include `reading_report_id`,
-`reading_report_digest`, `passage_id`, and `passage_digest`.
-`propose-patch` additionally requires proposal basis entries to resolve to entries in the active
-`LearnFromPapersRequestSet/v1` and the active `PaperReadingReportSet/v1`, and it checks that each
-`status_basis` provenance tuple `(review_request_id, source_id, source_digest, reading_report_id, passage_id)`
-matches reviewed evidence in `ReviewedEvidenceSet/v1`.
+Status basis keeps both `acquisition_locator` and `evidence_locator`, but patch
+provenance uses only the latter. `propose-patch` re-resolves every basis tuple
+`(review_request_id, source_id, reading_report_id, evidence_id)` against the
+reviewed evidence and v2 span binding before emitting a proposal.
+
+### Reopenable verification target contract
+
+The decisive bridge requires report `verification` to contain exactly
+`mode`, `verifier_id`, `artifact_ref`, `artifact_sha256`, and `subject_digest`.
+The subject digest is the canonical hash of the report after excluding
+top-level `report_id`, `report_digest`, `projection_status`, and
+`claim_support_eligible`, and excluding only nested verification
+fields `artifact_ref`, `artifact_sha256`, and `subject_digest`. Mode and verifier
+remain inside the subject.
+
+`prepare-attestations` first emits canonical
+`VerificationAttestationRequest/v1` artifacts and leaves the report terminal and
+non-eligible. The external `attest` step emits canonical
+`VerificationAttestation/v1` artifacts. Each attestation binds its request ref
+and byte digest, subject, claim/hypothesis/target, scope, complete evidence
+bindings, dossier, source bundle and source artifact, mode and verifier,
+`origin: external_verifier`, `verdict: passed`, producer/verifier context IDs,
+basis, the pending-normalized report-set context (including `network_ref` and
+`completion_matrix`), the sorted unique expected report subject identities, and
+UTC creation time. The contexts must differ. `finalize-attestations`
+reopens both artifacts and deterministically recomputes report/set IDs and
+eligibility. The bridge repeats all of these validations; verifier-name denials
+are only an additional obvious-self/generated guard.
+
+`attest` processes exactly one prepared request selected by `--report-id`;
+heterogeneous sets chain one invocation per report. Verification artifacts must
+use the canonical `verification-requests/<sha256>.json` or
+`verification-attestations/<sha256>.json` path and be regular files. Aliases,
+symlinks, FIFOs, sockets, devices, network retargeting, duplicate claims, and
+duplicate frozen subjects fail closed in the strict producer validator.
+
+## `NetworkPatchProposal/v2`
+
+The proposal is a closed, content-addressed action set. Top-level proposal,
+each action, and each reviewed-evidence basis row carry canonical digest-derived
+IDs. Every basis preserves request, report-set, dossier, reading-report,
+source-bundle, artifact, discovery-source, claim, evidence, span, locator, and
+verification provenance. Only `supports + full_text + evidence|reconstruction
++ exact scope + decisive + passed + independent/expert verification` is legal.
+`NetworkPatchProposal/v1` is audit-only.
+
+`propose_relation` additionally carries exactly one closed
+`NetworkPatchTargetClaim/v1` payload with fields `schema`, `schema_version`,
+`claim_id`, `claim_text`, `entity_id`, `impact`, `coverage_dimensions`,
+`benchmark_profiles`, `supersedes`, `epistemic_status`, `gap_hypothesis_id`,
+`target_signature`, `report_claim_id`, `report_claim_digest`, `scope`,
+`scope_digest`, and `target_claim_digest`. `scope` is exactly
+`scope_statement`, `assumptions`, `conditions`, `units`, `exclusions`,
+`defeaters`, `coverage_dimensions`, and `benchmark_profiles`.
+`target_claim_digest` hashes the payload without its two identity fields;
+`claim_id = "claim-target-" + digest[:16]`. Missing typed scope, defaulted
+impact, query-signature-as-claim, or a report-claim/epistemic mismatch fails
+closed.
+
+Typed scope categories remain distinct. `assumptions`, `conditions`, and
+`units` are not flattened into an unlabelled `coverage_dimensions` list;
+`exclusions` and `defeaters` are not benchmark profiles. Coverage dimensions
+and benchmark profiles may only come from explicit same-named request fields.
+Because `LearnFromPapersRequest/v1.epistemic_task.scope` currently has no such
+fields, both lists are empty and any invented non-empty value fails closed.
+
+Action kind dispatch is the following closed map:
+
+| target kind | action type | local status rule |
+| --- | --- | --- |
+| `relation` | `propose_relation` | `proposed` with a valid target claim |
+| `evidence` | `propose_evidence` | `proposed` only when the signature equals the sole reviewed `evidence_id` |
+| `node` | `propose_node` | `blocked` until a closed target-node contract exists |
+| `boundary`, `counterexample`, `version`, `benchmark`, `benchmark_profile`, `assumption`, `mechanism`, `metric`, `measurement`, `estimator`, `failure_mode`, `context` | `propose_evidence` | `blocked`; audit/proposal only |
+
+Both `proposed` and `blocked` are valid local proposal states. A consumer must
+reject `blocked`; it must not infer target kind from an action-type prefix or
+materialize unsupported semantic targets as generic evidence.
+
+Every basis source must already appear in the bound live network `sources`
+collection under the same `source_id`. A miss is terminal
+`onboarding_required`, not a patch proposal. After onboarding, export a new
+snapshot and rerun the full audit because all prior request/report bindings are
+stale. The RKN consumer materializes evidence with
+`independence_group = basis.source_id`.
+
+## `LearnFromPapersRequest/v1.epistemic_task`
+
+Every emitted request includes a closed epistemic task containing `question`,
+`hypothesis`, `target_signature`, `scope_bounds`, `defeaters`, `falsifiers`,
+`acceptance_criteria`, canonical `relation_vocabulary`, and
+`required_inspection_depth`. The minimum depth is full text plus any
+claim-bearing figures, tables, equations, appendices, and supplements;
+reconstruction is required only when the acceptance criteria demand it.
 
 ## CLI
 
@@ -246,14 +373,16 @@ python scripts/network_gap_discovery.py consume-results \
   --requests scholar-requests.json --result result-set.json --output hypotheses-after-results.json
 python scripts/network_gap_discovery.py consume-reviewed-evidence \
   --hypotheses hypotheses.json --network network.json \
-  --review-requests review_requests.json --evidence reviewed-evidence.json \
-  --reading-reports reading-reports.json \
+  --review-requests review_requests.json --reading-reports reading-reports.json \
+  --dossier reading-dossier.json --source-bundle paper-source-bundle.json \
+  --source-artifact paper.pdf --verification-root attestations/ \
   --output hypotheses-next.json
 python scripts/network_gap_discovery.py propose-patch \
   --input hypotheses.json --network network.json \
-  --reviewed-evidence-set reviewed-evidence.json \
   --review-requests review_requests.json \
   --reading-reports reading-reports.json \
+  --dossier reading-dossier.json --source-bundle paper-source-bundle.json \
+  --source-artifact paper.pdf --verification-root attestations/ \
   --output patch.json
 python scripts/network_gap_discovery.py cycle --network network.json \
   --hypotheses-output hypotheses.json --requests-output scholar-requests.json \

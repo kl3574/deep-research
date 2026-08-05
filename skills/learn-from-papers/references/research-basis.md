@@ -60,6 +60,46 @@ This file records why the workflow is structured as it is. It is maintenance evi
     - Supports passage retrieval, citation-backed synthesis, and citation checks in the evaluated scientific QA system.
     - Benchmark gains do not establish completeness or remove expert review in high-stakes work.
 
+## Scientific document QA and evidence localization
+
+14. Dasigi, P., et al. (2021). “A Dataset of Information-Seeking Questions and Answers Anchored in Research Papers.” *NAACL 2021*. [QASPER](https://aclanthology.org/2021.naacl-main.365/)
+    - Couples long-paper questions with answers, supporting evidence, and unanswerable cases.
+    - Motivates question plans, evidence locators, and explicit abstention rather than generic summarization.
+
+15. Fröbe, M., et al. (2025). “PeerQA: A Scientific Question Answering Dataset from Peer Reviews.” *NAACL 2025*. [PeerQA](https://aclanthology.org/2025.naacl-long.22/)
+    - Evaluates evidence retrieval, unanswerability, and answer generation over long papers.
+    - Motivates subquestion-specific retrieval and decontextualized evidence units.
+
+16. Wadden, D., et al. (2020). “Fact or Fiction: Verifying Scientific Claims.” *EMNLP 2020*. [SciFact](https://aclanthology.org/2020.emnlp-main.609/)
+    - Separates supporting/refuting rationales from claim labels.
+    - Motivates explicit `supports` and `refutes` relations with source rationales.
+
+17. Katsogiannis-Meimarakis, G., et al. (2024). “SciDQA: Learning from Science Demonstrations for Question Answering.” *EMNLP 2024*. [SciDQA](https://aclanthology.org/2024.emnlp-main.1163/)
+    - Scientific questions can depend on figures, tables, equations, appendices, and supplements.
+    - Motivates component inventory and typed artifact cards instead of text-only reading.
+
+18. Pramanick, S., et al. (2024). “SPIQA: A Dataset for Multimodal Question Answering on Scientific Papers.” [arXiv:2407.09413](https://arxiv.org/abs/2407.09413)
+    - Provides large-scale questions grounded in scientific figures and tables.
+    - Motivates rendered-page gates for decision-critical visual evidence.
+
+## Reconstruction and system evaluation
+
+19. Starace, G., et al. (2025). “PaperBench: Evaluating AI’s Ability to Replicate AI Research.” [OpenAI benchmark page](https://openai.com/index/paperbench/)
+    - Uses author-built hierarchical rubrics to grade paper replication tasks.
+    - Motivates task-level reconstruction records and separation of planned, executed, matched, and replicated states.
+
+20. Lála, J., et al. (2024). “PaperQA2: Superhuman scientific literature search.” [arXiv:2409.13740](https://arxiv.org/abs/2409.13740) and [official implementation](https://github.com/Future-House/paper-qa)
+    - Uses evidence chunks, contextual summaries, reranking, and contradiction-oriented workflows.
+    - Motivates question-directed evidence packs; its multi-paper system is not itself a one-paper truth oracle.
+
+21. Lopez, P. (2025). “GROBID Documentation: Introduction.” [Official documentation](https://grobid.readthedocs.io/en/latest/Introduction/)
+    - Structured TEI extraction can expose sections, references, figures, tables, and coordinates.
+    - Motivates a document intermediate representation while preserving rendered/source bytes as authority.
+
+22. Parmar, P., et al. (2024). “Docling Technical Report.” [arXiv:2408.09869](https://arxiv.org/abs/2408.09869), and Wang, B., et al. (2024). “MinerU.” [arXiv:2409.18839](https://arxiv.org/abs/2409.18839)
+    - Modern parsing systems target structured, layout-aware scientific-document conversion.
+    - Multiple parser options motivate explicit tool provenance and fallback, not silent parser substitution.
+
 ## Design boundary
 
 The workflow is an evidence-informed engineering design. Validate it with forward tests on real PDFs, preserve source provenance, and keep domain-expert review for high-stakes scientific, medical, legal, safety, or policy decisions.

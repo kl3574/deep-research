@@ -1,4 +1,4 @@
 interface:
   display_name: "Deep Research"
-  short_description: "Map, investigate, and synthesize trusted evidence"
-  default_prompt: "Use $deep-research to map this question, deepen its decision-critical branches with fit-for-purpose sources, and produce an auditable claim-level synthesis."
+  short_description: "Auditable multi-source research and synthesis"
+  default_prompt: "Use $deep-research to investigate this question with source-rooted evidence; audit a compatible knowledge network only when one is supplied or requested."

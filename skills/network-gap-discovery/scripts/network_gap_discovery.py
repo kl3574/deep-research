@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import re
 import sys
@@ -27,7 +28,13 @@ REVIEWED_EVIDENCE_SET_SCHEMA = "ReviewedEvidenceSet/v1"
 REVIEWED_EVIDENCE_SCHEMA = "ReviewedEvidence/v1"
 PAPER_READING_REPORT_SET_SCHEMA = "PaperReadingReportSet/v1"
 PAPER_READING_REPORT_SCHEMA = "PaperReadingReport/v1"
-PATCH_SCHEMA = "NetworkPatchProposal/v1"
+PAPER_READING_REPORT_SET_V2_SCHEMA = "PaperReadingReportSet/v2"
+PATCH_SCHEMA = "NetworkPatchProposal/v2"
+PATCH_V1_SCHEMA = "NetworkPatchProposal/v1"
+PATCH_SCHEMA_VERSION = "2.0"
+VERIFICATION_REQUEST_SCHEMA = "VerificationAttestationRequest/v1"
+VERIFIER_ATTESTATION_SCHEMA = "VerificationAttestation/v1"
+TARGET_CLAIM_SCHEMA = "NetworkPatchTargetClaim/v1"
 
 SCHEMA_VERSION = "1.0"
 REQUEST_SET_SCHEMA_VERSION = "v1"
@@ -37,25 +44,44 @@ LEARN_REQUEST_SET_ID_PREFIX = "LFR-"
 SOURCE_ID_PREFIX = "SRC-"
 REPORT_SET_ID_PREFIX = "reading-report-set-"
 READING_REPORT_ID_PREFIX = "reading-report-"
+V2_READING_REPORT_ID_PREFIX = "reading-report-v2-"
 PASSAGE_ID_PREFIX = "passage-"
 LOCATOR_TYPES = {"page", "section", "figure", "table", "equation"}
 READING_REPORT_PROTOCOL = "1.0"
 READER_PRODUCER = "learn-from-papers"
 READING_DEPTH_ONLY_FULL_TEXT = "full_text"
-
-TARGET_KINDS = {
-    "node",
-    "relation",
-    "evidence",
-    "boundary",
-    "counterexample",
-    "version",
-    "benchmark",
-    "assumption",
-    "mechanism",
-    "metric",
-    "context",
+V2_RELATION_TO_OUTCOME = {
+    "supports": "supports",
+    "refutes": "contradicts",
+    "qualifies": "unknown",
+    "not_tested": "unknown",
 }
+EPISTEMIC_RELATION_VOCABULARY = [
+    "supports",
+    "qualifies",
+    "refutes",
+    "not_tested",
+]
+
+ACTION_FOR_TARGET_KIND = {
+    "node": "propose_node",
+    "relation": "propose_relation",
+    "evidence": "propose_evidence",
+    "boundary": "propose_evidence",
+    "counterexample": "propose_evidence",
+    "version": "propose_evidence",
+    "benchmark": "propose_evidence",
+    "benchmark_profile": "propose_evidence",
+    "assumption": "propose_evidence",
+    "mechanism": "propose_evidence",
+    "metric": "propose_evidence",
+    "measurement": "propose_evidence",
+    "estimator": "propose_evidence",
+    "failure_mode": "propose_evidence",
+    "context": "propose_evidence",
+}
+TARGET_KINDS = set(ACTION_FOR_TARGET_KIND)
+PATCH_ACTION_STATUSES = {"proposed", "blocked"}
 STATUSES = {
     "proposed",
     "testing",
@@ -231,6 +257,38 @@ class ContractError(ValueError):
     """Raised when a gap-discovery contract fails closed."""
 
 
+_READING_DOSSIER_MODULE: Any | None = None
+
+
+def _reading_dossier_module() -> Any:
+    global _READING_DOSSIER_MODULE
+    if _READING_DOSSIER_MODULE is not None:
+        return _READING_DOSSIER_MODULE
+    module_path = (
+        Path(__file__).resolve().parents[2]
+        / "learn-from-papers"
+        / "scripts"
+        / "paper_reading_dossier.py"
+    )
+    if not module_path.is_file() or module_path.is_symlink():
+        raise ContractError(
+            "learn-from-papers paper_reading_dossier.py is unavailable"
+        )
+    spec = importlib.util.spec_from_file_location(
+        "network_gap_discovery_paper_reading_dossier", module_path
+    )
+    if spec is None or spec.loader is None:
+        raise ContractError("cannot load learn-from-papers dossier validator")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    if not callable(getattr(module, "validate_report_set_v2", None)):
+        raise ContractError(
+            "learn-from-papers dossier validator lacks validate_report_set_v2"
+        )
+    _READING_DOSSIER_MODULE = module
+    return module
+
+
 def canonical_bytes(value: Any) -> bytes:
     return json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -385,6 +443,21 @@ def validate_network(value: Any) -> dict[str, Any]:
     network = require_dict(value, "network")
     if network.get("schema") != NETWORK_SCHEMA:
         raise ContractError(f"network.schema must equal {NETWORK_SCHEMA}")
+    declared_content_sha256 = ensure_sha256(
+        network.get("content_sha256"), "network.content_sha256"
+    )
+    expected_content_sha256 = sha256_json(
+        {
+            key: item
+            for key, item in network.items()
+            if key != "content_sha256"
+        }
+    )
+    if declared_content_sha256 != expected_content_sha256:
+        raise ContractError(
+            "network.content_sha256 must hash the canonical export payload "
+            "without content_sha256"
+        )
     require_string(network.get("network_id"), "network.network_id")
     require_string(network.get("snapshot_id"), "network.snapshot_id")
     for field in ("nodes", "relations", "gaps"):
@@ -403,7 +476,28 @@ def validate_network(value: Any) -> dict[str, Any]:
     if len(network_relation_ids) != len(set(network_relation_ids)):
         raise ContractError("network relations must have unique relation_id")
 
+    sources = network.get("sources", [])
+    if not isinstance(sources, list):
+        raise ContractError("network.sources must be a list when present")
+    source_ids = []
+    for index, source in enumerate(sources):
+        entry = require_dict(source, f"network.sources[{index}]")
+        source_ids.append(
+            require_string(entry.get("source_id"), f"network.sources[{index}].source_id")
+        )
+    if len(source_ids) != len(set(source_ids)):
+        raise ContractError("network sources must have unique source_id")
+
     return network
+
+
+def _live_source_ids(network: dict[str, Any]) -> set[str]:
+    validated = validate_network(network)
+    return {
+        source["source_id"]
+        for source in validated.get("sources", [])
+        if isinstance(source, dict) and isinstance(source.get("source_id"), str)
+    }
 
 
 def _dedupe_terms(values: list[str]) -> list[str]:
@@ -739,10 +833,11 @@ def _build_semantic_search_query(
 
 
 def network_ref(network: dict[str, Any]) -> dict[str, str]:
+    validated = validate_network(network)
     return {
-        "network_id": network["network_id"],
-        "snapshot_id": network["snapshot_id"],
-        "sha256": sha256_json(network),
+        "network_id": validated["network_id"],
+        "snapshot_id": validated["snapshot_id"],
+        "sha256": validated["content_sha256"],
     }
 
 
@@ -1567,6 +1662,21 @@ def validate_scholar_discovery_result(value: Any) -> dict[str, Any]:
         if screening.get("decision") not in {"include", "exclude", "maybe", "unscreened"}:
             raise ContractError("result.ranked_candidates[].screening.decision is invalid")
         require_string(item.get("access_level"), f"result.ranked_candidates[{candidate_index}].access_level")
+        has_source_id = item.get("source_id") is not None
+        has_source_digest = item.get("source_digest") is not None
+        if has_source_id != has_source_digest:
+            raise ContractError(
+                "result candidate live source identity requires both source_id and source_digest"
+            )
+        if has_source_id:
+            require_string(
+                item.get("source_id"),
+                f"result.ranked_candidates[{candidate_index}].source_id",
+            )
+            ensure_sha256(
+                item.get("source_digest"),
+                f"result.ranked_candidates[{candidate_index}].source_digest",
+            )
     provider_failures = result.get("provider_failures")
     if provider_failures is not None and not isinstance(provider_failures, list):
         raise ContractError("result.provider_failures must be a list")
@@ -1734,6 +1844,7 @@ def validate_learn_from_papers_request(value: Any) -> dict[str, Any]:
     require_string(request.get("request_id"), "review request.request_id")
     require_string(request.get("source_request_id"), "review request.source_request_id")
     require_string(request.get("hypothesis_id"), "review request.hypothesis_id")
+    validate_epistemic_task(request.get("epistemic_task"))
     sources = request.get("sources")
     if not isinstance(sources, list) or not sources:
         raise ContractError("review request.sources must be a non-empty list")
@@ -1743,8 +1854,6 @@ def validate_learn_from_papers_request(value: Any) -> dict[str, Any]:
             entry.get("source_id"), f"review request.sources[{index}].source_id"
         )
         ensure_sha256(entry.get("source_digest"), f"review request.sources[{index}].source_digest")
-        if not entry.get("source_id").startswith(SOURCE_ID_PREFIX):
-            raise ContractError("review request source_id must use SRC- prefix")
         require_string(
             entry.get("source_ref"), f"review request.sources[{index}].source_ref"
         )
@@ -1752,6 +1861,14 @@ def validate_learn_from_papers_request(value: Any) -> dict[str, Any]:
             entry.get("exact_locator"),
             f"review request.sources[{index}].exact_locator",
         )
+        acquisition_locator = require_string(
+            entry.get("acquisition_locator"),
+            f"review request.sources[{index}].acquisition_locator",
+        )
+        if acquisition_locator != entry["exact_locator"]:
+            raise ContractError(
+                f"review request.sources[{index}].acquisition_locator must match exact_locator"
+            )
         read_depth = require_string(
             entry.get("read_depth"), f"review request.sources[{index}].read_depth"
         )
@@ -1783,7 +1900,142 @@ def validate_learn_from_papers_request(value: Any) -> dict[str, Any]:
             raise ContractError(
                 f"review request.sources[{index}] must include url or doi"
             )
+        for field in ("source_artifact_sha256", "source_bundle_digest"):
+            if entry.get(field) is not None:
+                ensure_sha256(
+                    entry.get(field), f"review request.sources[{index}].{field}"
+                )
+        if entry.get("source_bundle_id") is not None:
+            require_string(
+                entry.get("source_bundle_id"),
+                f"review request.sources[{index}].source_bundle_id",
+            )
     return request
+
+
+def validate_epistemic_task(value: Any) -> dict[str, Any]:
+    task = require_dict(value, "review request.epistemic_task")
+    expected_keys = {
+        "question",
+        "hypothesis",
+        "target_signature",
+        "scope_bounds",
+        "scope",
+        "defeaters",
+        "falsifiers",
+        "acceptance_criteria",
+        "relation_vocabulary",
+        "required_inspection_depth",
+    }
+    if set(task) != expected_keys:
+        raise ContractError(
+            "review request.epistemic_task must use the closed v1 field set"
+        )
+    for field in (
+        "question",
+        "hypothesis",
+        "target_signature",
+        "scope_bounds",
+        "acceptance_criteria",
+    ):
+        require_string(task.get(field), f"review request.epistemic_task.{field}")
+    require_string_list(
+        task.get("defeaters"),
+        "review request.epistemic_task.defeaters",
+        nonempty=True,
+    )
+    require_string_list(
+        task.get("falsifiers"),
+        "review request.epistemic_task.falsifiers",
+        nonempty=True,
+    )
+    vocabulary = require_string_list(
+        task.get("relation_vocabulary"),
+        "review request.epistemic_task.relation_vocabulary",
+        nonempty=True,
+    )
+    if vocabulary != EPISTEMIC_RELATION_VOCABULARY:
+        raise ContractError(
+            "review request.epistemic_task.relation_vocabulary must use the canonical order"
+        )
+    depth = require_dict(
+        task.get("required_inspection_depth"),
+        "review request.epistemic_task.required_inspection_depth",
+    )
+    if set(depth) != {"minimum", "claim_bearing_components", "reconstruction"}:
+        raise ContractError(
+            "review request.epistemic_task.required_inspection_depth has invalid fields"
+        )
+    if require_string(
+        depth.get("minimum"),
+        "review request.epistemic_task.required_inspection_depth.minimum",
+    ) != "full_text":
+        raise ContractError(
+            "review request.epistemic_task requires full_text inspection"
+        )
+    components = require_string_list(
+        depth.get("claim_bearing_components"),
+        "review request.epistemic_task.required_inspection_depth.claim_bearing_components",
+        nonempty=True,
+    )
+    if components != ["figures", "tables", "equations", "appendices", "supplements"]:
+        raise ContractError(
+            "review request.epistemic_task claim-bearing components must use the canonical order"
+        )
+    require_string(
+        depth.get("reconstruction"),
+        "review request.epistemic_task.required_inspection_depth.reconstruction",
+    )
+    scope = require_dict(task.get("scope"), "review request.epistemic_task.scope")
+    if set(scope) != {"assumptions", "conditions", "units", "exclusions"}:
+        raise ContractError("review request.epistemic_task.scope field set invalid")
+    for field in ("assumptions", "conditions", "units", "exclusions"):
+        require_string_list(
+            scope.get(field), f"review request.epistemic_task.scope.{field}"
+        )
+    return task
+
+
+def _epistemic_task_from_hypothesis(hypothesis: dict[str, Any]) -> dict[str, Any]:
+    search_test = require_dict(
+        hypothesis.get("search_test"),
+        f"hypothesis {hypothesis.get('hypothesis_id', '')}.search_test",
+    )
+    expected_disconfirming = require_string(
+        search_test.get("expected_disconfirming_observation"),
+        "hypothesis.search_test.expected_disconfirming_observation",
+    )
+    task = {
+        "question": (
+            "Does source-rooted evidence support, qualify, refute, or leave "
+            f"untested this hypothesis: {hypothesis['hypothesis']}"
+        ),
+        "hypothesis": hypothesis["hypothesis"],
+        "target_signature": hypothesis["target_signature"],
+        "scope_bounds": hypothesis["scope_and_time_bounds"],
+        "scope": {
+            "assumptions": [],
+            "conditions": [hypothesis["scope_and_time_bounds"]],
+            "units": [],
+            "exclusions": [],
+        },
+        "defeaters": list(hypothesis["defeaters"]),
+        "falsifiers": [expected_disconfirming],
+        "acceptance_criteria": search_test["acceptance_criteria"],
+        "relation_vocabulary": list(EPISTEMIC_RELATION_VOCABULARY),
+        "required_inspection_depth": {
+            "minimum": "full_text",
+            "claim_bearing_components": [
+                "figures",
+                "tables",
+                "equations",
+                "appendices",
+                "supplements",
+            ],
+            "reconstruction": "execute only when required by acceptance criteria",
+        },
+    }
+    return validate_epistemic_task(task)
 
 
 def validate_learn_from_papers_request_set(
@@ -2062,6 +2314,34 @@ def validate_paper_reading_report_set(
     return document
 
 
+def validate_paper_reading_report_set_v2(
+    value: Any,
+    *,
+    network: dict[str, Any] | None = None,
+    verification_root: str | Path | None = None,
+    require_finalized: bool = False,
+) -> dict[str, Any]:
+    document = require_dict(value, "paper reading report set v2")
+    if document.get("schema") != PAPER_READING_REPORT_SET_V2_SCHEMA:
+        raise ContractError(
+            "decisive review requires PaperReadingReportSet/v2; v1 is audit-only"
+        )
+    module = _reading_dossier_module()
+    try:
+        validated = module.validate_report_set_v2(
+            document,
+            verification_root=verification_root,
+            require_finalized=require_finalized,
+        )
+    except module.ContractError as exc:
+        raise ContractError(f"invalid PaperReadingReportSet/v2: {exc}") from exc
+    if network is not None and validated.get("network_ref") != network_ref(network):
+        raise ContractError(
+            "paper reading report set v2 network_ref does not match supplied network"
+        )
+    return validated
+
+
 def validate_reviewed_evidence(value: Any) -> dict[str, Any]:
     item = require_dict(value, "reviewed evidence")
     if item.get("schema") != REVIEWED_EVIDENCE_SCHEMA:
@@ -2074,11 +2354,42 @@ def validate_reviewed_evidence(value: Any) -> dict[str, Any]:
         )
     require_string(item.get("reading_report_digest"), "reviewed evidence.reading_report_digest")
     ensure_sha256(item.get("reading_report_digest"), "reviewed evidence.reading_report_digest")
-    require_string(item.get("passage_id"), "reviewed evidence.passage_id")
-    if not item["passage_id"].startswith(PASSAGE_ID_PREFIX):
-        raise ContractError("reviewed evidence.passage_id must start with passage-")
-    require_string(item.get("passage_digest"), "reviewed evidence.passage_digest")
-    ensure_sha256(item.get("passage_digest"), "reviewed evidence.passage_digest")
+    is_v2 = item["reading_report_id"].startswith(V2_READING_REPORT_ID_PREFIX)
+    if is_v2:
+        require_string(item.get("evidence_id"), "reviewed evidence.evidence_id")
+        require_string(item.get("span_id"), "reviewed evidence.span_id")
+        if not item["span_id"].startswith("source-passages-span-"):
+            raise ContractError(
+                "reviewed evidence.span_id must start with source-passages-span-"
+            )
+        ensure_sha256(item.get("span_hash"), "reviewed evidence.span_hash")
+        require_string(
+            item.get("acquisition_locator"),
+            "reviewed evidence.acquisition_locator",
+        )
+        require_string(
+            item.get("evidence_locator"), "reviewed evidence.evidence_locator"
+        )
+        require_string(item.get("relation"), "reviewed evidence.relation")
+        if item["relation"] not in V2_RELATION_TO_OUTCOME:
+            raise ContractError("reviewed evidence.relation is invalid")
+        require_string(
+            item.get("source_bundle_id"), "reviewed evidence.source_bundle_id"
+        )
+        ensure_sha256(
+            item.get("source_bundle_digest"),
+            "reviewed evidence.source_bundle_digest",
+        )
+        ensure_sha256(
+            item.get("source_artifact_sha256"),
+            "reviewed evidence.source_artifact_sha256",
+        )
+    else:
+        require_string(item.get("passage_id"), "reviewed evidence.passage_id")
+        if not item["passage_id"].startswith(PASSAGE_ID_PREFIX):
+            raise ContractError("reviewed evidence.passage_id must start with passage-")
+        require_string(item.get("passage_digest"), "reviewed evidence.passage_digest")
+        ensure_sha256(item.get("passage_digest"), "reviewed evidence.passage_digest")
     require_string(item.get("review_request_id"), "reviewed evidence.review_request_id")
     require_string(item.get("review_request_digest"), "reviewed evidence.review_request_digest")
     require_string(item.get("source_id"), "reviewed evidence.source_id")
@@ -2096,8 +2407,8 @@ def validate_reviewed_evidence(value: Any) -> dict[str, Any]:
     if item.get("review_completed") is not True:
         raise ContractError("reviewed evidence.review_completed must be true")
 
-    if item.get("claim_support_eligible") is not True:
-        raise ContractError("reviewed evidence.claim_support_eligible must be true")
+    if not isinstance(item.get("claim_support_eligible"), bool):
+        raise ContractError("reviewed evidence.claim_support_eligible must be boolean")
     if item.get("discovery_only") is not False:
         raise ContractError("reviewed evidence.discovery_only must be false")
     outcome = item.get("outcome")
@@ -2163,7 +2474,7 @@ def validate_reviewed_evidence_set(
             raise ContractError(
                 "reviewed evidence set network_snapshot_sha256 does not match supplied network"
             )
-        if network_ref(document["network_ref"])["snapshot_id"] != network_ref(network)["snapshot_id"]:
+        if network_ref_value.get("snapshot_id") != network_ref(network)["snapshot_id"]:
             raise ContractError(
                 "reviewed evidence set network_ref snapshot_id does not match supplied network"
             )
@@ -2225,6 +2536,7 @@ def _collect_candidate_sources(
             "source_ref": source_ref,
             "candidate_id": candidate.get("candidate_id", source_ref),
             "exact_locator": exact_locator_text,
+            "acquisition_locator": exact_locator_text,
             "read_depth": read_depth,
             "required_read_depth": read_depth,
             "screening_decision": candidate.get("screening", {}).get("decision"),
@@ -2232,12 +2544,26 @@ def _collect_candidate_sources(
             "query_seed_position": index,
             "title": candidate.get("title"),
         }
-        source_digest = sha256_json(source_payload)
+        provided_source_id = candidate.get("source_id")
+        provided_source_digest = candidate.get("source_digest")
+        if (provided_source_id is None) != (provided_source_digest is None):
+            raise ContractError(
+                "candidate live source identity requires both source_id and source_digest"
+            )
+        if provided_source_id is None:
+            source_digest = sha256_json(source_payload)
+            source_id = SOURCE_ID_PREFIX + source_digest[:16]
+        else:
+            source_id = require_string(provided_source_id, "candidate.source_id")
+            source_digest = ensure_sha256(
+                provided_source_digest, "candidate.source_digest"
+            )
         item: dict[str, Any] = {
-            "source_id": SOURCE_ID_PREFIX + source_digest[:16],
+            "source_id": source_id,
             "source_digest": source_digest,
             "source_ref": source_ref,
             "exact_locator": exact_locator_text,
+            "acquisition_locator": exact_locator_text,
             "read_depth": read_depth,
             "required_read_depth": read_depth,
             "discovery_only": True,
@@ -2260,6 +2586,13 @@ def _collect_candidate_sources(
         screening_decision = candidate.get("screening", {}).get("decision")
         if screening_decision:
             item["screening_decision"] = screening_decision
+        for field in (
+            "source_bundle_id",
+            "source_bundle_digest",
+            "source_artifact_sha256",
+        ):
+            if candidate.get(field) is not None:
+                item[field] = candidate[field]
         item["source_ref"] = source_ref
         sources.append(item)
     return sources
@@ -2515,6 +2848,9 @@ def consume_results(
                             "request_id": f"LFR-{request_id}",
                             "source_request_id": request_id,
                             "hypothesis_id": hypothesis_id,
+                            "epistemic_task": _epistemic_task_from_hypothesis(
+                                hypothesis
+                            ),
                             "sources": sources,
                         }
                     )
@@ -2570,6 +2906,9 @@ def consume_results(
                         "request_id": f"LFR-{request_id}",
                         "source_request_id": request_id,
                         "hypothesis_id": hypothesis_id,
+                        "epistemic_task": _epistemic_task_from_hypothesis(
+                            hypothesis
+                        ),
                         "sources": sources,
                     }
                 )
@@ -2698,405 +3037,789 @@ def consume_results(
     return output
 
 
+def canonical_report_subject_digest(report: dict[str, Any]) -> str:
+    payload = json.loads(json.dumps(report))
+    for field in (
+        "report_id",
+        "report_digest",
+        "projection_status",
+        "claim_support_eligible",
+    ):
+        payload.pop(field, None)
+    verification = require_dict(payload.get("verification"), "report.verification")
+    verification = dict(verification)
+    for field in ("artifact_ref", "artifact_sha256", "subject_digest"):
+        verification.pop(field, None)
+    payload["verification"] = verification
+    return sha256_json(payload)
+
+
+def _pending_report_set_context(report_set: dict[str, Any]) -> dict[str, Any]:
+    reports = report_set["reports"]
+    context = {
+        key: json.loads(json.dumps(value))
+        for key, value in report_set.items()
+        if key not in {"report_set_id", "report_set_digest", "reports"}
+    }
+    completion = require_dict(
+        context.get("completion_matrix"), "report set attestation completion_matrix"
+    )
+    claims = require_dict(
+        completion.get("claims"), "report set attestation completion_matrix.claims"
+    )
+    if set(claims) != {"total", "eligible", "non_eligible", "decisive", "terminal"}:
+        raise ContractError("report set attestation completion_matrix.claims invalid")
+    total = len(reports)
+    completion["claims"] = {
+        "total": total,
+        "eligible": 0,
+        "non_eligible": total,
+        "decisive": 0,
+        "terminal": total,
+    }
+    return context
+
+
+def _expected_report_identities(report_set: dict[str, Any]) -> list[dict[str, str]]:
+    identities = [
+        {
+            "claim_id": require_string(report.get("claim_id"), "report claim_id"),
+            "hypothesis_id": require_string(
+                report.get("hypothesis_id"), "report hypothesis_id"
+            ),
+            "target_id": require_string(report.get("target_id"), "report target_id"),
+            "subject_digest": canonical_report_subject_digest(report),
+        }
+        for report in report_set["reports"]
+    ]
+    return sorted(
+        identities,
+        key=lambda item: (
+            item["claim_id"],
+            item["hypothesis_id"],
+            item["target_id"],
+            item["subject_digest"],
+        ),
+    )
+
+
+def _safe_attestation_path(root: str | Path, artifact_ref: str) -> Path:
+    root_path = Path(root)
+    if root_path.is_symlink() or not root_path.is_dir():
+        raise ContractError("verification_root must be a regular non-symlink directory")
+    relative = Path(require_string(artifact_ref, "verification.artifact_ref"))
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ContractError("verification.artifact_ref must be a safe relative path")
+    current = root_path
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            raise ContractError("verification attestation path must not traverse symlinks")
+    resolved_root = root_path.resolve()
+    resolved = current.resolve()
+    if resolved_root not in resolved.parents:
+        raise ContractError("verification attestation escapes verification_root")
+    if not resolved.is_file() or resolved.is_symlink():
+        raise ContractError("verification attestation must be a regular file")
+    return resolved
+
+
+def _validate_attestation(
+    report: dict[str, Any],
+    *,
+    report_set: dict[str, Any],
+    verification_root: str | Path,
+) -> dict[str, Any]:
+    verification = require_dict(report.get("verification"), "report.verification")
+    expected_verification_keys = {
+        "mode",
+        "verifier_id",
+        "artifact_ref",
+        "artifact_sha256",
+        "subject_digest",
+    }
+    if set(verification) != expected_verification_keys:
+        raise ContractError(
+            "producer verification contract incomplete: expected mode, verifier_id, "
+            "artifact_ref, artifact_sha256, and subject_digest"
+        )
+    mode = require_string(verification.get("mode"), "report.verification.mode")
+    if mode not in {
+        "independent_source_check",
+        "same_context_diagnostic",
+        "expert_review",
+    }:
+        raise ContractError("report.verification.mode invalid")
+    verifier_id = require_string(
+        verification.get("verifier_id"), "report.verification.verifier_id"
+    )
+    artifact_sha256 = ensure_sha256(
+        verification.get("artifact_sha256"),
+        "report.verification.artifact_sha256",
+    )
+    subject_digest = ensure_sha256(
+        verification.get("subject_digest"), "report.verification.subject_digest"
+    )
+    expected_subject = canonical_report_subject_digest(report)
+    if subject_digest != expected_subject:
+        raise ContractError("report.verification.subject_digest mismatch")
+
+    expected_artifact_ref = (
+        "verification-attestations/" + artifact_sha256 + ".json"
+    )
+    if verification["artifact_ref"] != expected_artifact_ref:
+        raise ContractError(
+            "verification attestation artifact_ref is not the canonical content address"
+        )
+    artifact_path = _safe_attestation_path(verification_root, expected_artifact_ref)
+    raw = artifact_path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != artifact_sha256:
+        raise ContractError("verification attestation artifact SHA-256 mismatch")
+    try:
+        attestation = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ContractError("verification attestation must be UTF-8 JSON") from exc
+    expected_bytes = canonical_bytes(attestation) + b"\n"
+    if raw != expected_bytes:
+        raise ContractError("verification attestation must use canonical JSON plus newline")
+    attestation = require_dict(attestation, "verification attestation")
+    expected_keys = {
+        "schema",
+        "mode",
+        "verifier_id",
+        "origin",
+        "verdict",
+        "basis",
+        "request_ref",
+        "request_digest",
+        "subject_digest",
+        "claim_id",
+        "hypothesis_id",
+        "target_id",
+        "scope_digest",
+        "evidence_bindings",
+        "dossier_id",
+        "dossier_digest",
+        "source_bundle_id",
+        "source_bundle_digest",
+        "source_artifact_sha256",
+        "support_candidate_eligible",
+        "report_set_context",
+        "expected_report_identities",
+        "verifier_context_id",
+        "producer_context_id",
+        "created_at",
+    }
+    if set(attestation) != expected_keys:
+        raise ContractError("verification attestation uses an invalid closed field set")
+    if attestation.get("schema") != VERIFIER_ATTESTATION_SCHEMA:
+        raise ContractError(
+            f"verification attestation.schema must equal {VERIFIER_ATTESTATION_SCHEMA}"
+        )
+    require_timestamp(attestation.get("created_at"), "attestation.created_at")
+    if attestation.get("origin") != "external_verifier":
+        raise ContractError("verification attestation origin must be external_verifier")
+    if attestation.get("verdict") != "passed":
+        raise ContractError("verification attestation verdict must be passed")
+    require_string(attestation.get("basis"), "attestation.basis")
+    request_ref = require_string(
+        attestation.get("request_ref"), "attestation.request_ref"
+    )
+    request_digest = ensure_sha256(
+        attestation.get("request_digest"), "attestation.request_digest"
+    )
+    expected_request_ref = "verification-requests/" + request_digest + ".json"
+    if request_ref != expected_request_ref:
+        raise ContractError(
+            "verification request artifact_ref is not the canonical content address"
+        )
+    request_path = _safe_attestation_path(verification_root, expected_request_ref)
+    request_raw = request_path.read_bytes()
+    if hashlib.sha256(request_raw).hexdigest() != request_digest:
+        raise ContractError("verification request artifact SHA-256 mismatch")
+    try:
+        request = json.loads(request_raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ContractError("verification request must be UTF-8 JSON") from exc
+    if request_raw != canonical_bytes(request) + b"\n":
+        raise ContractError("verification request must use canonical JSON plus newline")
+    request = require_dict(request, "verification request")
+    request_keys = {
+        "schema",
+        "mode",
+        "verifier_id",
+        "producer_context_id",
+        "subject_digest",
+        "claim_id",
+        "hypothesis_id",
+        "target_id",
+        "scope_digest",
+        "evidence_bindings",
+        "dossier_id",
+        "dossier_digest",
+        "source_bundle_id",
+        "source_bundle_digest",
+        "source_artifact_sha256",
+        "support_candidate_eligible",
+        "report_set_context",
+        "expected_report_identities",
+    }
+    if set(request) != request_keys:
+        raise ContractError("verification request uses an invalid closed field set")
+    if request.get("schema") != VERIFICATION_REQUEST_SCHEMA:
+        raise ContractError(
+            f"verification request.schema must equal {VERIFICATION_REQUEST_SCHEMA}"
+        )
+    producer_context_id = require_string(
+        request.get("producer_context_id"),
+        "verification request.producer_context_id",
+    )
+    verifier_context_id = require_string(
+        attestation.get("verifier_context_id"), "attestation.verifier_context_id"
+    )
+    if verifier_context_id == producer_context_id:
+        raise ContractError(
+            "verification attestation verifier_context_id must differ from producer_context_id"
+        )
+    if attestation.get("producer_context_id") != producer_context_id:
+        raise ContractError(
+            "verification attestation producer_context_id binding mismatch"
+        )
+    expected_bindings = report["evidence_bindings"]
+    expected_set_context = _pending_report_set_context(report_set)
+    expected_identities = _expected_report_identities(report_set)
+    expected = {
+        "subject_digest": subject_digest,
+        "claim_id": report["claim_id"],
+        "hypothesis_id": report["hypothesis_id"],
+        "target_id": report["target_id"],
+        "scope_digest": sha256_json(report["scope"]),
+        "evidence_bindings": expected_bindings,
+        "dossier_id": report["dossier_id"],
+        "dossier_digest": report["dossier_digest"],
+        "source_bundle_id": report["source_bundle_id"],
+        "source_bundle_digest": report["source_bundle_digest"],
+        "source_artifact_sha256": report["source_artifact_sha256"],
+        "mode": mode,
+        "verifier_id": verifier_id,
+        "support_candidate_eligible": report["claim_support_eligible"],
+        "report_set_context": expected_set_context,
+        "expected_report_identities": expected_identities,
+    }
+    for field, value in expected.items():
+        if attestation.get(field) != value:
+            raise ContractError(f"verification attestation {field} binding mismatch")
+        if request.get(field) != value:
+            raise ContractError(f"verification request {field} binding mismatch")
+    for field in (
+        "mode",
+        "verifier_id",
+        "producer_context_id",
+        "subject_digest",
+        "claim_id",
+        "hypothesis_id",
+        "target_id",
+        "scope_digest",
+        "evidence_bindings",
+        "dossier_id",
+        "dossier_digest",
+        "source_bundle_id",
+        "source_bundle_digest",
+        "source_artifact_sha256",
+        "support_candidate_eligible",
+        "report_set_context",
+        "expected_report_identities",
+    ):
+        if attestation.get(field) != request.get(field):
+            raise ContractError(
+                f"verification request/attestation {field} binding mismatch"
+            )
+
+    normalized_verifier = verifier_id.strip().lower().replace("_", "-")
+    denied_verifier_markers = {
+        "producer-self",
+        "generated",
+        "auto-generated",
+        "learn-from-papers",
+        "template",
+    }
+    if normalized_verifier in denied_verifier_markers or any(
+        normalized_verifier.startswith(marker + ":")
+        for marker in denied_verifier_markers
+    ):
+        raise ContractError(
+            "obvious producer-generated or self-asserted verifier identity is not independent"
+        )
+    return {
+        "mode": mode,
+        "verifier_id": verifier_id,
+        "artifact_ref": verification["artifact_ref"],
+        "artifact_sha256": artifact_sha256,
+        "subject_digest": subject_digest,
+        "origin": attestation["origin"],
+        "verdict": attestation["verdict"],
+        "request_ref": request_ref,
+        "request_digest": request_digest,
+        "producer_context_id": producer_context_id,
+        "verifier_context_id": verifier_context_id,
+        "created_at": attestation["created_at"],
+    }
+
+
+def _verify_reading_artifacts(
+    report_set_value: Any,
+    dossier_value: Any,
+    *,
+    source_bundle_path: str | Path,
+    source_artifact_path: str | Path,
+    verification_root: str | Path,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    module = _reading_dossier_module()
+    report_set = validate_paper_reading_report_set_v2(
+        report_set_value,
+        verification_root=verification_root,
+        require_finalized=True,
+    )
+    dossier = require_dict(dossier_value, "paper reading dossier")
+    try:
+        verified_bundle = module.verify_bundle(
+            bundle=str(source_bundle_path), source=str(source_artifact_path)
+        )
+        validated_dossier = module.validate_dossier(
+            dossier,
+            bundle=str(source_bundle_path),
+            source=str(source_artifact_path),
+        )
+        projected = module.project_report_set(
+            validated_dossier,
+            bundle=str(source_bundle_path),
+            source=str(source_artifact_path),
+        )
+    except (module.ContractError, module.SourceBundleContractError) as exc:
+        raise ContractError(f"reading artifact verification failed: {exc}") from exc
+    projected_top = _pending_report_set_context(projected)
+    supplied_top = _pending_report_set_context(report_set)
+    if projected_top != supplied_top:
+        raise ContractError(
+            "reading report set metadata must equal strict dossier projection"
+        )
+    projected_reports = {
+        report["claim_id"]: report for report in projected["reports"]
+    }
+    supplied_reports = {
+        report["claim_id"]: report for report in report_set["reports"]
+    }
+    if set(projected_reports) != set(supplied_reports):
+        raise ContractError(
+            "reading report claims must equal strict dossier projection"
+        )
+    for claim_id, supplied_report in supplied_reports.items():
+        if canonical_report_subject_digest(supplied_report) != canonical_report_subject_digest(
+            projected_reports[claim_id]
+        ):
+            raise ContractError(
+                "reading report subject must equal strict dossier projection"
+            )
+    if verified_bundle["bundle_id"] != report_set["source_bundle_id"]:
+        raise ContractError("verified source bundle id mismatch")
+    if verified_bundle["bundle_digest"] != report_set["source_bundle_digest"]:
+        raise ContractError("verified source bundle digest mismatch")
+    if (
+        verified_bundle["source"]["source_sha256"]
+        != report_set["source_artifact_sha256"]
+    ):
+        raise ContractError("verified source artifact SHA-256 mismatch")
+    return report_set, validated_dossier, verified_bundle
+
+
+def _derive_review_records(
+    network: dict[str, Any],
+    review_requests_value: Any,
+    report_set_value: Any,
+    dossier_value: Any,
+    *,
+    source_bundle_path: str | Path,
+    source_artifact_path: str | Path,
+    verification_root: str | Path,
+) -> tuple[
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+    list[dict[str, Any]],
+]:
+    review_requests = validate_learn_from_papers_request_set(
+        review_requests_value, network=network
+    )
+    report_set, dossier, verified_bundle = _verify_reading_artifacts(
+        report_set_value,
+        dossier_value,
+        source_bundle_path=source_bundle_path,
+        source_artifact_path=source_artifact_path,
+        verification_root=verification_root,
+    )
+    if report_set["network_ref"] != network_ref(network):
+        raise ContractError("reading report set network_ref mismatch")
+    if report_set["review_request_set_id"] != review_requests["request_set_id"]:
+        raise ContractError("reading report set request id mismatch")
+    if report_set["review_request_set_digest"] != review_requests["request_set_digest"]:
+        raise ContractError("reading report set request digest mismatch")
+
+    request_lookup = {
+        request["request_id"]: request for request in review_requests["requests"]
+    }
+    request_digests = {
+        request_id: sha256_json(request)
+        for request_id, request in request_lookup.items()
+    }
+    source_lookup: dict[tuple[str, str], dict[str, Any]] = {}
+    for request_id, request in request_lookup.items():
+        for source in request["sources"]:
+            source_lookup[(request_id, source["source_id"])] = source
+    claims = {claim["claim_id"]: claim for claim in dossier["claims"]}
+    evidence_records = {
+        evidence["evidence_id"]: evidence for evidence in dossier["evidence_records"]
+    }
+    live_source_ids = _live_source_ids(network)
+
+    records: list[dict[str, Any]] = []
+    for report in report_set["reports"]:
+        request_id = report["review_request_id"]
+        request = request_lookup.get(request_id)
+        if request is None:
+            raise ContractError("reading report references unknown review request")
+        if report["review_request_digest"] != request_digests[request_id]:
+            raise ContractError("reading report request digest mismatch")
+        if report["hypothesis_id"] != request["hypothesis_id"]:
+            raise ContractError("reading report hypothesis mismatch")
+        if report["target_id"] != request["epistemic_task"]["target_signature"]:
+            raise ContractError("reading report target mismatch")
+        if report["scope"] != request["epistemic_task"]["scope"]:
+            scope_match = False
+        else:
+            scope_match = True
+        review_source = report_set["review_source"]
+        source = source_lookup.get((request_id, review_source["source_id"]))
+        if source is None:
+            raise ContractError("reading report review_source id mismatch")
+        if review_source["source_digest"] != source["source_digest"]:
+            raise ContractError("reading report review_source digest mismatch")
+        if review_source["acquisition_locator"] != source["acquisition_locator"]:
+            raise ContractError("reading report acquisition locator mismatch")
+        source_onboarded = source["source_id"] in live_source_ids
+        claim = claims.get(report["claim_id"])
+        if claim is None:
+            raise ContractError("reading report claim missing from verified dossier")
+        if report["claim_statement"] != claim["statement"]:
+            raise ContractError("reading report claim statement mismatch")
+        attestation = _validate_attestation(
+            report,
+            report_set=report_set,
+            verification_root=verification_root,
+        )
+
+        bindings = report["evidence_bindings"]
+        if not bindings:
+            records.append(
+                {
+                    "report": report,
+                    "request": request,
+                    "source": source,
+                    "claim": claim,
+                    "evidence": None,
+                    "binding": None,
+                    "verification": attestation,
+                    "scope_match": scope_match,
+                    "onboarding_required": not source_onboarded,
+                    "patch_eligible": False,
+                    "derived_outcome": "unknown",
+                }
+            )
+            continue
+        for binding in bindings:
+            evidence = evidence_records.get(binding["evidence_id"])
+            if evidence is None:
+                raise ContractError(
+                    "reading report evidence missing from verified dossier"
+                )
+            if evidence["span_id"] != binding["span_id"]:
+                raise ContractError("verified evidence span_id mismatch")
+            if evidence["span_hash"] != binding["span_hash"]:
+                raise ContractError("verified evidence span_hash mismatch")
+            if evidence["exact_locator"] != binding["exact_locator"]:
+                raise ContractError("verified evidence locator mismatch")
+            mode_ok = attestation["mode"] in {
+                "independent_source_check",
+                "expert_review",
+            }
+            depth_ok = report["inspection_depth"] in {"evidence", "reconstruction"}
+            patch_eligible = all(
+                (
+                    report["relation"] == "supports",
+                    report["access_level"] == "full_text",
+                    depth_ok,
+                    scope_match,
+                    report["claim_support_eligible"] is True,
+                    report["projection_status"] == "decisive",
+                    report["verifier_status"] == "passed",
+                    mode_ok,
+                    source_onboarded,
+                )
+            )
+            if patch_eligible:
+                derived_outcome = "supports"
+            elif (
+                report["relation"] == "refutes"
+                and report["access_level"] == "full_text"
+                and depth_ok
+                and scope_match
+                and report["projection_status"] == "decisive"
+                and report["verifier_status"] == "passed"
+                and mode_ok
+                and source_onboarded
+            ):
+                derived_outcome = "contradicts"
+            else:
+                derived_outcome = "unknown"
+            records.append(
+                {
+                    "report": report,
+                    "request": request,
+                    "source": source,
+                    "claim": claim,
+                    "evidence": evidence,
+                    "binding": binding,
+                    "verification": attestation,
+                    "scope_match": scope_match,
+                    "onboarding_required": not source_onboarded,
+                    "patch_eligible": patch_eligible,
+                    "derived_outcome": derived_outcome,
+                }
+            )
+    return review_requests, report_set, dossier, verified_bundle, records
+
+
+def _review_derivation_digest(
+    review_requests: dict[str, Any],
+    report_set: dict[str, Any],
+    dossier: dict[str, Any],
+    verified_bundle: dict[str, Any],
+    records: list[dict[str, Any]],
+) -> str:
+    return sha256_json(
+        {
+            "review_request_set_digest": review_requests["request_set_digest"],
+            "report_set_digest": report_set["report_set_digest"],
+            "dossier_digest": dossier["dossier_digest"],
+            "source_bundle_digest": verified_bundle["bundle_digest"],
+            "attestations": sorted(
+                record["verification"]["artifact_sha256"] for record in records
+            ),
+        }
+    )
+
+
+def _status_basis_from_record(record: dict[str, Any]) -> dict[str, Any]:
+    report = record["report"]
+    source = record["source"]
+    binding = record["binding"]
+    evidence = record["evidence"]
+    if binding is None or evidence is None:
+        raise ContractError("decisive status basis requires evidence binding")
+    return {
+        "hypothesis_id": report["hypothesis_id"],
+        "source_ref": source["source_ref"],
+        "source_id": source["source_id"],
+        "source_digest": source["source_digest"],
+        "acquisition_locator": source["acquisition_locator"],
+        "locator": binding["exact_locator"],
+        "evidence_locator": binding["exact_locator"],
+        "read_depth": report["access_level"],
+        "review_request_id": report["review_request_id"],
+        "review_request_digest": report["review_request_digest"],
+        "report_set_id": record["report_set_id"],
+        "report_set_digest": record["report_set_digest"],
+        "dossier_id": report["dossier_id"],
+        "dossier_digest": report["dossier_digest"],
+        "reading_report_id": report["report_id"],
+        "reading_report_digest": report["report_digest"],
+        "claim_id": report["claim_id"],
+        "claim_digest": sha256_json(record["claim"]),
+        "evidence_id": binding["evidence_id"],
+        "evidence_digest": sha256_json(evidence),
+        "span_id": binding["span_id"],
+        "span_hash": binding["span_hash"],
+        "source_bundle_id": report["source_bundle_id"],
+        "source_bundle_digest": report["source_bundle_digest"],
+        "source_artifact_sha256": report["source_artifact_sha256"],
+        "relation": report["relation"],
+        "outcome": record["derived_outcome"],
+        "projection_status": report["projection_status"],
+        "claim_support_eligible": report["claim_support_eligible"],
+        "scope_match": record["scope_match"],
+        "verification": {
+            "mode": record["verification"]["mode"],
+            "verifier_id": record["verification"]["verifier_id"],
+            "artifact_sha256": record["verification"]["artifact_sha256"],
+        },
+    }
+
+
 def consume_reviewed_evidence(
     hypotheses_value: Any,
     network: dict[str, Any],
     review_requests_value: Any,
-    evidence_set_value: Any,
     reading_reports_value: Any,
+    dossier_value: Any,
     *,
+    source_bundle_path: str | Path,
+    source_artifact_path: str | Path,
+    verification_root: str | Path,
     round_id: str | None = None,
 ) -> dict[str, Any]:
     hypotheses_doc = validate_hypotheses(hypotheses_value, network)
-    review_requests = validate_learn_from_papers_request_set(
-        review_requests_value, network=network
+    (
+        review_requests,
+        report_set,
+        dossier,
+        verified_bundle,
+        records,
+    ) = _derive_review_records(
+        network,
+        review_requests_value,
+        reading_reports_value,
+        dossier_value,
+        source_bundle_path=source_bundle_path,
+        source_artifact_path=source_artifact_path,
+        verification_root=verification_root,
     )
-    evidence_set = validate_reviewed_evidence_set(evidence_set_value, network=network)
-    reading_report_set = validate_paper_reading_report_set(
-        reading_reports_value, network=network
-    )
-    expected_review_set = hypotheses_doc.get("cycle_state", {}).get("review_request_set_id")
-    expected_review_set_digest = hypotheses_doc.get("cycle_state", {}).get(
-        "review_request_set_digest"
-    )
-    expected_evidence_set_digest = hypotheses_doc.get("cycle_state", {}).get(
-        "reviewed_evidence_set_digest"
-    )
-    expected_report_set = hypotheses_doc.get("cycle_state", {}).get(
-        "report_set_id"
-    )
-    expected_report_set_digest = hypotheses_doc.get("cycle_state", {}).get(
-        "report_set_digest"
-    )
-    review_set_id = review_requests["request_set_id"]
-    review_set_digest = review_requests["request_set_digest"]
-    if evidence_set["request_set_id"] != review_set_id:
-        raise ContractError("reviewed evidence set id does not match review request set")
-    if evidence_set["request_set_digest"] != review_set_digest:
-        raise ContractError(
-            "reviewed evidence set digest does not match review request set"
-        )
-    if expected_review_set and review_set_id != expected_review_set:
-        raise ContractError("review request set id does not match cycle review request set")
-    if (
-        expected_review_set_digest
-        and review_set_digest != expected_review_set_digest
-    ):
-        raise ContractError(
-            "review request set digest does not match cycle review request set digest"
-        )
-    if (
-        expected_evidence_set_digest
-        and evidence_set["evidence_set_digest"] != expected_evidence_set_digest
-    ):
-        raise ContractError(
-            "reviewed evidence set digest does not match cycle reviewed evidence set digest"
-        )
-    if expected_report_set and reading_report_set["report_set_id"] != expected_report_set:
-        raise ContractError(
-            "reading report set id does not match cycle report set"
-        )
-    if (
-        expected_report_set_digest
-        and expected_report_set_digest != reading_report_set["report_set_digest"]
-    ):
-        raise ContractError(
-            "reading report set digest does not match cycle report set digest"
-        )
-    if review_requests["network_id"] != evidence_set["network_id"]:
-        raise ContractError(
-            "reviewed evidence set network_id does not match review request set"
-        )
-    if review_requests["network_snapshot_sha256"] != evidence_set["network_snapshot_sha256"]:
-        raise ContractError(
-            "reviewed evidence set snapshot does not match review request set"
-        )
-    if review_requests["network_ref"] != evidence_set["network_ref"]:
-        raise ContractError(
-            "reviewed evidence set network_ref does not match review request set"
-        )
-    if review_requests["network_id"] != reading_report_set["network_ref"]["network_id"]:
-        raise ContractError(
-            "reading report set network_id does not match review request set"
-        )
-    if review_requests["request_set_id"] != reading_report_set["review_request_set_id"]:
-        raise ContractError(
-            "reading report set review_request_set_id does not match review request set"
-        )
-    if review_requests["request_set_digest"] != reading_report_set["review_request_set_digest"]:
-        raise ContractError(
-            "reading report set review_request_set_digest does not match review request set"
-        )
-    if review_requests["network_snapshot_sha256"] != reading_report_set["network_ref"]["sha256"]:
-        raise ContractError(
-            "reading report set snapshot does not match review request set"
-        )
-    if review_requests["network_ref"] != reading_report_set["network_ref"]:
-        raise ContractError(
-            "reading report set network_ref does not match review request set"
-        )
-
-    review_request_lookup = {
-        request["request_id"]: request for request in review_requests["requests"]
-    }
-    review_request_digests = {
-        request["request_id"]: sha256_json(request) for request in review_requests["requests"]
-    }
-    review_request_sources: dict[str, dict[str, dict[str, Any]]] = {}
-    for request_id, request in review_request_lookup.items():
-        source_map: dict[str, dict[str, Any]] = {}
-        for source in request["sources"]:
-            source_map[source["source_id"]] = source
-        review_request_sources[request_id] = source_map
-
-    reading_report_lookup: dict[str, dict[str, Any]] = {}
-    reading_report_passage_lookup: dict[tuple[str, str], dict[str, Any]] = {}
-    for report in reading_report_set["reports"]:
-        report_request_id = report["review_request_id"]
-        if report_request_id not in review_request_lookup:
-            raise ContractError(
-                "reading report set includes report for unknown review request"
-            )
-        if report["review_request_digest"] != review_request_digests[report_request_id]:
-            raise ContractError(
-                "reading report set review_request_digest mismatch"
-            )
-        if report["source_id"] not in review_request_sources[report_request_id]:
-            raise ContractError(
-                "reading report set source_id does not match selected review source"
-            )
-        report_source = review_request_sources[report_request_id][report["source_id"]]
-        if report["source_digest"] != report_source["source_digest"]:
-            raise ContractError(
-                "reading report set source_digest does not match selected source"
-            )
-        if report["source_ref"] != report_source["source_ref"]:
-            raise ContractError(
-                "reading report set source_ref does not match selected source"
-            )
-        reading_report_lookup[report["report_id"]] = report
-        passages = report.get("evidence_passages")
-        if not isinstance(passages, list) or not passages:
-            raise ContractError("reading report set passages must be a non-empty list")
-        for passage in passages:
-            passage_id = passage.get("passage_id")
-            if not isinstance(passage_id, str):
-                raise ContractError(
-                    "reading report set passages must include passage_id"
-                )
-            reading_report_passage_lookup[(report["report_id"], passage_id)] = passage
-
     previous_cycle = hypotheses_doc.get("cycle_state", {})
-    previous_round = previous_cycle.get("discovery_round", 0)
-    if not isinstance(previous_round, int):
-        previous_round = 0
-    previous_no_progress = previous_cycle.get("consecutive_no_progress_rounds", 0)
-    if not isinstance(previous_no_progress, int):
-        previous_no_progress = 0
-    max_rounds = previous_cycle.get("max_rounds", 1)
-    if not isinstance(max_rounds, int):
-        max_rounds = 1
+    for field, actual in (
+        ("review_request_set_id", review_requests["request_set_id"]),
+        ("review_request_set_digest", review_requests["request_set_digest"]),
+        ("report_set_id", report_set["report_set_id"]),
+        ("report_set_digest", report_set["report_set_digest"]),
+    ):
+        expected = previous_cycle.get(field)
+        if expected is not None and expected != actual:
+            raise ContractError(f"{field} does not match active discovery cycle")
 
-    manual_pending = any(
-        item["status"] == "awaiting" and item.get("next_action") == "consume-reviewed-evidence"
-        for item in hypotheses_doc["hypotheses"]
+    derivation_digest = _review_derivation_digest(
+        review_requests, report_set, dossier, verified_bundle, records
     )
+    derivation_id = "review-derivation-" + derivation_digest[:16]
+    records_by_hypothesis: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        record["report_set_id"] = report_set["report_set_id"]
+        record["report_set_digest"] = report_set["report_set_digest"]
+        records_by_hypothesis.setdefault(
+            record["report"]["hypothesis_id"], []
+        ).append(record)
 
-    hypothesis_by_id = {
-        hypothesis["hypothesis_id"]: hypothesis for hypothesis in hypotheses_doc["hypotheses"]
+    previous_round = previous_cycle.get("discovery_round", 0)
+    previous_round = previous_round if isinstance(previous_round, int) else 0
+    max_rounds = previous_cycle.get("max_rounds", 1)
+    max_rounds = max_rounds if isinstance(max_rounds, int) else 1
+    updated = []
+    status_counts = {status: 0 for status in sorted(STATUSES)}
+    consumed = 0
+    for original in hypotheses_doc["hypotheses"]:
+        hypothesis = json.loads(json.dumps(original))
+        if hypothesis["status"] != "results":
+            status_counts[hypothesis["status"]] += 1
+            updated.append(hypothesis)
+            continue
+        relevant = records_by_hypothesis.get(hypothesis["hypothesis_id"], [])
+        supports = [r for r in relevant if r["derived_outcome"] == "supports"]
+        refutes = [r for r in relevant if r["derived_outcome"] == "contradicts"]
+        onboarding = [r for r in relevant if r["onboarding_required"]]
+        if supports and refutes:
+            hypothesis["status"] = "contested"
+            basis_records = supports + refutes
+        elif supports:
+            hypothesis["status"] = "content_found"
+            basis_records = supports
+        elif refutes:
+            hypothesis["status"] = "refuted"
+            basis_records = refutes
+        elif onboarding:
+            hypothesis["status"] = "blocked"
+            basis_records = [
+                record
+                for record in onboarding
+                if record["binding"] is not None and record["evidence"] is not None
+            ]
+        elif relevant:
+            hypothesis["status"] = "unresolved"
+            basis_records = []
+        else:
+            basis_records = []
+        hypothesis["status_basis"] = [
+            _status_basis_from_record(record) for record in basis_records
+        ]
+        hypothesis["next_action"] = (
+            "onboarding_required"
+            if hypothesis["status"] == "blocked" and onboarding
+            else "discover"
+        )
+        if basis_records and hypothesis["status"] != "blocked":
+            consumed += 1
+        status_counts[hypothesis["status"]] += 1
+        updated.append(hypothesis)
+
+    blocked_hypothesis_ids = {
+        hypothesis["hypothesis_id"]
+        for hypothesis in updated
+        if hypothesis["status"] == "blocked"
+        and hypothesis["next_action"] == "onboarding_required"
     }
-
-    evidence_by_hypothesis: dict[str, list[dict[str, Any]]] = {}
-    for item in evidence_set["evidence"]:
-        request_id = item["request_id"]
-        review_request = review_request_lookup.get(request_id)
-        if review_request is None:
-            raise ContractError("reviewed evidence refers to unknown review request")
-        if item["review_request_id"] != request_id:
-            raise ContractError("reviewed evidence request_id mismatch review_request_id")
-        if item["hypothesis_id"] != review_request["hypothesis_id"]:
-            raise ContractError("reviewed evidence hypothesis_id does not match review request")
-        if item["review_request_digest"] != review_request_digests[item["request_id"]]:
-            raise ContractError("reviewed evidence review request digest mismatch")
-        reading_report_id = item["reading_report_id"]
-        reading_report_digest = item["reading_report_digest"]
-        passage_id = item["passage_id"]
-        passage_digest = item["passage_digest"]
-        report = reading_report_lookup.get(reading_report_id)
-        if report is None:
-            raise ContractError("reviewed evidence reading_report_id not found in reading report set")
-        if report["review_request_id"] != request_id:
-            raise ContractError("reviewed evidence reading_report_id mismatch review_request_id")
-        if report["review_request_digest"] != item["review_request_digest"]:
-            raise ContractError("reviewed evidence reading_report_digest mismatch")
-        if report["report_digest"] != reading_report_digest:
-            raise ContractError(
-                "reviewed evidence reading_report_digest does not match report digest"
-            )
-        passage = reading_report_passage_lookup.get((reading_report_id, passage_id))
-        if passage is None:
-            raise ContractError("reviewed evidence passage_id not found in report")
-        if passage["passage_digest"] != passage_digest:
-            raise ContractError("reviewed evidence passage_digest does not match passage digest")
-        source_id = item["source_id"]
-        source_digest = item["source_digest"]
-        source_lookup = review_request_sources.get(request_id, {})
-        source = source_lookup.get(source_id)
-        if source is None:
-            raise ContractError(
-                "reviewed evidence source_id does not match any source in review request"
-            )
-        if source["source_digest"] != source_digest:
-            raise ContractError("reviewed evidence source digest mismatch")
-        if item["source_ref"] != source["source_ref"]:
-            raise ContractError("reviewed evidence source_ref mismatch")
-        if item["exact_locator"] != source["exact_locator"]:
-            raise ContractError("reviewed evidence exact_locator mismatch")
-        if item["read_depth"] != source["read_depth"]:
-            raise ContractError("reviewed evidence read_depth mismatch")
-        if item["read_depth"] != source.get("required_read_depth"):
-            raise ContractError(
-                "reviewed evidence read_depth mismatch required source read depth"
-            )
-        if item["source_id"] != report.get("source_id"):
-            raise ContractError("reviewed evidence source_id does not match reading report")
-        if item["source_digest"] != report.get("source_digest"):
-            raise ContractError(
-                "reviewed evidence source_digest does not match reading report"
-            )
-        if item.get("review_completed") is not True:
-            raise ContractError("reviewed evidence.review_completed must be true")
-        if source.get("url") and item.get("url") != source["url"]:
-            raise ContractError("reviewed evidence URL mismatch")
-        if source.get("doi") and item.get("doi") != source["doi"]:
-            raise ContractError("reviewed evidence DOI mismatch")
-        if item.get("discovery_only") is not False:
-            raise ContractError("reviewed evidence must not be discovery-only")
-        if item["hypothesis_id"] not in hypothesis_by_id:
-            raise ContractError("reviewed evidence refers to unknown hypothesis")
-        evidence_by_hypothesis.setdefault(item["hypothesis_id"], []).append(item)
-
-    updated: list[dict[str, Any]] = []
-    has_progress = False
+    onboarding_source_ids = sorted(
+        {
+            record["source"]["source_id"]
+            for record in records
+            if record["onboarding_required"]
+            and record["report"]["hypothesis_id"] in blocked_hypothesis_ids
+        }
+    )
+    onboarding_terminal = bool(onboarding_source_ids)
     cycle_state = {
         "schema_version": SCHEMA_VERSION,
         "round_id": round_id or hypotheses_doc.get("round_id", timestamp_now()),
         "generated_at": timestamp_now(),
         "network_snapshot_sha256": network_ref(network)["sha256"],
         "network_id": network_ref(network)["network_id"],
-        "discovery_round": previous_round + (1 if evidence_set["evidence"] else 0),
-        "results_consumed": 0,
-        "awaiting_results": 0,
-        "status_counts": {status: 0 for status in sorted(STATUSES)},
-        "consecutive_no_progress_rounds": previous_no_progress,
+        "discovery_round": previous_round + (1 if records else 0),
+        "results_consumed": consumed,
+        "awaiting_results": sum(item["status"] == "results" for item in updated),
+        "status_counts": status_counts,
+        "consecutive_no_progress_rounds": 0 if consumed else 1,
         "max_rounds": max_rounds,
-        "phase": "review",
-        "next_actions": ["discover"],
-        "stop_reason": "in_progress",
-        "pending_reason": "provider_pending",
+        "phase": "onboarding" if onboarding_terminal else "discover",
+        "next_actions": ["onboarding_required"] if onboarding_terminal else ["discover"],
+        "stop_reason": "onboarding_required" if onboarding_terminal else "provider_pending",
+        "pending_reason": (
+            "onboarding_required:" + ",".join(onboarding_source_ids)
+            if onboarding_terminal
+            else "provider_pending"
+        ),
         "saturation": False,
-        "review_request_set_id": review_set_id,
-        "review_request_set_digest": review_set_digest,
-        "reviewed_evidence_set_id": evidence_set["request_set_id"],
-        "reviewed_evidence_set_digest": evidence_set["evidence_set_digest"],
-        "report_set_id": reading_report_set["report_set_id"],
-        "report_set_digest": reading_report_set["report_set_digest"],
-        "request_set_id": previous_cycle.get("request_set_id", review_set_id),
-        "request_set_digest": previous_cycle.get("request_set_digest", review_set_digest),
+        "review_request_set_id": review_requests["request_set_id"],
+        "review_request_set_digest": review_requests["request_set_digest"],
+        "report_set_id": report_set["report_set_id"],
+        "report_set_digest": report_set["report_set_digest"],
+        "dossier_id": dossier["dossier_id"],
+        "dossier_digest": dossier["dossier_digest"],
+        "source_bundle_id": verified_bundle["bundle_id"],
+        "source_bundle_digest": verified_bundle["bundle_digest"],
+        "review_derivation_id": derivation_id,
+        "review_derivation_digest": derivation_digest,
+        "request_set_id": previous_cycle.get(
+            "request_set_id", review_requests["request_set_id"]
+        ),
+        "request_set_digest": previous_cycle.get(
+            "request_set_digest", review_requests["request_set_digest"]
+        ),
     }
-
-    for hypothesis in hypotheses_doc["hypotheses"]:
-        hypothesis = json.loads(json.dumps(hypothesis))
-        if hypothesis["status"] != "results":
-            cycle_state["status_counts"][hypothesis["status"]] += 1
-            updated.append(hypothesis)
-            continue
-
-        evidence_items = [
-            item
-            for item in evidence_by_hypothesis.get(hypothesis["hypothesis_id"], [])
-            if not item.get("discovery_only")
-        ]
-        if not evidence_items:
-            cycle_state["status_counts"][hypothesis["status"]] += 1
-            cycle_state["awaiting_results"] += 1
-            hypothesis["next_action"] = "discover"
-            updated.append(hypothesis)
-            continue
-
-        derived_status, basis_items = _derive_reviewed_hypothesis_status(evidence_items)
-        hypothesis["status"] = derived_status
-
-        if hypothesis["status"] in {
-            "content_found",
-            "supported_gap",
-            "contested",
-            "refuted",
-            "already_covered",
-        }:
-            if not any(item["outcome"] in {"supports", "contradicts", "already_covered"} for item in evidence_items):
-                raise ContractError("reviewed evidence requires decisive outcomes")
-        else:
-            basis_items = []
-
-        basis: list[dict[str, Any]] = []
-        for item in basis_items:
-            entry: dict[str, Any] = {
-                "hypothesis_id": hypothesis["hypothesis_id"],
-                "source_ref": item["source_ref"],
-                "locator": item["exact_locator"],
-                "read_depth": item["read_depth"],
-                "source_id": item["source_id"],
-                "source_digest": item["source_digest"],
-                "review_request_id": item["review_request_id"],
-                "review_request_digest": item["review_request_digest"],
-                "claim_support_eligible": item["claim_support_eligible"],
-                "reading_report_id": item["reading_report_id"],
-                "reading_report_digest": item["reading_report_digest"],
-                "passage_id": item["passage_id"],
-                "passage_digest": item["passage_digest"],
-            }
-            if item.get("url"):
-                entry["url"] = item["url"]
-            if item.get("doi"):
-                entry["doi"] = item["doi"]
-            if item.get("url") is None and item.get("doi") is None:
-                entry["source_ref"] = item["source_ref"]
-            evidence_id, evidence_digest = _review_evidence_identity(item)
-            entry["evidence_id"] = evidence_id
-            entry["evidence_digest"] = evidence_digest
-            basis.append(entry)
-
-        if hypothesis["status"] in {
-            "content_found",
-            "supported_gap",
-            "contested",
-            "refuted",
-            "already_covered",
-        }:
-            if not basis:
-                raise ContractError("reviewed evidence requires status basis entries")
-            has_progress = True
-            cycle_state["results_consumed"] += 1
-        else:
-            cycle_state["awaiting_results"] += 1
-
-        hypothesis["status_basis"] = basis
-        hypothesis["next_action"] = "discover"
-        cycle_state["status_counts"][hypothesis["status"]] += 1
-        updated.append(hypothesis)
-
-    active = any(item["status"] in DISCOVERY_ACTIVE_STATUSES for item in updated)
-    awaiting_review = any(item["status"] in CANDIDATE_FOR_REVIEW_STATUSES for item in updated)
-
-    if awaiting_review:
-        cycle_state["phase"] = "review"
-        cycle_state["next_actions"] = ["consume-reviewed-evidence"]
-        cycle_state["stop_reason"] = "review_pending"
-        cycle_state["pending_reason"] = "review_pending"
-    elif active:
-        cycle_state["phase"] = "discover"
-        cycle_state["next_actions"] = ["discover"]
-        cycle_state["stop_reason"] = "provider_pending"
-        cycle_state["pending_reason"] = "provider_pending"
-    else:
-        cycle_state["phase"] = "idle"
-        cycle_state["next_actions"] = []
-        cycle_state["stop_reason"] = "provider_pending"
-        cycle_state["pending_reason"] = "provider_pending"
-
-    if manual_pending:
-        cycle_state["stop_reason"] = "manual_required"
-        cycle_state["pending_reason"] = "manual_required"
-
-    if evidence_set["evidence"]:
-        if has_progress:
-            cycle_state["consecutive_no_progress_rounds"] = 0
-        else:
-            cycle_state["consecutive_no_progress_rounds"] = previous_no_progress + 1
-
-    terminal_round = (
-        evidence_set["evidence"]
-        and not manual_pending
-        and not awaiting_review
-        and all(
-            item["status"] in SATURATION_TERMINAL_STATUSES for item in updated
-        )
-    )
-
-    if (
-        terminal_round
-        and cycle_state["consecutive_no_progress_rounds"] >= 2
-        and not any(
-            item["status"] in SATURATION_BLOCKING_STATUSES for item in updated
-        )
-    ):
-        cycle_state["saturation"] = True
-        cycle_state["stop_reason"] = "saturated"
-
-    if evidence_set["evidence"] and cycle_state["discovery_round"] >= max_rounds:
-        cycle_state["stop_reason"] = "budget_exhausted"
-
     return {
         "schema": HYPOTHESES_SCHEMA,
         "network_ref": network_ref(network),
@@ -3108,481 +3831,650 @@ def consume_reviewed_evidence(
     }
 
 
+def _basis_row(record: dict[str, Any]) -> dict[str, Any]:
+    report = record["report"]
+    binding = record["binding"]
+    evidence = record["evidence"]
+    source = record["source"]
+    if not record["patch_eligible"] or binding is None or evidence is None:
+        raise ContractError("NetworkPatchProposal/v2 basis is not patch eligible")
+    row = {
+        "basis_id": "",
+        "basis_digest": "",
+        "review_request_id": report["review_request_id"],
+        "review_request_digest": report["review_request_digest"],
+        "report_set_id": record["report_set_id"],
+        "report_set_digest": record["report_set_digest"],
+        "dossier_id": report["dossier_id"],
+        "dossier_digest": report["dossier_digest"],
+        "reading_report_id": report["report_id"],
+        "reading_report_digest": report["report_digest"],
+        "source_bundle_id": report["source_bundle_id"],
+        "source_bundle_digest": report["source_bundle_digest"],
+        "source_artifact_sha256": report["source_artifact_sha256"],
+        "source_id": source["source_id"],
+        "source_digest": source["source_digest"],
+        "claim_id": report["claim_id"],
+        "claim_digest": sha256_json(record["claim"]),
+        "evidence_id": binding["evidence_id"],
+        "evidence_digest": sha256_json(evidence),
+        "span_id": binding["span_id"],
+        "span_hash": binding["span_hash"],
+        "source_ref": report["source_ref"],
+        "acquisition_locator": source["acquisition_locator"],
+        "evidence_locator": binding["exact_locator"],
+        "relation": report["relation"],
+        "access_level": report["access_level"],
+        "inspection_depth": report["inspection_depth"],
+        "claim_support_eligible": report["claim_support_eligible"],
+        "projection_status": report["projection_status"],
+        "verification": {
+            "mode": record["verification"]["mode"],
+            "verifier_id": record["verification"]["verifier_id"],
+            "artifact_sha256": record["verification"]["artifact_sha256"],
+        },
+    }
+    row["basis_digest"] = sha256_json(
+        {key: value for key, value in row.items() if key not in {"basis_id", "basis_digest"}}
+    )
+    row["basis_id"] = "network-patch-basis-" + row["basis_digest"][:16]
+    return row
+
+
+def _patch_action_apply_eligible(
+    target_kind: str,
+    target_signature: dict[str, str],
+    reviewed_evidence: list[dict[str, Any]],
+) -> bool:
+    """Return whether the closed target is safe for RKN materialization."""
+    if target_kind == "relation":
+        return True
+    if target_kind == "evidence":
+        return (
+            len(reviewed_evidence) == 1
+            and target_signature["signature"]
+            == reviewed_evidence[0]["evidence_id"]
+        )
+    return False
+
+
+def _patch_action_status(
+    target_kind: str,
+    target_signature: dict[str, str],
+    reviewed_evidence: list[dict[str, Any]],
+) -> str:
+    if _patch_action_apply_eligible(
+        target_kind,
+        target_signature,
+        reviewed_evidence,
+    ):
+        return "proposed"
+    return "blocked"
+
+
+def _target_claim_from_record(
+    hypothesis: dict[str, Any],
+    record: dict[str, Any],
+    basis: dict[str, Any],
+    target_signature: dict[str, str],
+) -> dict[str, Any]:
+    report = record["report"]
+    request = record["request"]
+    task = require_dict(request.get("epistemic_task"), "target claim epistemic task")
+    request_scope = require_dict(task.get("scope"), "target claim request scope")
+    if report["scope"] != request_scope:
+        raise ContractError("target claim requires exact request/final-report scope")
+    assumptions = require_string_list(
+        request_scope.get("assumptions"), "target claim scope assumptions"
+    )
+    conditions = require_string_list(
+        request_scope.get("conditions"), "target claim scope conditions"
+    )
+    units = require_string_list(request_scope.get("units"), "target claim scope units")
+    exclusions = require_string_list(
+        request_scope.get("exclusions"), "target claim scope exclusions"
+    )
+    defeaters = require_string_list(
+        task.get("defeaters"), "target claim scope defeaters"
+    )
+    coverage_dimensions: list[str] = []
+    benchmark_profiles: list[str] = []
+    scope = {
+        "scope_statement": require_string(
+            task.get("scope_bounds"), "target claim scope statement"
+        ),
+        "assumptions": assumptions,
+        "conditions": conditions,
+        "units": units,
+        "exclusions": exclusions,
+        "defeaters": defeaters,
+        "coverage_dimensions": coverage_dimensions,
+        "benchmark_profiles": benchmark_profiles,
+    }
+    target = {
+        "schema": TARGET_CLAIM_SCHEMA,
+        "schema_version": "1.0",
+        "claim_text": require_string(
+            report.get("claim_statement"), "target claim claim_text"
+        ),
+        "entity_id": None,
+        "impact": require_string(
+            hypothesis.get("decision_impact"), "target claim impact"
+        ),
+        "coverage_dimensions": coverage_dimensions,
+        "benchmark_profiles": benchmark_profiles,
+        "supersedes": None,
+        "epistemic_status": {
+            "projection_status": basis["projection_status"],
+            "claim_support_eligible": basis["claim_support_eligible"],
+            "inspection_depth": basis["inspection_depth"],
+            "relation": basis["relation"],
+        },
+        "gap_hypothesis_id": hypothesis["hypothesis_id"],
+        "target_signature": target_signature,
+        "report_claim_id": basis["claim_id"],
+        "report_claim_digest": basis["claim_digest"],
+        "scope": scope,
+        "scope_digest": sha256_json(scope),
+    }
+    if target["impact"] not in LEVELS:
+        raise ContractError("target claim impact must come from decision_impact")
+    target["target_claim_digest"] = sha256_json(target)
+    target["claim_id"] = "claim-target-" + target["target_claim_digest"][:16]
+    return target
+
+
+def _validate_patch_target_claim(
+    action: dict[str, Any], rows: list[dict[str, Any]]
+) -> dict[str, Any]:
+    target = require_dict(action.get("target_claim"), "patch action target_claim")
+    expected_fields = {
+        "schema",
+        "schema_version",
+        "claim_id",
+        "claim_text",
+        "entity_id",
+        "impact",
+        "coverage_dimensions",
+        "benchmark_profiles",
+        "supersedes",
+        "epistemic_status",
+        "gap_hypothesis_id",
+        "target_signature",
+        "report_claim_id",
+        "report_claim_digest",
+        "scope",
+        "scope_digest",
+        "target_claim_digest",
+    }
+    if set(target) != expected_fields:
+        raise ContractError("patch target_claim field set invalid")
+    if target["schema"] != TARGET_CLAIM_SCHEMA or target["schema_version"] != "1.0":
+        raise ContractError("patch target_claim schema/version mismatch")
+    require_string(target["claim_text"], "patch target_claim claim_text")
+    if target["entity_id"] is not None:
+        require_string(target["entity_id"], "patch target_claim entity_id")
+    if target["impact"] not in LEVELS:
+        raise ContractError("patch target_claim impact invalid")
+    if target["supersedes"] is not None:
+        raise ContractError("patch target_claim supersedes must be null")
+    coverage = require_string_list(
+        target["coverage_dimensions"],
+        "patch target_claim coverage_dimensions",
+    )
+    profiles = require_string_list(
+        target["benchmark_profiles"],
+        "patch target_claim benchmark_profiles",
+    )
+    if coverage or profiles:
+        raise ContractError(
+            "patch target_claim coverage_dimensions and benchmark_profiles require "
+            "explicit same-named request fields"
+        )
+    if len(coverage) != len(set(coverage)) or len(profiles) != len(set(profiles)):
+        raise ContractError("patch target_claim scope/profile lists must be unique")
+    scope = require_dict(target["scope"], "patch target_claim scope")
+    if set(scope) != {
+        "scope_statement",
+        "assumptions",
+        "conditions",
+        "units",
+        "exclusions",
+        "defeaters",
+        "coverage_dimensions",
+        "benchmark_profiles",
+    }:
+        raise ContractError("patch target_claim scope field set invalid")
+    require_string(scope["scope_statement"], "patch target_claim scope_statement")
+    for field in (
+        "assumptions",
+        "conditions",
+        "units",
+        "exclusions",
+        "defeaters",
+        "coverage_dimensions",
+        "benchmark_profiles",
+    ):
+        values = require_string_list(
+            scope[field], f"patch target_claim scope.{field}"
+        )
+        if len(values) != len(set(values)):
+            raise ContractError(
+                f"patch target_claim scope.{field} values must be unique"
+            )
+    if (
+        scope["coverage_dimensions"] != coverage
+        or scope["benchmark_profiles"] != profiles
+    ):
+        raise ContractError("patch target_claim scope/profile projection mismatch")
+    if target["scope_digest"] != sha256_json(scope):
+        raise ContractError("patch target_claim scope_digest mismatch")
+    if target["gap_hypothesis_id"] != action["hypothesis_id"]:
+        raise ContractError("patch target_claim hypothesis binding mismatch")
+    if target["target_signature"] != action["target_signature"]:
+        raise ContractError("patch target_claim target signature mismatch")
+    ensure_sha256(target["report_claim_digest"], "patch target_claim report_claim_digest")
+    matches = [
+        row
+        for row in rows
+        if row["claim_id"] == target["report_claim_id"]
+        and row["claim_digest"] == target["report_claim_digest"]
+    ]
+    if not matches:
+        raise ContractError("patch target_claim does not bind reviewed report claim")
+    epistemic = require_dict(
+        target["epistemic_status"], "patch target_claim epistemic_status"
+    )
+    if set(epistemic) != {
+        "projection_status",
+        "claim_support_eligible",
+        "inspection_depth",
+        "relation",
+    }:
+        raise ContractError("patch target_claim epistemic_status fields invalid")
+    if not any(
+        epistemic
+        == {
+            "projection_status": row["projection_status"],
+            "claim_support_eligible": row["claim_support_eligible"],
+            "inspection_depth": row["inspection_depth"],
+            "relation": row["relation"],
+        }
+        for row in matches
+    ):
+        raise ContractError("patch target_claim epistemic status mismatch")
+    expected_digest = sha256_json(
+        {
+            key: value
+            for key, value in target.items()
+            if key not in {"claim_id", "target_claim_digest"}
+        }
+    )
+    if target["target_claim_digest"] != expected_digest:
+        raise ContractError("patch target_claim_digest mismatch")
+    if target["claim_id"] != "claim-target-" + expected_digest[:16]:
+        raise ContractError("patch target_claim claim_id mismatch")
+    return target
+
 
 def propose_patch(
     document: Any,
     network: dict[str, Any],
-    reviewed_evidence_set_value: Any,
     review_requests_value: Any,
     reading_reports_value: Any,
+    dossier_value: Any,
+    *,
+    source_bundle_path: str | Path,
+    source_artifact_path: str | Path,
+    verification_root: str | Path,
 ) -> dict[str, Any]:
     document = validate_hypotheses(document, network)
-    review_requests = validate_learn_from_papers_request_set(
-        review_requests_value, network=network
+    (
+        review_requests,
+        report_set,
+        dossier,
+        verified_bundle,
+        records,
+    ) = _derive_review_records(
+        network,
+        review_requests_value,
+        reading_reports_value,
+        dossier_value,
+        source_bundle_path=source_bundle_path,
+        source_artifact_path=source_artifact_path,
+        verification_root=verification_root,
     )
-    reviewed_evidence_set = validate_reviewed_evidence_set(
-        reviewed_evidence_set_value, network=network
+    derivation_digest = _review_derivation_digest(
+        review_requests, report_set, dossier, verified_bundle, records
     )
-    reading_report_set = validate_paper_reading_report_set(
-        reading_reports_value, network=network
-    )
+    cycle = require_dict(document.get("cycle_state"), "hypotheses.cycle_state")
+    expected_cycle = {
+        "review_request_set_id": review_requests["request_set_id"],
+        "review_request_set_digest": review_requests["request_set_digest"],
+        "report_set_id": report_set["report_set_id"],
+        "report_set_digest": report_set["report_set_digest"],
+        "dossier_id": dossier["dossier_id"],
+        "dossier_digest": dossier["dossier_digest"],
+        "source_bundle_id": verified_bundle["bundle_id"],
+        "source_bundle_digest": verified_bundle["bundle_digest"],
+        "review_derivation_digest": derivation_digest,
+    }
+    for field, expected in expected_cycle.items():
+        if cycle.get(field) != expected:
+            raise ContractError(f"proposal cycle {field} mismatch")
+    for record in records:
+        record["report_set_id"] = report_set["report_set_id"]
+        record["report_set_digest"] = report_set["report_set_digest"]
 
-    review_set_id = review_requests["request_set_id"]
-    review_set_digest = review_requests["request_set_digest"]
-    if reviewed_evidence_set["request_set_id"] != review_set_id:
-        raise ContractError("reviewed evidence set id does not match review request set")
-    if reviewed_evidence_set["request_set_digest"] != review_set_digest:
-        raise ContractError(
-            "reviewed evidence set digest does not match review request set"
-        )
-    if review_requests["network_id"] != reviewed_evidence_set["network_id"]:
-        raise ContractError(
-            "reviewed evidence set network_id does not match review request set"
-        )
-    if review_requests["network_snapshot_sha256"] != reviewed_evidence_set[
-        "network_snapshot_sha256"
-    ]:
-        raise ContractError(
-            "reviewed evidence set network_ref and snapshot do not match review request set"
-        )
-    if review_requests["network_ref"] != reviewed_evidence_set["network_ref"]:
-        raise ContractError(
-            "reviewed evidence set network_ref does not match review request set"
-        )
-
-    cycle_state = require_dict(document.get("cycle_state"), "hypotheses.cycle_state")
-    expected_review_set = require_string(
-        cycle_state.get("review_request_set_id"),
-        "hypotheses.cycle_state.review_request_set_id",
+    onboarding_ids = sorted(
+        {
+            record["source"]["source_id"]
+            for record in records
+            if record["onboarding_required"]
+        }
     )
-    expected_review_set_digest = require_string(
-        cycle_state.get("review_request_set_digest"),
-        "hypotheses.cycle_state.review_request_set_digest",
-    )
-    expected_evidence_set_id = require_string(
-        cycle_state.get("reviewed_evidence_set_id"),
-        "hypotheses.cycle_state.reviewed_evidence_set_id",
-    )
-    expected_evidence_set_digest = require_string(
-        cycle_state.get("reviewed_evidence_set_digest"),
-        "hypotheses.cycle_state.reviewed_evidence_set_digest",
-    )
-    expected_report_set_id = require_string(
-        cycle_state.get("report_set_id"),
-        "hypotheses.cycle_state.report_set_id",
-    )
-    expected_report_set_digest = require_string(
-        cycle_state.get("report_set_digest"),
-        "hypotheses.cycle_state.report_set_digest",
-    )
-    accepted = [
-        hypothesis
+    if any(
+        hypothesis["status"] == "blocked"
+        and hypothesis["next_action"] == "onboarding_required"
         for hypothesis in document["hypotheses"]
-        if hypothesis["status"] in {"content_found", "supported_gap"}
-    ]
-    if review_set_id != expected_review_set:
-        raise ContractError("review request set id does not match cycle review request set")
-    if review_set_digest != expected_review_set_digest:
+    ):
         raise ContractError(
-            "review request set digest does not match cycle review request set digest"
-        )
-    if reviewed_evidence_set["request_set_id"] != expected_evidence_set_id:
-        raise ContractError(
-            "reviewed evidence set id does not match cycle reviewed evidence set id"
-        )
-    if reviewed_evidence_set["evidence_set_digest"] != expected_evidence_set_digest:
-        raise ContractError(
-            "reviewed evidence set digest does not match cycle reviewed evidence set digest"
-        )
-    if reading_report_set["report_set_id"] != expected_report_set_id:
-        raise ContractError(
-            "reading report set id does not match cycle reading report set id"
-        )
-    if reading_report_set["report_set_digest"] != expected_report_set_digest:
-        raise ContractError(
-            "reading report set digest does not match cycle reading report set digest"
-        )
-    if review_requests["request_set_id"] != reading_report_set["review_request_set_id"]:
-        raise ContractError(
-            "reading report set review_request_set_id does not match review request set"
-        )
-    if review_requests["request_set_digest"] != reading_report_set["review_request_set_digest"]:
-        raise ContractError(
-            "reading report set review_request_set_digest does not match review request set"
-        )
-    if review_requests["network_id"] != reading_report_set["network_ref"]["network_id"]:
-        raise ContractError("reading report set network_id does not match review request set")
-    if review_requests["network_snapshot_sha256"] != reading_report_set["network_ref"]["sha256"]:
-        raise ContractError(
-            "reading report set network_ref and snapshot do not match review request set"
-        )
-    if review_requests["network_ref"] != reading_report_set["network_ref"]:
-        raise ContractError("reading report set network_ref does not match review request set")
-
-    review_request_lookup = {
-        request["request_id"]: request for request in review_requests["requests"]
-    }
-    review_request_digests = {
-        request["request_id"]: sha256_json(request) for request in review_requests["requests"]
-    }
-    review_request_sources: dict[str, dict[str, dict[str, Any]]] = {}
-    for request in review_requests["requests"]:
-        source_map: dict[str, dict[str, Any]] = {}
-        for source in request["sources"]:
-            source_map[source["source_id"]] = source
-        review_request_sources[request["request_id"]] = source_map
-
-    reading_report_lookup: dict[str, dict[str, Any]] = {}
-    reading_report_passage_lookup: dict[tuple[str, str], dict[str, Any]] = {}
-    for report in reading_report_set["reports"]:
-        reading_report_lookup[report["report_id"]] = report
-        passages = report.get("evidence_passages")
-        if not isinstance(passages, list) or not passages:
-            raise ContractError("reading report passages must be a non-empty list")
-        for passage in passages:
-            passage_id = passage.get("passage_id")
-            if not isinstance(passage_id, str) or not passage_id:
-                raise ContractError("reading report passage_id must be present")
-            reading_report_passage_lookup[(report["report_id"], passage_id)] = passage
-
-    reviewed_evidence_by_hypothesis: dict[str, list[dict[str, Any]]] = {}
-    for item in reviewed_evidence_set["evidence"]:
-        reviewed_evidence_by_hypothesis.setdefault(item["hypothesis_id"], []).append(
-            item
+            "terminal onboarding_required: source must be added to the live network "
+            f"before proposal generation: {onboarding_ids}"
         )
 
-    reviewed_evidence_lookup: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
-    for item in reviewed_evidence_set["evidence"]:
-        reviewed_evidence_lookup[(
-            item["request_id"],
-            item["source_id"],
-            item["source_digest"],
-            item["reading_report_id"],
-            item["passage_id"],
-        )] = item
-
-    basis_gap_ids = [hypothesis["hypothesis_id"] for hypothesis in accepted]
-
-    nodes = []
-    relations = []
-    evidence = []
-
-    for hypothesis in accepted:
-        basis = hypothesis["status_basis"]
-        if not basis:
-            raise ContractError(
-                "proposal basis required for accepted hypothesis statuses"
-            )
-        evidence_items = [
-            item
-            for item in reviewed_evidence_by_hypothesis.get(
-                hypothesis["hypothesis_id"], []
-            )
-            if not item.get("discovery_only")
+    actions = []
+    for hypothesis in document["hypotheses"]:
+        if hypothesis["status"] not in {"content_found", "supported_gap"}:
+            continue
+        eligible = [
+            record
+            for record in records
+            if record["report"]["hypothesis_id"] == hypothesis["hypothesis_id"]
+            and record["patch_eligible"]
         ]
-        derived_status, _ = _derive_reviewed_hypothesis_status(evidence_items)
-        if hypothesis["status"] != derived_status:
-            raise ContractError(
-                "proposed patch hypothesis status must match reviewed-evidence-derived status"
-            )
-        validated_basis: list[dict[str, Any]] = []
-        for index, entry in enumerate(basis):
-            basis_entry = require_dict(entry, f"hypothesis {hypothesis['hypothesis_id']} status_basis[{index}]")
-            require_string(
-                basis_entry.get("hypothesis_id"),
-                f"hypothesis {hypothesis['hypothesis_id']} status_basis[{index}].hypothesis_id",
-            )
-            if basis_entry["hypothesis_id"] != hypothesis["hypothesis_id"]:
-                raise ContractError(
-                    "status basis hypothesis_id does not match accepted hypothesis"
-                )
-            require_string(
-                basis_entry.get("review_request_id"),
-                f"hypothesis {hypothesis['hypothesis_id']} status_basis[{index}].review_request_id",
-            )
-            review_request_id = basis_entry["review_request_id"]
-            if review_request_id not in review_request_lookup:
-                raise ContractError(
-                    "proposed patch review_request_id does not exist in review requests"
-                )
-            request = review_request_lookup[review_request_id]
-            if request["hypothesis_id"] != hypothesis["hypothesis_id"]:
-                raise ContractError(
-                    "proposed patch review request does not match hypothesis"
-                )
-            if basis_entry.get("review_request_digest") != review_request_digests[review_request_id]:
-                raise ContractError("proposed patch review request digest mismatch")
-            if basis_entry.get("claim_support_eligible") is not True:
-                raise ContractError(
-                    "proposed patch status basis claim_support_eligible must be true"
-                )
-            reading_report_id = require_string(
-                basis_entry.get("reading_report_id"),
-                f"hypothesis {hypothesis['hypothesis_id']} status_basis[{index}].reading_report_id",
-            )
-            if not reading_report_id.startswith(READING_REPORT_ID_PREFIX):
-                raise ContractError(
-                    "hypothesis status_basis reading_report_id must start with reading-report-"
-                )
-            reading_report_digest = require_string(
-                basis_entry.get("reading_report_digest"),
-                f"hypothesis {hypothesis['hypothesis_id']} status_basis[{index}].reading_report_digest",
-            )
-            ensure_sha256(
-                reading_report_digest,
-                f"hypothesis {hypothesis['hypothesis_id']} status_basis[{index}].reading_report_digest",
-            )
-            passage_id = require_string(
-                basis_entry.get("passage_id"),
-                f"hypothesis {hypothesis['hypothesis_id']} status_basis[{index}].passage_id",
-            )
-            if not passage_id.startswith(PASSAGE_ID_PREFIX):
-                raise ContractError(
-                    "hypothesis status_basis passage_id must start with passage-"
-                )
-            passage_digest = require_string(
-                basis_entry.get("passage_digest"),
-                f"hypothesis {hypothesis['hypothesis_id']} status_basis[{index}].passage_digest",
-            )
-            ensure_sha256(
-                passage_digest,
-                f"hypothesis {hypothesis['hypothesis_id']} status_basis[{index}].passage_digest",
-            )
-            source_id = require_string(
-                basis_entry.get("source_id"),
-                f"hypothesis {hypothesis['hypothesis_id']} status_basis[{index}].source_id",
-            )
-            source_digest = require_string(
-                basis_entry.get("source_digest"),
-                f"hypothesis {hypothesis['hypothesis_id']} status_basis[{index}].source_digest",
-            )
-            ensure_sha256(
-                source_digest,
-                f"hypothesis {hypothesis['hypothesis_id']} status_basis[{index}].source_digest",
-            )
-            report = reading_report_lookup.get(reading_report_id)
-            if report is None:
-                raise ContractError(
-                    "proposed patch reading_report_id does not exist in reading report set"
-                )
-            if report["review_request_id"] != review_request_id:
-                raise ContractError(
-                    "proposed patch reading report does not match review request"
-                )
-            if report["review_request_digest"] != basis_entry["review_request_digest"]:
-                raise ContractError(
-                    "proposed patch reading report request digest mismatch"
-                )
-            if report["source_id"] != source_id:
-                raise ContractError("proposed patch reading report source_id mismatch")
-            if report["source_digest"] != source_digest:
-                raise ContractError(
-                    "proposed patch reading report source digest mismatch"
-                )
-            if report["report_digest"] != reading_report_digest:
-                raise ContractError(
-                    "proposed patch reading_report_digest does not match reading report"
-                )
-            passage = reading_report_passage_lookup.get((reading_report_id, passage_id))
-            if passage is None:
-                raise ContractError(
-                    "proposed patch passage_id does not exist in referenced report"
-                )
-            if passage["passage_digest"] != passage_digest:
-                raise ContractError(
-                    "proposed patch passage_digest does not match passage"
-                )
-            evidence_id = require_string(
-                basis_entry.get("evidence_id"),
-                f"hypothesis {hypothesis['hypothesis_id']} status_basis[{index}].evidence_id",
-            )
-            evidence_digest = require_string(
-                basis_entry.get("evidence_digest"),
-                f"hypothesis {hypothesis['hypothesis_id']} status_basis[{index}].evidence_digest",
-            )
-            ensure_sha256(
-                evidence_digest,
-                f"hypothesis {hypothesis['hypothesis_id']} status_basis[{index}].evidence_digest",
-            )
-            request = review_request_lookup[review_request_id]
-            request_source = review_request_sources.get(review_request_id, {}).get(source_id)
-            if request_source is None:
-                raise ContractError(
-                    "proposed patch status basis source_id does not exist in review request"
-                )
-            if request_source["source_digest"] != source_digest:
-                raise ContractError(
-                    "proposed patch status basis source digest mismatch"
-                )
-            if basis_entry.get("source_ref") != request_source["source_ref"]:
-                raise ContractError(
-                    "proposed patch status basis source_ref mismatch"
-                )
-            if basis_entry.get("locator") != request_source["exact_locator"]:
-                raise ContractError(
-                    "proposed patch status basis locator mismatch"
-                )
-            if (
-                request_source.get("url") is not None
-                and basis_entry.get("url") != request_source["url"]
-            ):
-                raise ContractError("proposed patch status basis URL mismatch")
-            if (
-                request_source.get("doi") is not None
-                and basis_entry.get("doi") != request_source["doi"]
-            ):
-                raise ContractError("proposed patch status basis DOI mismatch")
-
-            evidence_key = (
-                review_request_id,
-                source_id,
-                source_digest,
-                reading_report_id,
-                passage_id,
-            )
-            basis_evidence = reviewed_evidence_lookup.get(evidence_key)
-            if basis_evidence is None:
-                raise ContractError(
-                    "proposed patch basis must match non-discovery-only reviewed evidence"
-                )
-            basis_evidence_id, basis_evidence_digest = _review_evidence_identity(
-                basis_evidence
-            )
-            if basis_evidence["review_request_id"] != review_request_id:
-                raise ContractError(
-                    "proposed patch basis evidence review_request_id mismatch"
-                )
-            if basis_evidence["request_id"] != review_request_id:
-                raise ContractError(
-                    "proposed patch basis evidence request_id mismatch"
-                )
-            if evidence_id != basis_evidence_id:
-                raise ContractError(
-                    "proposed patch basis evidence_id does not match evidence record"
-                )
-            if evidence_digest != basis_evidence_digest:
-                raise ContractError(
-                    "proposed patch basis evidence_digest does not match evidence record"
-                )
-            if basis_evidence["hypothesis_id"] != hypothesis["hypothesis_id"]:
-                raise ContractError("proposed patch basis hypothesis mismatch with evidence")
-            if basis_evidence["outcome"] != "supports":
-                raise ContractError(
-                    "proposed patch accepted hypotheses must be based on supports evidence"
-                )
-            if basis_evidence["claim_support_eligible"] is not True:
-                raise ContractError(
-                    "proposed patch evidence must come from claim-support-eligible review"
-                )
-            if basis_evidence.get("review_completed") is not True:
-                raise ContractError(
-                    "proposed patch basis evidence review_completed must be true"
-                )
-            require_string(
-                basis_entry.get("source_ref"),
-                f"hypothesis {hypothesis['hypothesis_id']} status_basis[{index}].source_ref",
-            )
-            require_string(
-                basis_entry.get("locator"),
-                f"hypothesis {hypothesis['hypothesis_id']} status_basis[{index}].locator",
-            )
-            read_depth = require_string(
-                basis_entry.get("read_depth"),
-                f"hypothesis {hypothesis['hypothesis_id']} status_basis[{index}].read_depth",
-            )
-            if read_depth not in READ_DEPTHS:
-                raise ContractError(
-                    f"hypothesis {hypothesis['hypothesis_id']} status_basis[{index}].read_depth invalid"
-                )
-            if read_depth != request_source.get("required_read_depth"):
-                raise ContractError(
-                    "proposed patch status basis read_depth mismatch required source read depth"
-                )
-            if read_depth != basis_evidence["read_depth"]:
-                raise ContractError(
-                    "proposed patch status basis read depth does not match evidence"
-                )
-            if reading_report_digest != basis_evidence["reading_report_digest"]:
-                raise ContractError(
-                    "proposed patch status basis reading report digest mismatch"
-                )
-            if passage_digest != basis_evidence["passage_digest"]:
-                raise ContractError(
-                    "proposed patch status basis passage digest mismatch"
-                )
-
-            validated_basis.append(
+        if not eligible:
+            missing = sorted(
                 {
-                    "source_ref": basis_entry["source_ref"],
-                    "source_id": source_id,
-                    "source_digest": source_digest,
-                    "locator": basis_entry["locator"],
-                    "read_depth": basis_entry["read_depth"],
-                    "review_request_id": review_request_id,
-                    "review_request_digest": basis_entry["review_request_digest"],
-                    "claim_support_eligible": basis_entry["claim_support_eligible"],
-                    "evidence_id": basis_entry["evidence_id"],
-                    "evidence_digest": basis_entry["evidence_digest"],
-                    "reading_report_id": reading_report_id,
-                    "reading_report_digest": reading_report_digest,
-                    "passage_id": passage_id,
-                    "passage_digest": passage_digest,
+                    record["source"]["source_id"]
+                    for record in records
+                    if record["report"]["hypothesis_id"] == hypothesis["hypothesis_id"]
+                    and record["onboarding_required"]
                 }
             )
-
-        if not validated_basis:
-            raise ContractError(
-                "proposal requires at least one validated reviewed evidence entry"
-            )
-        provenance = [
-            {
-                "source_ref": entry["source_ref"],
-                "locator": entry["locator"],
-                "read_depth": entry["read_depth"],
-            }
-            for entry in validated_basis
-        ]
-        row = {
-            "hypothesis_id": hypothesis["hypothesis_id"],
-            "status": hypothesis["status"],
-            "target_signature": hypothesis["target_signature"],
-            "hypothesis": hypothesis["hypothesis"],
-            "provenance": provenance,
+            if missing:
+                raise ContractError(
+                    "terminal onboarding_required: source must be added to the live "
+                    f"network before proposal generation: {missing}"
+                )
+            raise ContractError("accepted hypothesis lacks eligible v2 evidence")
+        reviewed_evidence = [_basis_row(record) for record in eligible]
+        target_kind = hypothesis["target_kind"]
+        action_type = ACTION_FOR_TARGET_KIND[target_kind]
+        target_signature = {
+            "target_kind": target_kind,
+            "signature": hypothesis["target_signature"],
         }
-        if hypothesis["target_kind"] == "node":
-            nodes.append(row)
-        elif hypothesis["target_kind"] == "relation":
-            relations.append(row)
-        else:
-            evidence.append(row)
+        action = {
+            "action_id": "",
+            "action_digest": "",
+            "action_type": action_type,
+            "action_status": _patch_action_status(
+                target_kind,
+                target_signature,
+                reviewed_evidence,
+            ),
+            "hypothesis_id": hypothesis["hypothesis_id"],
+            "target_signature": target_signature,
+            "hypothesis": hypothesis["hypothesis"],
+            "reviewed_evidence": reviewed_evidence,
+        }
+        if target_kind == "relation":
+            action["target_claim"] = _target_claim_from_record(
+                hypothesis,
+                eligible[0],
+                reviewed_evidence[0],
+                target_signature,
+            )
+        action["action_digest"] = sha256_json(
+            {
+                key: value
+                for key, value in action.items()
+                if key not in {"action_id", "action_digest"}
+            }
+        )
+        action["action_id"] = "network-patch-action-" + action["action_digest"][:16]
+        actions.append(action)
 
+    request_ref = {
+        "request_set_id": require_string(
+            cycle.get("request_set_id"), "cycle.request_set_id"
+        ),
+        "request_set_digest": ensure_sha256(
+            cycle.get("request_set_digest"), "cycle.request_set_digest"
+        ),
+        "review_request_set_id": review_requests["request_set_id"],
+        "review_request_set_digest": review_requests["request_set_digest"],
+    }
     patch = {
         "schema": PATCH_SCHEMA,
-        "proposal_id": "NPP-" + sha256_json(
-            {
-                "network": network_ref(network),
-                "basis": basis_gap_ids,
-                "status": "supported",
-            }
-        )[:12],
+        "schema_version": PATCH_SCHEMA_VERSION,
+        "proposal_id": "",
+        "proposal_digest": "",
         "network_ref": network_ref(network),
-        "generated_at": timestamp_now(),
-        "basis_gap_ids": basis_gap_ids,
+        "request_ref": request_ref,
+        "generated_at": document["generated_at"],
         "proposal_only": True,
         "novelty_claimed": False,
-        "nodes": nodes,
-        "relations": relations,
-        "evidence": evidence,
-        "review_gate": "pending_research_knowledge_network_validation",
+        "review_gate": "pending_research_knowledge_network_acceptance",
+        "actions": actions,
     }
-    return validate_patch(patch, network)
+    patch["proposal_digest"] = sha256_json(
+        {
+            key: value
+            for key, value in patch.items()
+            if key not in {"proposal_id", "proposal_digest"}
+        }
+    )
+    patch["proposal_id"] = (
+        "network-patch-proposal-" + patch["proposal_digest"][:16]
+    )
+    return validate_patch_v2(patch, network)
 
 
-def validate_patch(
+def validate_patch_v2(
+    value: Any, network: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    patch = require_dict(value, "NetworkPatchProposal/v2")
+    expected_keys = {
+        "schema",
+        "schema_version",
+        "proposal_id",
+        "proposal_digest",
+        "network_ref",
+        "request_ref",
+        "generated_at",
+        "proposal_only",
+        "novelty_claimed",
+        "review_gate",
+        "actions",
+    }
+    if set(patch) != expected_keys or patch.get("schema") != PATCH_SCHEMA:
+        raise ContractError("invalid NetworkPatchProposal/v2 top-level contract")
+    if patch["schema_version"] != PATCH_SCHEMA_VERSION:
+        raise ContractError("patch.schema_version must be 2.0")
+    if patch["proposal_only"] is not True or patch["novelty_claimed"] is not False:
+        raise ContractError("patch must remain proposal-only and non-novelty")
+    if patch["review_gate"] != "pending_research_knowledge_network_acceptance":
+        raise ContractError("patch review_gate invalid")
+    validate_network_ref(patch["network_ref"], "patch.network_ref")
+    if network is not None and patch["network_ref"] != network_ref(network):
+        raise ContractError("patch network_ref mismatch")
+    request_ref_value = require_dict(patch["request_ref"], "patch.request_ref")
+    if set(request_ref_value) != {
+        "request_set_id",
+        "request_set_digest",
+        "review_request_set_id",
+        "review_request_set_digest",
+    }:
+        raise ContractError("patch.request_ref field set invalid")
+    for field in ("request_set_id", "review_request_set_id"):
+        require_string(request_ref_value.get(field), f"patch.request_ref.{field}")
+    for field in ("request_set_digest", "review_request_set_digest"):
+        ensure_sha256(request_ref_value.get(field), f"patch.request_ref.{field}")
+    require_timestamp(patch["generated_at"], "patch.generated_at")
+    actions = patch["actions"]
+    if not isinstance(actions, list):
+        raise ContractError("patch.actions must be a list")
+    live_source_ids = _live_source_ids(network) if network is not None else None
+    action_ids = set()
+    hypothesis_ids = set()
+    for action in actions:
+        action = require_dict(action, "patch action")
+        action_type = action.get("action_type")
+        expected_action_fields = {
+            "action_id",
+            "action_digest",
+            "action_type",
+            "action_status",
+            "hypothesis_id",
+            "target_signature",
+            "hypothesis",
+            "reviewed_evidence",
+        }
+        if action_type == "propose_relation":
+            expected_action_fields.add("target_claim")
+        if set(action) != expected_action_fields:
+            raise ContractError("patch action field set invalid")
+        if action["action_type"] not in {
+            "propose_node",
+            "propose_relation",
+            "propose_evidence",
+        }:
+            raise ContractError("patch action type invalid")
+        if action["action_status"] not in PATCH_ACTION_STATUSES:
+            raise ContractError("patch action status invalid")
+        require_string(action["hypothesis_id"], "patch action hypothesis_id")
+        require_string(action["hypothesis"], "patch action hypothesis")
+        target = require_dict(action["target_signature"], "patch action target_signature")
+        if set(target) != {"target_kind", "signature"}:
+            raise ContractError("patch action target_signature fields invalid")
+        target_kind = target["target_kind"]
+        if target_kind not in ACTION_FOR_TARGET_KIND:
+            raise ContractError("patch action target kind unsupported")
+        if action["action_type"] != ACTION_FOR_TARGET_KIND[target_kind]:
+            raise ContractError("patch action target_signature kind mismatch")
+        require_string(target["signature"], "patch action target signature")
+        expected_action_digest = sha256_json(
+            {
+                key: item
+                for key, item in action.items()
+                if key not in {"action_id", "action_digest"}
+            }
+        )
+        if action["action_digest"] != expected_action_digest:
+            raise ContractError("patch action_digest mismatch")
+        if action["action_id"] != "network-patch-action-" + expected_action_digest[:16]:
+            raise ContractError("patch action_id mismatch")
+        if action["action_id"] in action_ids or action["hypothesis_id"] in hypothesis_ids:
+            raise ContractError("patch duplicate action or hypothesis identity")
+        action_ids.add(action["action_id"])
+        hypothesis_ids.add(action["hypothesis_id"])
+        rows = action["reviewed_evidence"]
+        if not isinstance(rows, list) or not rows:
+            raise ContractError("patch action requires reviewed_evidence")
+        basis_ids = set()
+        for row in rows:
+            if set(row) != {
+                "basis_id", "basis_digest", "review_request_id",
+                "review_request_digest", "report_set_id", "report_set_digest",
+                "dossier_id", "dossier_digest", "reading_report_id",
+                "reading_report_digest", "source_bundle_id", "source_bundle_digest",
+                "source_artifact_sha256", "source_id", "source_digest", "claim_id",
+                "claim_digest", "evidence_id", "evidence_digest", "span_id",
+                "span_hash", "source_ref", "acquisition_locator", "evidence_locator",
+                "relation", "access_level", "inspection_depth",
+                "claim_support_eligible", "projection_status", "verification",
+            }:
+                raise ContractError("patch reviewed_evidence field set invalid")
+            for field in (
+                "review_request_digest", "report_set_digest", "dossier_digest",
+                "reading_report_digest", "source_bundle_digest",
+                "source_artifact_sha256", "source_digest", "claim_digest",
+                "evidence_digest", "span_hash",
+            ):
+                ensure_sha256(row[field], f"patch basis {field}")
+            for field in (
+                "review_request_id", "report_set_id", "dossier_id",
+                "reading_report_id", "source_bundle_id", "source_id", "claim_id",
+                "evidence_id", "span_id", "source_ref", "acquisition_locator",
+                "evidence_locator",
+            ):
+                require_string(row[field], f"patch basis {field}")
+            if live_source_ids is not None and row["source_id"] not in live_source_ids:
+                raise ContractError(
+                    "terminal onboarding_required: patch basis.source_id is not in "
+                    f"the live network: {row['source_id']}"
+                )
+            verification = require_dict(row["verification"], "patch basis verification")
+            if set(verification) != {"mode", "verifier_id", "artifact_sha256"}:
+                raise ContractError("patch basis verification fields invalid")
+            if verification["mode"] not in {
+                "independent_source_check", "expert_review"
+            }:
+                raise ContractError("patch basis verification mode ineligible")
+            require_string(verification["verifier_id"], "patch verifier_id")
+            ensure_sha256(verification["artifact_sha256"], "patch artifact_sha256")
+            if (
+                row["relation"] != "supports"
+                or row["access_level"] != "full_text"
+                or row["inspection_depth"] not in {"evidence", "reconstruction"}
+                or row["claim_support_eligible"] is not True
+                or row["projection_status"] != "decisive"
+                or _is_unacceptable_locator(row["evidence_locator"])
+            ):
+                raise ContractError("patch basis is not graph eligible")
+            expected_basis_digest = sha256_json(
+                {
+                    key: item
+                    for key, item in row.items()
+                    if key not in {"basis_id", "basis_digest"}
+                }
+            )
+            if row["basis_digest"] != expected_basis_digest:
+                raise ContractError("patch basis_digest mismatch")
+            if row["basis_id"] != "network-patch-basis-" + expected_basis_digest[:16]:
+                raise ContractError("patch basis_id mismatch")
+            if row["basis_id"] in basis_ids:
+                raise ContractError("patch duplicate basis identity")
+            basis_ids.add(row["basis_id"])
+        expected_status = _patch_action_status(target_kind, target, rows)
+        if action["action_status"] != expected_status:
+            raise ContractError(
+                "patch action status does not match target materialization eligibility"
+            )
+        if action["action_type"] == "propose_relation":
+            _validate_patch_target_claim(action, rows)
+    expected_digest = sha256_json(
+        {
+            key: item
+            for key, item in patch.items()
+            if key not in {"proposal_id", "proposal_digest"}
+        }
+    )
+    if patch["proposal_digest"] != expected_digest:
+        raise ContractError("patch proposal_digest mismatch")
+    if patch["proposal_id"] != "network-patch-proposal-" + expected_digest[:16]:
+        raise ContractError("patch proposal_id mismatch")
+    return patch
+
+
+def validate_patch_v1(
+
     value: Any, network: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     patch = require_dict(value, "patch")
-    if patch.get("schema") != PATCH_SCHEMA:
+    if patch.get("schema") != PATCH_V1_SCHEMA:
         raise ContractError(f"patch.schema must equal {PATCH_SCHEMA}")
     require_string(patch.get("proposal_id"), "patch.proposal_id")
     if network is not None:
@@ -3636,7 +4528,9 @@ def validate_any(value: Any, network: dict[str, Any] | None = None) -> dict[str,
     if schema == HYPOTHESES_SCHEMA:
         return validate_hypotheses(value, network)
     if schema == PATCH_SCHEMA:
-        return validate_patch(value, network)
+        return validate_patch_v2(value, network)
+    if schema == PATCH_V1_SCHEMA:
+        return validate_patch_v1(value, network)
     if schema == REQUEST_SET_SCHEMA:
         return validate_request_set(value, network=network)
     if schema == REQUEST_SCHEMA:
@@ -3657,6 +4551,8 @@ def validate_any(value: Any, network: dict[str, Any] | None = None) -> dict[str,
         return validate_paper_reading_report(value, network=network)
     if schema == PAPER_READING_REPORT_SET_SCHEMA:
         return validate_paper_reading_report_set(value, network=network)
+    if schema == PAPER_READING_REPORT_SET_V2_SCHEMA:
+        return validate_paper_reading_report_set_v2(value, network=network)
     raise ContractError(f"unsupported schema: {schema!r}")
 
 
@@ -3708,19 +4604,25 @@ def parser() -> argparse.ArgumentParser:
     consume_review.add_argument("--hypotheses", required=True)
     consume_review.add_argument("--network", required=True)
     consume_review.add_argument("--review-requests", required=True)
-    consume_review.add_argument("--evidence", required=True)
     consume_review.add_argument("--reading-reports", required=True)
+    consume_review.add_argument("--dossier", required=True)
+    consume_review.add_argument("--source-bundle", required=True)
+    consume_review.add_argument("--source-artifact", required=True)
+    consume_review.add_argument("--verification-root", required=True)
     consume_review.add_argument("--output", required=True)
     consume_review.add_argument("--round-id")
 
     propose = subcommands.add_parser(
-        "propose-patch", help="emit proposal-only NetworkPatchProposal/v1"
+        "propose-patch", help="emit proposal-only NetworkPatchProposal/v2"
     )
     propose.add_argument("--input", required=True)
     propose.add_argument("--network", required=True)
-    propose.add_argument("--reviewed-evidence-set", required=True)
     propose.add_argument("--review-requests", required=True)
     propose.add_argument("--reading-reports", required=True)
+    propose.add_argument("--dossier", required=True)
+    propose.add_argument("--source-bundle", required=True)
+    propose.add_argument("--source-artifact", required=True)
+    propose.add_argument("--verification-root", required=True)
     propose.add_argument("--output", required=True)
 
     validate = subcommands.add_parser("validate", help="validate one contract")
@@ -3797,8 +4699,11 @@ def main(argv: list[str] | None = None) -> int:
                 load_json(args.hypotheses),
                 network,
                 load_json(args.review_requests),
-                load_json(args.evidence),
                 load_json(args.reading_reports),
+                load_json(args.dossier),
+                source_bundle_path=args.source_bundle,
+                source_artifact_path=args.source_artifact,
+                verification_root=args.verification_root,
                 round_id=args.round_id,
             )
             write_json(args.output, output)
@@ -3811,9 +4716,12 @@ def main(argv: list[str] | None = None) -> int:
                 propose_patch(
                     load_json(args.input),
                     network,
-                    load_json(args.reviewed_evidence_set),
                     load_json(args.review_requests),
                     load_json(args.reading_reports),
+                    load_json(args.dossier),
+                    source_bundle_path=args.source_bundle,
+                    source_artifact_path=args.source_artifact,
+                    verification_root=args.verification_root,
                 ),
             )
 
