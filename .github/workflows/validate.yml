@@ -57,6 +57,30 @@ jobs:
           -s skills/deep-research/scripts
           -p 'test_*.py'
 
+      - name: Run knowledge-network tests
+        run: >-
+          python -m unittest discover
+          -s skills/research-knowledge-network/scripts
+          -p 'test_*.py'
+
+      - name: Run learn-from-papers tests
+        run: >-
+          python -m unittest discover
+          -s skills/learn-from-papers/scripts
+          -p 'test_*.py'
+
+      - name: Run scholar-discovery tests
+        run: >-
+          python -m unittest discover
+          -s skills/scholar-discovery/scripts
+          -p 'test_*.py'
+
+      - name: Run network-gap-discovery tests
+        run: >-
+          python -m unittest discover
+          -s skills/network-gap-discovery/scripts
+          -p 'test_*.py'
+
       - name: Run reproducibility-harness tests
         run: >-
           python -m unittest discover
@@ -73,6 +97,9 @@ jobs:
           for skill in \
             skills/deep-research \
             skills/learn-from-papers \
+            skills/research-knowledge-network \
+            skills/scholar-discovery \
+            skills/network-gap-discovery \
             skills/curate-research-to-zotero
           do
             test -s "$skill/SKILL.md"

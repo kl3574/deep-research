@@ -1,0 +1,33 @@
+{
+  "schema": "PaperReadingStructuredExtraction/v1",
+  "protocol_version": "1.0",
+  "generated_at": "2026-08-05T01:00:00Z",
+  "network_ref": {
+    "network_id": "KN-001",
+    "snapshot_id": "KN-001-S001",
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "review_request_set_id": "LFRS-001",
+  "review_request_set_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "reports": [
+    {
+      "review_request_id": "RFEV-001",
+      "review_request_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "source_id": "SRC-001",
+      "source_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "source_ref": "src-ref-001",
+      "source_artifact_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "read_depth": "full_text",
+      "evidence_passages": [
+        {
+          "locator_type": "page",
+          "exact_locator": "main p. 1",
+          "passage_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "claim_summary": "作者声称该方法在给定假设下具有一致收敛。",
+          "evidence_summary": "对该章节的公式推导和假设条件进行了逐条核验。",
+          "stance": "support"
+        }
+      ]
+    }
+  ]
+}

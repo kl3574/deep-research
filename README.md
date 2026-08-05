@@ -1,27 +1,33 @@
 # deep-research
 
-一套面向 Codex agent 的可审计深度调研技能，覆盖四个正交能力：
+一套面向 Codex agent 的可审计深度调研技能，覆盖六个正交能力：
 
 ```text
 研究问题
   → $deep-research：全局地图、技术路线、可信源检索、GapQueue 与停止条件
-  → $learn-from-papers：对关键单篇论文进行证据级深读与重建
   → $research-knowledge-network：持久化证据网络、coverage 与缺口派生、冲突建模
+  → $network-gap-discovery：开放世界查漏、缺失内容假设、反证与 patch proposal
+  → $scholar-discovery：多源学术发现、查询留痕、保守去重与候选排序
+  → $learn-from-papers：对关键单篇论文进行证据级深读与重建
   → $curate-research-to-zotero：快照、下载、导入、读回，持续同步目标库
 ```
 
 “深度”不是堆积来源，而是把时间和模型开销放在真正控制结论的瓶颈上；“可信”不是固定来源排行榜，而是版本、范围、局部适配和失败边界都能被持续验收。
 
-## 四个技能
+## 六个技能
 
 | 技能 | 职责 | 典型输入 | 核心产物 |
 | --- | --- | --- | --- |
 | `$deep-research` | 多来源、全局到具体的针对性深调研 | 领域问题、技术选型、证据争议、版本问题 | 概念地图、技术路线、source registry、claim/evidence matrix、冲突日志、GapQueue |
 | `$learn-from-papers` | 给定一篇论文，快速且深入地学习与理解 | PDF、DOI、预印本、出版页面 | paper card、证据账本、方法/推导重建、中文知识笔记 |
 | `$research-knowledge-network` | 将来源证据、实体、主张、关系持久化为可审计网络并派生知识缺口 | evidence card、术语表、实验摘要、审稿点 | 证据网络、coverage 概览、冲突视图、可复验缺口列表 |
+| `$network-gap-discovery` | 在开放世界假设下自主提出并反证可能缺失的节点、关系、边界或证据 | `KnowledgeNetwork/v1`、competency questions、既有 gap | gap hypotheses、定向检索请求、`NetworkPatchProposal/v1` |
+| `$scholar-discovery` | 对一个明确证据需要执行可复现的多源论文发现 | gap search test、主题条件、种子论文 | query plan、检索账本、去重 work families、排序候选与失败状态 |
 | `$curate-research-to-zotero` | 保存经审核的研究资产 | 来源清单、本地文件、Zotero 目标 | 文件哈希、ingestion manifest、PDF/元数据/笔记同步与 readback |
 
-四个技能可独立调用，或由 `$deep-research` 统筹。
+六个技能可独立调用，或由 `$deep-research` 统筹。Google Scholar 仅支持用户
+手工检索与导出导入；自主检索使用有正式接口的学术数据源，不能抓取 Scholar
+结果页或绕过 CAPTCHA。
 
 ## 核心方法
 
@@ -33,6 +39,10 @@
 - 对关键论文执行 `Map → Evidence → Reconstruction`，逐项保留页码、章节、图、表、公式或定理定位；
 - 所有跨来源结论在主张级综合，主动寻找反证并保留未决冲突；
 - 对长任务使用显式 gap/action 循环；
+- 用开放世界语义区分 deterministic gap、implicit candidate 与 unknown，
+  对隐式缺失内容同时设计确认和反证检索；
+- 学术发现保留 provider、精确 query、日期、分页/计数、排除、失败与回退，
+  搜索候选不会自动升级为证据；
 - `ZoteroCorpusSnapshot → evidence card → KnowledgeNetwork → GapQueue → targeted deep research → curation/readback → merge/audit` 形成闭环；
 - `JSON/JSONL` 账本中的关系、locator、冲突、预算和停止条件全部显式化。
 
@@ -42,7 +52,7 @@
 git clone https://github.com/kl3574/deep-research.git
 cd deep-research
 mkdir -p ~/.codex/skills
-for skill in deep-research learn-from-papers research-knowledge-network curate-research-to-zotero; do
+for skill in deep-research learn-from-papers research-knowledge-network network-gap-discovery scholar-discovery curate-research-to-zotero; do
   ln -s "$(pwd)/skills/$skill" "$HOME/.codex/skills/$skill"
 done
 ```
@@ -70,6 +80,18 @@ research pass.
 ```
 
 ```text
+Use $network-gap-discovery to audit this KnowledgeNetwork/v1 under open-world
+assumptions, generate falsifiable missing-content hypotheses, and emit bounded
+scholar-discovery requests without modifying the network.
+```
+
+```text
+Use $scholar-discovery to find primary and contrary studies for this gap through
+documented academic APIs, preserve exact query provenance, conservatively merge
+versions, and return ranked discovery-only candidates.
+```
+
+```text
 Use $curate-research-to-zotero to download the accepted open sources, verify
 their hashes, preview the exact Zotero target, and synchronize only after the
 target readback gate passes.
@@ -92,6 +114,16 @@ skills/
 │   ├── SKILL.md
 │   ├── agents/openai.yaml
 │   └── references/
+├── network-gap-discovery/
+│   ├── SKILL.md
+│   ├── agents/openai.yaml
+│   ├── references/
+│   └── scripts/
+├── scholar-discovery/
+│   ├── SKILL.md
+│   ├── agents/openai.yaml
+│   ├── references/
+│   └── scripts/
 └── curate-research-to-zotero/
     ├── SKILL.md
     ├── agents/openai.yaml
@@ -114,6 +146,8 @@ python scripts/check_public_privacy.py
 python -m unittest discover -s scripts -p 'test_*.py'
 python -m unittest discover -s skills/deep-research/scripts -p 'test_*.py'
 python -m unittest discover -s skills/research-knowledge-network/scripts -p 'test_*.py'
+python -m unittest discover -s skills/network-gap-discovery/scripts -p 'test_*.py'
+python -m unittest discover -s skills/scholar-discovery/scripts -p 'test_*.py'
 python -m unittest discover -s skills/curate-research-to-zotero/scripts -p 'test_*.py'
 python -m unittest discover -s evals/real-world -p 'test_*.py'
 python -m compileall -q skills evals scripts
