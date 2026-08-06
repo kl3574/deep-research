@@ -91,7 +91,7 @@ class CleanLiteratureNoteTests(unittest.TestCase):
     def test_rejects_operational_state_but_allows_evidence_dates(self) -> None:
         forbidden = [
             "<p>content_sha256: " + "a" * 64 + "</p>",
-            "<p>本地路径：/home/example/paper.pdf</p>",
+            "<p>本地路径：/srv/private/paper.pdf</p>",
             "<p>generated_at: 2026-08-06T10:20:30Z</p>",
             "<p>transaction_id: fixture；readback_status: pending</p>",
             "<h2>资料与阅读状态</h2><p>阅读深度：reconstruction</p>",
