@@ -73,3 +73,18 @@ render success; visually inspect representative complex formulas in Zotero.
 Zotero 9's Local API is read-only. Reviewed writes use the constrained Desktop
 bridge; Local API writes begin in Zotero 10. See the official
 [Local API documentation](https://www.zotero.org/support/dev/web_api/v3/local_api).
+
+## Fixed-pane readability
+
+Math nodes contain mathematical expressions, not symbol explanations or prose.
+Keep definitions, assumptions, interpretation, and warnings in adjacent Chinese
+paragraphs. Short `\\text{...}` labels inside cases and genuine operators such as
+`\\operatorname{Var}` remain valid, but wrapping an explanatory sentence in
+`\\text{...}` does not turn it into mathematics.
+
+For a long expression or several relations, use `aligned` or `gathered` and put
+one semantic relation on each line. Prefer several coherent display nodes when
+the lines express separate steps. This is a readability strategy, not a static
+rendering proof: character count, source width, or byte length cannot predict
+KaTeX layout in Zotero's fixed pane. Open representative notes in the actual UI
+and check line breaks, clipping, horizontal overflow, and KaTeX errors.

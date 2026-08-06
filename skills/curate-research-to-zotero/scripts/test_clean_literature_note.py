@@ -107,6 +107,49 @@ class CleanLiteratureNoteTests(unittest.TestCase):
         )
         self.assertEqual(errors, [])
 
+    def test_rejects_prose_dominated_math_payloads(self) -> None:
+        invalid_payloads = [
+            "输入变量必须相互独立，否则结果不成立。",
+            "This estimator requires independent inputs and enough samples.",
+            r"\text{输入变量必须相互独立，否则结果不成立}",
+            "global sensitivity analysis method",
+        ]
+        for payload in invalid_payloads:
+            raw = note(f'<pre class="math">$${payload}$$</pre>')
+            with self.subTest(payload=payload):
+                errors, _, _ = clean.validate_clean_note_html(raw)
+                self.assertTrue(
+                    any("prose-dominated" in error for error in errors),
+                    errors,
+                )
+
+    def test_accepts_aligned_entities_operators_and_short_text_labels(self) -> None:
+        aligned = (
+            r"\begin{aligned}"
+            r"S_i &="
+            r" \frac{\operatorname{Var}(\mathbb{E}[Y\mid X_i])}"
+            r"{\operatorname{Var}(Y)}\\ "
+            r"S_{T_i} &= 1-\frac{V_{\sim i}}{V}"
+            r"\end{aligned}"
+        )
+        cases = [
+            aligned,
+            r"\begin{gathered}A=B\\ C=D\end{gathered}",
+            (
+                r"f(x)=\begin{cases}1,&\text{if }x>0\\"
+                r"0,&\text{otherwise}\end{cases}"
+            ),
+            r"\operatorname{Var}(Y)",
+        ]
+        for payload in cases:
+            rendered = clean.render_display_math(payload)
+            raw = note(rendered)
+            with self.subTest(payload=payload):
+                errors, _, summary = clean.validate_clean_note_html(raw)
+                self.assertEqual(errors, [])
+                self.assertEqual(summary["formulas"][0]["payload"], payload)
+        self.assertIn("&amp;", clean.render_display_math(aligned))
+
     def test_formula_roundtrip_compares_order_and_payload(self) -> None:
         expected = note(
             '<p><span class="math">$a&amp;b$</span></p>'

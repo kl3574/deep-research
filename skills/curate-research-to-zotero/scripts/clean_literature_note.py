@@ -35,6 +35,30 @@ DOUBLE_COMMAND_RE = re.compile(
     r"\\\\(?:begin|end|frac|sqrt|sum|prod|operatorname|mathrm|mathbf|mathbb|"
     r"mathcal|text|tag|left|right|partial|nabla|dot|bar|hat|mid|le|ge)\b"
 )
+TEX_TEXT_FRAGMENT_RE = re.compile(
+    r"\\(?:text|textrm|textnormal)\{([^{}]*)\}"
+)
+TEX_NAMED_FRAGMENT_RE = re.compile(
+    r"\\(?:begin|end|operatorname|mathrm|mathbf|mathbb|mathcal|boldsymbol)"
+    r"\{[^{}]*\}"
+)
+MATH_CORE_COMMAND_RE = re.compile(
+    r"\\(?:frac|dfrac|tfrac|sqrt|sum|prod|int|iint|iiint|lim|exp|log|ln|"
+    r"min|max|argmin|argmax|partial|nabla|infty|operatorname|mathrm|mathbf|"
+    r"mathbb|mathcal|boldsymbol|vec|hat|bar|dot|ddot|left|right|begin|end|"
+    r"leq?|geq?|neq|approx|sim|propto|in|notin|to|mapsto|rightarrow|"
+    r"leftarrow|cdot|times|pm|mp|mid|Vert|theta|Theta|alpha|beta|gamma|"
+    r"delta|lambda|mu|sigma|phi|psi|omega)\b"
+)
+MATH_OPERATOR_RE = re.compile(r"[=+\-*/^_<>|&]")
+MATH_FUNCTION_CALL_RE = re.compile(
+    r"(?:\\operatorname\{[^{}]+\}|[A-Za-z]{2,})\s*"
+    r"(?:\\left\s*)?\("
+)
+SYMBOLIC_ONLY_RE = re.compile(
+    r"\s*(?:[A-Za-z](?:_[A-Za-z0-9{}]+)?(?:\^[A-Za-z0-9{}]+)?|"
+    r"\\[A-Za-z]+|\d+(?:\.\d+)?)\s*"
+)
 PLAIN_DISPLAY_RE = re.compile(r"(?<!\\)\$\$[^$]+\$\$")
 PLAIN_INLINE_RE = re.compile(r"(?<![\\$])\$(?!\$)[^$\n]+(?<!\\)\$(?!\$)")
 SHA256_RE = re.compile(r"\b(?:sha256:)?[0-9a-f]{64}\b", re.I)
@@ -190,7 +214,50 @@ def _latex_payload_error(payload: str) -> str | None:
         return "formula payload contains a still-escaped HTML entity"
     if DOUBLE_COMMAND_RE.search(payload):
         return "formula payload contains a double-escaped LaTeX command"
+    if _is_prose_dominated_math(payload):
+        return "formula payload is prose-dominated; move explanations to paragraphs"
     return None
+
+
+def _is_prose_dominated_math(payload: str) -> bool:
+    """Conservatively require a mathematical core outside short text labels."""
+    text_fragments = TEX_TEXT_FRAGMENT_RE.findall(payload)
+    outside_text = TEX_TEXT_FRAGMENT_RE.sub("", payload)
+    prose_surface = TEX_NAMED_FRAGMENT_RE.sub("", outside_text)
+    prose_surface = re.sub(r"\\[A-Za-z]+", "", prose_surface)
+
+    if len(re.findall(r"[\u3400-\u9fff]", prose_surface)) >= 4:
+        return True
+    if re.search(r"[。！？；：]", prose_surface):
+        return True
+
+    core_commands = MATH_CORE_COMMAND_RE.findall(outside_text)
+    operators = MATH_OPERATOR_RE.findall(outside_text)
+    function_call = MATH_FUNCTION_CALL_RE.search(outside_text) is not None
+    symbolic_only = SYMBOLIC_ONLY_RE.fullmatch(outside_text) is not None
+    has_math_core = bool(core_commands or operators or function_call)
+    if not has_math_core and not symbolic_only:
+        return True
+
+    outside_words = re.findall(r"[A-Za-z]{2,}", prose_surface)
+    if (
+        not core_commands
+        and not function_call
+        and len(outside_words) >= 2
+        and len(operators) < 2
+    ):
+        return True
+
+    prose_units = len(re.findall(r"[\u3400-\u9fff]", payload))
+    prose_units += sum(
+        len(word)
+        for fragment in text_fragments
+        for word in re.findall(r"[A-Za-z]{2,}", fragment)
+    )
+    prose_units += sum(len(word) for word in outside_words)
+    symbolic_units = len(re.findall(r"(?<![A-Za-z])[A-Za-z](?![A-Za-z])", prose_surface))
+    math_units = len(core_commands) * 3 + len(operators) + symbolic_units
+    return prose_units > 24 and prose_units > 3 * max(math_units, 1)
 
 
 def _parse_formulas(raw: str) -> tuple[CleanNoteParser, list[str]]:
