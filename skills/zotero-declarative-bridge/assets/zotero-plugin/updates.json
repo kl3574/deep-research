@@ -3,9 +3,9 @@
     "zotero-declarative-bridge@deep-research.local": {
       "updates": [
         {
-          "version": "0.1.6",
-          "update_link": "https://github.com/kl3574/deep-research/releases/download/v0.6.2/zotero-declarative-bridge-0.1.6.xpi",
-          "update_hash": "sha256:f2c5b238756b0b70bf262e184012dec840b3f5fcb7ea1e773e9b3b5f0813856e",
+          "version": "0.1.7",
+          "update_link": "https://github.com/kl3574/deep-research/releases/download/v0.6.3/zotero-declarative-bridge-0.1.7.xpi",
+          "update_hash": "sha256:31c803d748dc8a1add4c8703f1ad958ef30e07114ce85d113e46e98f94e2c674",
           "applications": {
             "zotero": {
               "strict_min_version": "9.0",

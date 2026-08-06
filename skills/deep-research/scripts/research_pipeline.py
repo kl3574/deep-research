@@ -121,8 +121,12 @@ MIGRATION_KEYS = {
     "migrated_at",
 }
 STATUSES = {"pending", "running", "completed", "partial", "blocked"}
+USABLE_DEPENDENCY_STATUSES = {"completed", "partial"}
+TERMINAL_STAGE_STATUSES = {"completed", "partial", "blocked"}
+DISCOVERY_RESULT_SET_SCHEMA = "ScholarDiscoveryResultSet/v1"
+DISCOVERY_COMPLETE_STATUS = "complete_bounded"
 TRANSITIONS = {
-    "pending": {"running", "completed", "blocked"},
+    "pending": {"running", "completed", "partial", "blocked"},
     "running": {"completed", "partial", "blocked"},
     "partial": {"running", "completed", "blocked"},
     "blocked": {"running"},
@@ -398,8 +402,8 @@ def validate_legacy_execution(value: Any) -> dict[str, Any]:
             for artifact_index, artifact in enumerate(stage["artifacts"])
         ]
         require_timestamp(stage.get("updated_at"), f"{label}.updated_at")
-        if stage["status"] == "completed" and not stage["artifacts"]:
-            raise ContractError(f"{label} completed without a bound artifact")
+        if stage["status"] in {"completed", "partial"} and not stage["artifacts"]:
+            raise ContractError(f"{label} {stage['status']} without a bound artifact")
     validate_history_rows(
         execution.get("history"),
         allowed_stages=LEGACY_STAGES,
@@ -505,8 +509,8 @@ def validate_execution(value: Any) -> dict[str, Any]:
             for artifact_index, artifact in enumerate(stage["artifacts"])
         ]
         require_timestamp(stage.get("updated_at"), f"{label}.updated_at")
-        if stage["status"] == "completed" and not stage["artifacts"]:
-            raise ContractError(f"{label} completed without a bound artifact")
+        if stage["status"] in {"completed", "partial"} and not stage["artifacts"]:
+            raise ContractError(f"{label} {stage['status']} without a bound artifact")
     validate_history_rows(
         execution.get("history"),
         allowed_stages=STAGES,
@@ -524,8 +528,13 @@ def validate_execution(value: Any) -> dict[str, Any]:
 
 
 def artifact_from_path(path_value: str) -> dict[str, Any]:
-    path = Path(path_value).expanduser().resolve()
-    if path.is_symlink() or not path.is_file():
+    unresolved = Path(path_value).expanduser()
+    if unresolved.is_symlink():
+        raise ContractError(
+            f"artifact must be a regular non-symlink file: {unresolved}"
+        )
+    path = unresolved.resolve()
+    if not path.is_file():
         raise ContractError(f"artifact must be a regular non-symlink file: {path}")
     payload = path.read_bytes()
     return {
@@ -533,6 +542,74 @@ def artifact_from_path(path_value: str) -> dict[str, Any]:
         "sha256": hashlib.sha256(payload).hexdigest(),
         "size": len(payload),
     }
+
+
+def _load_bound_json_artifact(artifact: dict[str, Any]) -> Any | None:
+    path = Path(artifact["path"])
+    if path.is_symlink() or not path.is_file():
+        raise ContractError(
+            f"bound artifact is no longer a regular non-symlink file: {path}"
+        )
+    payload = path.read_bytes()
+    if len(payload) != artifact["size"] or hashlib.sha256(payload).hexdigest() != artifact["sha256"]:
+        raise ContractError(f"bound artifact content drifted: {path}")
+    try:
+        return json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+
+
+def _topic_discovery_artifact_status(artifacts: list[dict[str, Any]]) -> tuple[str, list[str]]:
+    scholar = load_scholar_module()
+    latest_by_request_set: dict[str, dict[str, Any]] = {}
+    for artifact in artifacts:
+        payload = _load_bound_json_artifact(artifact)
+        if not isinstance(payload, dict) or payload.get("schema") != DISCOVERY_RESULT_SET_SCHEMA:
+            continue
+        try:
+            validated = scholar.validate_result_set(payload)
+        except scholar.ContractError as exc:
+            raise ContractError(
+                f"topic_discovery result-set artifact is invalid: {exc}"
+            ) from exc
+        latest_by_request_set[validated["request_set_id"]] = validated
+
+    if not latest_by_request_set:
+        raise ContractError(
+            "terminal topic_discovery requires a validated "
+            "ScholarDiscoveryResultSet/v1 artifact"
+        )
+
+    limitations: list[str] = []
+    for request_set_id, result_set in sorted(latest_by_request_set.items()):
+        results = result_set["results"]
+        failures = result_set.get("failures", [])
+        if failures:
+            limitations.append(f"{request_set_id}:request_failures")
+        if not results:
+            limitations.append(f"{request_set_id}:no_results")
+        for result in results:
+            discovery_status = result["discovery_status"]
+            if discovery_status != DISCOVERY_COMPLETE_STATUS:
+                limitations.append(
+                    f"{request_set_id}:{result['request_id']}:{discovery_status}"
+                )
+    return ("partial" if limitations else "completed"), limitations
+
+
+def _validate_pipeline_stage_coverage(execution: dict[str, Any]) -> None:
+    stage = next(
+        item for item in execution["stages"] if item["stage_id"] == "topic_discovery"
+    )
+    if stage["status"] not in {"completed", "partial"}:
+        return
+    artifact_status, limitations = _topic_discovery_artifact_status(stage["artifacts"])
+    if stage["status"] != artifact_status:
+        detail = ", ".join(limitations) if limitations else "all bounded routes complete"
+        raise ContractError(
+            "topic_discovery stage status does not match provider/route coverage: "
+            f"record --status {artifact_status}; {detail}"
+        )
 
 
 def migrate_legacy_execution(
@@ -616,19 +693,19 @@ def record_stage(
     if status not in TRANSITIONS[stage["status"]]:
         raise ContractError(f"invalid stage transition {stage['status']} -> {status}")
     by_id = {item["stage_id"]: item for item in execution["stages"]}
-    if status in {"running", "completed"}:
+    if status in {"running", "completed", "partial"}:
         incomplete = [
             dependency
             for dependency in stage["dependencies"]
-            if by_id[dependency]["status"] != "completed"
+            if by_id[dependency]["status"] not in USABLE_DEPENDENCY_STATUSES
         ]
         if incomplete:
             raise ContractError(
                 f"stage {stage_id} has incomplete dependencies: {', '.join(incomplete)}"
             )
     artifacts = [artifact_from_path(path) for path in artifact_paths]
-    if status == "completed" and not (stage["artifacts"] or artifacts):
-        raise ContractError("completed stage requires at least one artifact")
+    if status in {"completed", "partial"} and not (stage["artifacts"] or artifacts):
+        raise ContractError(f"{status} stage requires at least one artifact")
     for artifact in artifacts:
         if artifact not in stage["artifacts"]:
             stage["artifacts"].append(artifact)
@@ -646,7 +723,10 @@ def record_stage(
         }
     )
     execution["state_digest"] = execution_digest(execution)
-    return validate_execution(execution)
+    validated = validate_execution(execution)
+    if stage_id == "topic_discovery" and status in {"completed", "partial"}:
+        _validate_pipeline_stage_coverage(validated)
+    return validated
 
 
 def pipeline_status(value: Any) -> dict[str, Any]:
@@ -656,8 +736,17 @@ def pipeline_status(value: Any) -> dict[str, Any]:
     for stage in execution["stages"]:
         if stage["status"] not in {"pending", "partial", "blocked"}:
             continue
-        if all(by_id[dependency]["status"] == "completed" for dependency in stage["dependencies"]):
+        if all(
+            by_id[dependency]["status"] in USABLE_DEPENDENCY_STATUSES
+            for dependency in stage["dependencies"]
+        ):
             ready.append(stage["stage_id"])
+    stages_terminal = all(
+        stage["status"] in TERMINAL_STAGE_STATUSES for stage in execution["stages"]
+    )
+    coverage_complete = all(
+        stage["status"] == "completed" for stage in execution["stages"]
+    )
     return {
         "execution_id": execution["execution_id"],
         "state_digest": execution["state_digest"],
@@ -668,11 +757,29 @@ def pipeline_status(value: Any) -> dict[str, Any]:
         "blocked_stages": [
             stage["stage_id"] for stage in execution["stages"] if stage["status"] == "blocked"
         ],
+        "partial_stages": [
+            stage["stage_id"] for stage in execution["stages"] if stage["status"] == "partial"
+        ],
         "completed_stage_count": sum(
             stage["status"] == "completed" for stage in execution["stages"]
         ),
-        "can_publish": by_id["gap_cycle"]["status"] == "completed",
-        "complete": all(stage["status"] == "completed" for stage in execution["stages"]),
+        "terminal_stage_count": sum(
+            stage["status"] in TERMINAL_STAGE_STATUSES
+            for stage in execution["stages"]
+        ),
+        "stage_actions_terminal": stages_terminal,
+        "coverage_complete": coverage_complete,
+        "can_finalize_complete": stages_terminal and coverage_complete,
+        "can_finalize_partial": stages_terminal and not coverage_complete,
+        "can_publish": by_id["gap_cycle"]["status"] in USABLE_DEPENDENCY_STATUSES,
+        "outcome": (
+            "complete"
+            if coverage_complete
+            else "partial"
+            if stages_terminal
+            else "running"
+        ),
+        "complete": coverage_complete,
     }
 
 

@@ -631,6 +631,7 @@ class ScholarDiscoveryTest(unittest.TestCase):
             "network_ref": {"network_id": "N-1", "snapshot_id": "S-1", "sha256": "a" * 64},
             "results": [result],
             "failures": [],
+            "request_count": 1,
         }
         with self.assertRaises(ContractError):
             validate_result_set(result_set)
@@ -654,6 +655,7 @@ class ScholarDiscoveryTest(unittest.TestCase):
             "network_ref": {"network_id": "N-1", "snapshot_id": "S-1", "sha256": "a" * 64},
             "results": [result],
             "failures": [],
+            "request_count": 1,
         }
         with self.assertRaises(ContractError):
             validate_result_set(result_set)
@@ -669,6 +671,27 @@ class ScholarDiscoveryTest(unittest.TestCase):
         result_set["results"][0]["hypothesis_id"] = "ANOTHER-HYP"
         with self.assertRaises(ContractError):
             validate_result_set(result_set)
+
+    def test_result_set_request_count_includes_terminal_request_failures(self):
+        request_set = request_set_fixture()
+
+        def transport(url: str, timeout: int) -> bytes:
+            return b'{"meta":{"count":0},"results":[]}'
+
+        with mock.patch.dict(os.environ, {"OPENALEX_API_KEY": "unit-test-key"}):
+            result_set = execute_request_set(request_set, transport, timeout_seconds=30)
+        result_set["failures"].append(
+            {
+                "request_id": "SDR-GAP-FAILURE",
+                "request_set_id": result_set["request_set_id"],
+                "gap_hypothesis_id": "GAP-FAILURE",
+                "error": "terminal fixture failure",
+            }
+        )
+        with self.assertRaisesRegex(ContractError, "request_count"):
+            validate_result_set(result_set)
+        result_set["request_count"] = 2
+        self.assertEqual(validate_result_set(result_set)["request_count"], 2)
 
     def test_partial_budget_tracks_query_budget(self):
         request = request_fixture()

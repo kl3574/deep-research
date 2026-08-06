@@ -75,11 +75,75 @@ def unsigned_manifest() -> dict:
     }
 
 
+def reviewed_batch_fixture(old_note_html: str = "<h1>Old</h1><p>Baseline</p>") -> dict:
+    new_note_html = "<h1>检索主题</h1><p>审阅后的通用研究笔记。</p>"
+    new_short_title = "高维代理模型分析：应先筛选再校准总效应"
+    parent = {
+        "key": "PAPER001",
+        "version": 7,
+        "title": "A generic sensitivity study",
+        "doi": "10.1/generic",
+        "expected_target_membership": True,
+    }
+    parent["identity_sha256"] = bridge.sha256_value(parent)
+    entry = {
+        "parent": parent,
+        "operations": [
+            {
+                "type": "ensure_parent_short_title",
+                "parent_key": "PAPER001",
+                "expected_parent_version": 7,
+                "expected_old_value": "Old",
+                "new_short_title": new_short_title,
+                "new_short_title_sha256": "sha256:"
+                + hashlib.sha256(new_short_title.encode()).hexdigest(),
+            },
+            {
+                "type": "ensure_child_note",
+                "note_key": "NOTE0001",
+                "expected_note_version": 3,
+                "expected_child_note_keys": ["NOTE0001"],
+                "expected_old_sha256": "sha256:"
+                + hashlib.sha256(old_note_html.encode()).hexdigest(),
+                "new_html": new_note_html,
+                "new_sha256": "sha256:"
+                + hashlib.sha256(new_note_html.encode()).hexdigest(),
+            },
+        ],
+        "draft_entry_sha256": "sha256:" + "d" * 64,
+    }
+    entry["entry_sha256"] = bridge.sha256_value(entry)
+    batch = {
+        "schema": bridge.REVIEWED_BATCH_SCHEMA,
+        "status": "reviewed_requires_bridge_compile",
+        "created_at": "2026-08-06T00:00:00Z",
+        "private": True,
+        "source": {"kind": "generic-fixture"},
+        "target": {
+            "group_id": 123,
+            "library_type": "group",
+            "library_type_id": 123,
+            "local_library_id": 2,
+            "library_name": "Example Research Library",
+            "collection_key": "COLL0001",
+            "collection_version": 9,
+            "collection_path": ["Research", "Methods"],
+            "internal_collection_id": None,
+        },
+        "entries": [entry],
+        "summary": {"entry_count": 1, "operation_count": 2},
+        "executable": False,
+        "execution_contract": {"compiler": "constrained-bridge"},
+    }
+    batch["manifest_sha256"] = bridge.sha256_value(batch)
+    return batch
+
+
 class BridgeTests(unittest.TestCase):
     def test_manifest_and_bootstrap_expose_zotero_9_diagnostics(self) -> None:
         manifest = json.loads((PLUGIN_ROOT / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["manifest_version"], 2)
-        self.assertEqual(manifest["version"], "0.1.6")
+        self.assertEqual(manifest["version"], "0.1.7")
         self.assertEqual(
             manifest["applications"]["zotero"]["update_url"],
             (
@@ -93,6 +157,9 @@ class BridgeTests(unittest.TestCase):
         self.assertIn("Zotero.logError(error)", bootstrap)
         self.assertIn('row.live.parent.setField("shortTitle", operation.new_short_title)', bootstrap)
         self.assertIn('"ensure_parent_short_title"', bootstrap)
+        self.assertIn("parent_version_precondition", bootstrap)
+        self.assertIn("parent_current_synced_version", bootstrap)
+        self.assertIn('"locally_modified_pending_sync"', (PLUGIN_ROOT / "bridge_core.js").read_text(encoding="utf-8"))
         self.assertIn('action === "resolve_collection"', bootstrap)
         self.assertIn("getByLibraryAndKeyAsync(", bootstrap)
 
@@ -639,7 +706,7 @@ class BridgeTests(unittest.TestCase):
             timeout=15,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("38 checks passed", result.stdout)
+        self.assertIn("41 checks passed", result.stdout)
 
     def test_membership_compiler_binds_live_parent_and_keyed_path(self) -> None:
         args = types.SimpleNamespace(
@@ -725,6 +792,150 @@ class BridgeTests(unittest.TestCase):
         ), mock.patch.object(bridge, "live_parent", return_value=drifted):
             with self.assertRaisesRegex(bridge.BridgeError, "old-value drift"):
                 bridge.compile_short_title(args)
+
+    def test_reviewed_batch_compiles_combined_atomic_operations(self) -> None:
+        old_note_html = "<h1>Old</h1><p>Baseline</p>"
+        batch = reviewed_batch_fixture(old_note_html)
+        record = {
+            "version": 7,
+            "data": {
+                "key": "PAPER001",
+                "version": 7,
+                "itemType": "journalArticle",
+                "title": "A generic sensitivity study",
+                "shortTitle": "Old",
+                "DOI": "10.1/generic",
+                "collections": ["COLL0001"],
+            },
+        }
+        notes = [{"key": "NOTE0001", "version": 3, "html": old_note_html}]
+        keyed_path = [
+            {"key": "ROOT0001", "name": "Research"},
+            {"key": "COLL0001", "name": "Methods"},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "reviewed.json"
+            source.write_text(json.dumps(batch), encoding="utf-8")
+            with mock.patch.object(
+                bridge,
+                "collection_contract",
+                return_value=(keyed_path, {"version": 9, "data": {"version": 9}}),
+            ), mock.patch.object(
+                bridge, "live_parent", return_value=record
+            ), mock.patch.object(
+                bridge, "live_child_notes", return_value=notes
+            ):
+                compiled = bridge.compile_reviewed_batch(
+                    source,
+                    transaction_id="reviewed-fixture",
+                    local_collection_id=40,
+                    source_hash_contract=bridge.REVIEWED_SOURCE_HASH_CONTRACT,
+                    short_title_policy=bridge.DECISION_SHORT_TITLE_POLICY,
+                    short_title_language="zh-CN",
+                    base_url=bridge.BASE_URL,
+                )
+        self.assertEqual(compiled["target"]["collection_id"], 40)
+        self.assertEqual(compiled["target"]["collection_path"], keyed_path)
+        operations = compiled["entries"][0]["operations"]
+        self.assertEqual(
+            [operation["type"] for operation in operations],
+            ["ensure_parent_short_title", "ensure_child_note"],
+        )
+        self.assertNotIn("new_short_title_sha256", operations[0])
+        self.assertNotIn("entry_sha256", compiled["entries"][0])
+        self.assertNotEqual(
+            compiled["entries"][0]["parent"]["identity_sha256"],
+            batch["entries"][0]["parent"]["identity_sha256"],
+        )
+        bridge.validate_manifest(compiled)
+
+    def test_reviewed_batch_rejects_hash_and_live_old_content_drift(self) -> None:
+        batch = reviewed_batch_fixture()
+        batch["entries"][0]["operations"][0]["new_short_title"] += "x"
+        batch["manifest_sha256"] = bridge.sha256_value(
+            {key: value for key, value in batch.items() if key != "manifest_sha256"}
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "bad-entry.json"
+            source.write_text(json.dumps(batch), encoding="utf-8")
+            with self.assertRaisesRegex(bridge.BridgeError, "entry_sha256"):
+                bridge.compile_reviewed_batch(
+                    source,
+                    transaction_id="bad-entry",
+                    local_collection_id=40,
+                    source_hash_contract=bridge.REVIEWED_SOURCE_HASH_CONTRACT,
+                    short_title_policy=None,
+                    short_title_language=None,
+                    base_url=bridge.BASE_URL,
+                )
+
+        batch = reviewed_batch_fixture()
+        record = {
+            "version": 7,
+            "data": {
+                "key": "PAPER001",
+                "version": 7,
+                "itemType": "journalArticle",
+                "title": "A generic sensitivity study",
+                "shortTitle": "Old",
+                "DOI": "10.1/generic",
+                "collections": ["COLL0001"],
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "old-drift.json"
+            source.write_text(json.dumps(batch), encoding="utf-8")
+            with mock.patch.object(
+                bridge,
+                "collection_contract",
+                return_value=(
+                    [
+                        {"key": "ROOT0001", "name": "Research"},
+                        {"key": "COLL0001", "name": "Methods"},
+                    ],
+                    {"version": 9},
+                ),
+            ), mock.patch.object(
+                bridge, "live_parent", return_value=record
+            ), mock.patch.object(
+                bridge,
+                "live_child_notes",
+                return_value=[
+                    {"key": "NOTE0001", "version": 3, "html": "concurrent edit"}
+                ],
+            ):
+                with self.assertRaisesRegex(bridge.BridgeError, "old-content hash drift"):
+                    bridge.compile_reviewed_batch(
+                        source,
+                        transaction_id="old-drift",
+                        local_collection_id=40,
+                        source_hash_contract=bridge.REVIEWED_SOURCE_HASH_CONTRACT,
+                        short_title_policy=None,
+                        short_title_language=None,
+                        base_url=bridge.BASE_URL,
+                    )
+
+    def test_decision_short_title_policy_rejects_title_abbreviations(self) -> None:
+        bridge.validate_research_short_title(
+            "高维代理模型分析：应先筛选再校准总效应",
+            "A generic sensitivity study",
+            policy=bridge.DECISION_SHORT_TITLE_POLICY,
+            language="zh",
+        )
+        with self.assertRaisesRegex(bridge.BridgeError, "abbreviation"):
+            bridge.validate_research_short_title(
+                "高维敏感性分析：可用方法综述",
+                "高维敏感性分析：可用方法综述与应用",
+                policy=bridge.DECISION_SHORT_TITLE_POLICY,
+                language="zh-CN",
+            )
+        with self.assertRaisesRegex(bridge.BridgeError, "requested Chinese"):
+            bridge.validate_research_short_title(
+                "Surrogate analysis: prefer screening before calibration",
+                "A generic sensitivity study",
+                policy=bridge.DECISION_SHORT_TITLE_POLICY,
+                language="zh",
+            )
 
     def test_note_migration_compiler_binds_live_parent_and_note_bytes(self) -> None:
         note_html = "<h1>检索标题</h1><p>经审核内容</p>"

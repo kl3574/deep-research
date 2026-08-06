@@ -2139,12 +2139,32 @@ def validate_result_set(value: Any) -> dict[str, Any]:
     failures = result_set.get("failures", [])
     if not isinstance(failures, list):
         raise ContractError("result_set.failures must be a list")
+    failure_request_ids: set[str] = set()
     for index, failure in enumerate(failures):
         item = require_dict(failure, f"result_set.failures[{index}]")
         if item.get("request_set_id") not in {None, request_set_id}:
             raise ContractError(f"result_set.failures[{index}].request_set_id is invalid")
-        if "request_id" in item:
-            require_string(item.get("request_id"), f"result_set.failures[{index}].request_id")
+        request_id = require_string(
+            item.get("request_id"), f"result_set.failures[{index}].request_id"
+        )
+        if request_id in failure_request_ids:
+            raise ContractError("result_set.failures must contain unique request_id values")
+        if request_id in request_ids:
+            raise ContractError("a request cannot appear in both results and failures")
+        failure_request_ids.add(request_id)
+
+    request_count = result_set.get("request_count")
+    if (
+        isinstance(request_count, bool)
+        or not isinstance(request_count, int)
+        or request_count < 0
+    ):
+        raise ContractError("result_set.request_count must be a nonnegative integer")
+    represented_request_count = len(request_ids) + len(failure_request_ids)
+    if request_count != represented_request_count:
+        raise ContractError(
+            "result_set.request_count must equal represented results plus failures"
+        )
 
     return result_set
 
@@ -2678,7 +2698,7 @@ def execute_request_set(
         "generated_at": request_set.get("generated_at", now_iso_utc()),
         "results": results,
         "failures": failures,
-        "request_count": len(results),
+        "request_count": len(request_set["requests"]),
     }
     return validate_result_set(result_set)
 

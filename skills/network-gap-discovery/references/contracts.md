@@ -140,6 +140,13 @@ patch eligibility. Priority ordering uses explicit tier and declared P0/P1 or
 decision-impact metadata before semantic tie-breaking; it does not let hashed
 or stable internal IDs mask authoritative gaps.
 
+`prioritize` changes a searchable `proposed` hypothesis to `selected` and
+emits `selection_summary.selected_hypothesis_ids`. Structural-only or
+semantically unenriched proposals remain `proposed` and cannot appear in the
+initial request set. `selected` is a scheduling state, not an evidence or
+truth state; later discovery/review lifecycle states remain unchanged when
+reprioritized.
+
 `structural_only` hypotheses describe structural signals that are resolved in graph/schema
 logic rather than online search (for example, declared completion-gate failures).
 These must use `next_action: "structural_only"` and are skipped by
@@ -149,6 +156,10 @@ For all active search hypotheses, query text must remain semantic and avoid inte
 object ids or route internals. Avoid IDs like `gap:`, `relation:`, `node:`,
 `completion.gate_checks.`, `unmet_declared_gate:`, and phrase patterns like
 `"No evidence ... at this snapshot"`.
+For a claim-backed gap, use the current `claim:<id>` node's reviewed `label`
+as the human hypothesis and query source. If that semantic label is absent, keep
+the candidate structural-only rather than exporting the claim ID or generic
+criteria such as `decisive high-impact claim`.
 
 ## Canonical network reference
 

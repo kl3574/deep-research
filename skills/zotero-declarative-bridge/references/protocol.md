@@ -70,10 +70,74 @@ boundary.
   value, and non-empty reviewed new value;
 - SHA-256 of canonical JSON for the whole manifest.
 
+### Reviewed batch compiler
+
+`compile-reviewed-batch` is the only supported projection from
+`ZoteroReviewedMutationBatch/v1`. The reviewed source must have exactly the
+top-level fields `schema`, `status`, `created_at`, `private`, `source`, `target`,
+`entries`, `summary`, `executable`, `execution_contract`, and
+`manifest_sha256`. It must be private, non-executable, and have status
+`reviewed_requires_bridge_compile`.
+
+The currently supported source hash contract is `canonical-json-v1`:
+
+- canonical JSON is UTF-8, key-sorted, compact, Unicode-preserving, and rejects
+  NaN/Infinity;
+- `manifest_sha256` hashes the top-level object without that field;
+- `entry_sha256` hashes the entry without that field;
+- parent `identity_sha256` hashes the reviewed parent object without that
+  field;
+- `new_short_title_sha256`, `new_sha256`, and `expected_old_sha256` hash the
+  exact UTF-8 text bytes;
+- digests may be 64 lowercase hexadecimal characters or the same value with a
+  `sha256:` prefix.
+
+`draft_entry_sha256` is an upstream provenance locator because the draft bytes
+are not embedded in this schema. The compiler validates its digest form and
+binds it through both `entry_sha256` and `manifest_sha256`; it does not claim to
+recompute the absent draft. Any other hash basis fails closed and requires a
+new named compiler contract rather than heuristic acceptance.
+
+The source target binds the numeric local library ID, group identity,
+collection key/version, and collection path names. The command additionally
+requires the resolver-produced numeric collection ID. It reads the exact keyed
+ancestry and live collection version, rejects name/key/version drift, and emits
+the keyed path. For every parent it verifies the reviewed key/version/title/DOI
+and target membership, then recomputes the bridge parent identity from live
+item type and local library ID. For an update it also verifies the live
+`shortTitle`, complete child-note inventory, note version, and exact old note
+hash. Upstream-only source, draft, entry, parent, and short-title hashes are not
+copied into the bridge transaction.
+
+Only `ensure_parent_short_title` followed by `ensure_child_note` is accepted,
+with at most one of each per parent and at most 100 key-sorted parents. The
+result is one sealed database-only transaction; attachment and membership
+operations are rejected rather than split or reordered.
+
+The optional `decision-oriented` short-title policy requires exactly one
+scenario/decision delimiter. For Chinese, each side must contain Chinese text
+and the decision side must express a conclusion or warning; English has the
+corresponding deterministic profile. A value equal to or merely contained in
+the bibliography title after punctuation/spacing normalization is rejected as
+a title abbreviation. This is a semantic-shape safeguard, not validation that
+the stated research conclusion is scientifically correct.
+
 Idempotence is state-based. A rerun is `no_changes` only when every requested
 state already matches exactly. If only part of a prior transaction is present,
 the old version/baseline normally conflicts and a fresh reviewed manifest is
 required.
+
+Receipt version evidence separates the reviewed precondition from Zotero's
+currently observed sync-object version. Parent rows expose
+`parent_version_precondition`, `parent_version`,
+`parent_current_synced_version`, and `parent_version_sync_status`; child-note
+rows expose the analogous `version_precondition`, `version`,
+`current_synced_version`, and `version_sync_status`. Zotero does not increment
+an object's sync version for an ordinary local edit. Until Zotero sync uploads
+that edit, `version_sync_status` is `locally_modified_pending_sync`, the
+observed `version` is the remote-base version, and `current_synced_version` is
+null. The bridge never invents a future version or forces synchronization. A
+later authenticated readback after Zotero sync reports the new synced version.
 Readback also enforces target membership independently of operation
 idempotence: an entry without `ensure_collection_membership` must still match
 its bound `expected_target_membership`, while a satisfied membership operation
@@ -149,6 +213,25 @@ python scripts/zotero_declarative_bridge.py compile-short-title \
   --parent-key PARENT01 --expected-parent-version 17 \
   --expected-old-value "" --new-short-title "Reviewed short title"
 ```
+
+Compile a reviewed multi-parent short-title/note batch. The source may retain a
+null pre-resolution `internal_collection_id`; the command must receive the exact
+numeric ID returned by `resolve-collection` and will bind it into the output:
+
+```bash
+python scripts/zotero_declarative_bridge.py compile-reviewed-batch \
+  /absolute/reviewed-mutations.json \
+  /absolute/zotero-reviewed-transaction.json \
+  --transaction-id reviewed-research-20260806 \
+  --local-collection-id 40 \
+  --source-hash-contract canonical-json-v1 \
+  --short-title-policy decision-oriented \
+  --short-title-language zh
+```
+
+Omit both short-title policy arguments to preserve the generic reviewed value
+without applying research-title semantics. Supplying a language without a
+policy, an unsupported language, or an unsupported hash contract fails closed.
 
 An already-applied manifest remains idempotent even though Zotero has advanced
 the item version: exact equality with `new_short_title` is `satisfied`. Any

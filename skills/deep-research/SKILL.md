@@ -55,6 +55,11 @@ versions. Explain conflicts; never vote them away.
   user-supplied export. Never scrape Scholar HTML, bypass robots or CAPTCHA, or
   relabel API results as Scholar results. Autonomous discovery uses documented
   scholarly APIs and reports provider/coverage limits.
+- In a compound pipeline, do not equate terminated discovery actions with full
+  provider/route coverage. Bind the validated result set: record
+  `topic_discovery=completed` only for all-`complete_bounded` results without
+  request failures; record usable incomplete results as `partial`. Partial stages
+  may feed bounded downstream work but can never enable complete finalization.
 - Route accepted candidate identities to `$scholarly-source-acquisition` for a
   legal, hash-verified full-text attempt. Before `$learn-from-papers`, route each
   acquired local PDF through `$scholarly-document-normalization`: a validated

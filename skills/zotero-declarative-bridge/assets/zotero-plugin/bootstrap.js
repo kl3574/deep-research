@@ -250,6 +250,7 @@ var ZoteroDeclarativeBridge = (() => {
       short_title: String(parent.getField("shortTitle") || ""),
       doi: ZoteroDeclarativeBridgeCore.normalizeDOI(String(parent.getField("DOI") || "")),
       target_membership: parent.getCollections().includes(target.collection.id),
+      synced: parent.synced === true,
     };
     const identity = ZoteroDeclarativeBridgeCore.parentIdentity(observedParent, target.observed.library_id);
     observedParent.identity_sha256 = await sha256Value(identity);
@@ -261,7 +262,12 @@ var ZoteroDeclarativeBridge = (() => {
     const noteStates = [];
     for (const note of notes.filter(Boolean)) {
       if (note.parentItemID !== parent.id) throw new ProtocolError("child note parent drift", 409, "child_drift");
-      noteStates.push({key: String(note.key), version: Number(note.version), sha256: await sha256Text(note.getNote())});
+      noteStates.push({
+        key: String(note.key),
+        version: Number(note.version),
+        synced: note.synced === true,
+        sha256: await sha256Text(note.getNote()),
+      });
     }
     noteStates.sort((left, right) => left.key.localeCompare(right.key));
     let attachments = parent.getAttachments().length ? await Zotero.Items.getAsync(parent.getAttachments()) : [];
@@ -323,12 +329,39 @@ var ZoteroDeclarativeBridge = (() => {
   }
 
   function publicEntry(row) {
+    const parentVersion = ZoteroDeclarativeBridgeCore.versionEvidence(
+      row.live.observedParent.version,
+      row.live.observedParent.synced,
+      row.entry.parent.version,
+    );
+    const noteOperation = row.entry.operations.find(operation => operation.type === "ensure_child_note");
+    const childNotes = row.live.noteStates.map(note => {
+      const precondition = noteOperation && noteOperation.note_key === note.key
+        ? noteOperation.expected_note_version
+        : null;
+      const version = ZoteroDeclarativeBridgeCore.versionEvidence(
+        note.version,
+        note.synced,
+        precondition,
+      );
+      return {
+        key: note.key,
+        version: version.observed_version,
+        version_precondition: version.precondition_version,
+        current_synced_version: version.current_synced_version,
+        version_sync_status: version.sync_status,
+        sha256: note.sha256,
+      };
+    });
     return {
       parent_key: row.entry.parent.key,
-      parent_version: row.live.observedParent.version,
+      parent_version: parentVersion.observed_version,
+      parent_version_precondition: parentVersion.precondition_version,
+      parent_current_synced_version: parentVersion.current_synced_version,
+      parent_version_sync_status: parentVersion.sync_status,
       target_membership: row.live.observedParent.target_membership,
       short_title: row.live.observedParent.short_title,
-      child_notes: row.live.noteStates,
+      child_notes: childNotes,
       attachments: row.live.attachmentStates,
       operations: row.decisions,
       all_satisfied: row.allSatisfied,

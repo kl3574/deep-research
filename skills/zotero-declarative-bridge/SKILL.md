@@ -17,6 +17,9 @@ reviewed target or manifest.
    or collections to guess either input.
 2. Read [protocol.md](references/protocol.md) and compile one of the four
    supported operations with [zotero_declarative_bridge.py](scripts/zotero_declarative_bridge.py).
+   For a sealed `ZoteroReviewedMutationBatch/v1`, use
+   `compile-reviewed-batch` rather than copying reviewed fields into an ad hoc
+   bridge manifest.
 3. Validate the sealed manifest. Never add an operation type or dynamic method
    name to bypass the protocol.
 4. Build and inspect the XPI with [build_xpi.py](scripts/build_xpi.py). The build
@@ -60,3 +63,10 @@ It never removes data, edits any parent bibliography field other than the
 explicitly bound `shortTitle`, evaluates code, reads SQLite, or obtains Zotero
 sync credentials. A preview expires and is single-use. A
 successful local readback does not prove cloud synchronization.
+
+Bibliographic `shortTitle` remains unchanged by default. Research workflows may
+opt into the decision-oriented policy only with a requested language. That
+policy requires `适用场景：结论/警示` semantics (or the documented English
+equivalent) and rejects a simple truncation of the bibliography title. The
+policy is a deterministic structural gate, not a substitute for human review of
+the scientific conclusion.

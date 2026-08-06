@@ -16,8 +16,11 @@ hypotheses without mutating research state.
    the documented semantic deduplication and tier budgets.
 3. Run `generate-hypotheses`, then `prioritize`. Explicit high-impact gaps must
    precede single-source, isolate, and structural noise; never use stable IDs as
-   the substantive ranking rule.
-4. Emit search requests only for selected hypotheses. Search, reading, and
+   the substantive ranking rule. Claim-backed gaps must resolve their human
+   meaning from the current claim node label; opaque claim IDs never become
+   paper needs, criteria, or query text.
+4. Emit search requests only for hypotheses marked `selected` by `prioritize`.
+   Structural or semantically unenriched proposals remain unselected. Search, reading, and
    evidence review happen in their owning skills.
 5. Consume reviewed results and emit a proposal-only network patch. A separate
    `$research-knowledge-network` step validates and applies any accepted change.

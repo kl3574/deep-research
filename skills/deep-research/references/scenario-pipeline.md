@@ -62,9 +62,19 @@ python scripts/research_pipeline.py record-stage \
   --output /private/pipeline-01.json
 ```
 
-Every completed stage requires at least one regular-file artifact and binds its
-absolute path, byte size, and SHA-256. Each state is immutable: write the next
-state to a new path. `status` returns ready, active, blocked, and completed stages.
+Every completed or partial stage requires at least one regular-file artifact and
+binds its absolute path, byte size, and SHA-256. Each state is immutable: write
+the next state to a new path. `status` returns ready, active, blocked, partial,
+completed, and terminal-stage counts.
+
+`completed` means both that the bounded stage action terminated and that its
+promised stage coverage is complete. `partial` means the action terminated with
+usable handoff artifacts but provider, route, budget, or another declared
+coverage branch remains incomplete. A partial dependency may feed bounded
+downstream work, but it keeps `coverage_complete=false`,
+`can_finalize_complete=false`, and the final pipeline outcome partial even when
+all stage actions are terminal. `blocked` is terminal for the current attempt but
+does not satisfy a downstream dependency.
 
 ## Explicit legacy migration
 
@@ -98,7 +108,7 @@ the legacy execution or use migration to fabricate normalization completion.
 | --- | --- | --- |
 | `zotero_baseline` | curator | exact target snapshot and child inventory |
 | `network_seed` | RKN | validated network export plus semantic scenario seed |
-| `topic_discovery` | scholar discovery | request/result sets with provider failures |
+| `topic_discovery` | scholar discovery | validated request/result sets; `completed` only when every represented result is `complete_bounded` and there are no request failures, otherwise `partial` |
 | `source_acquisition` | source acquisition | PDF identity, access route, hash, or explicit failure |
 | `source_normalization` | scholarly document normalization | validated quality records plus derivative lineage, or a `native_ok` quality artifact as explicit skip evidence |
 | `paper_understanding` | learn from papers | validated understanding/dossier/source bindings |

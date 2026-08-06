@@ -35,6 +35,18 @@ var ZoteroDeclarativeBridgeCore = (() => {
     return value;
   }
 
+  function versionEvidence(observedVersion, synced, preconditionVersion = null) {
+    positiveInt(observedVersion, "observed version");
+    assertion(typeof synced === "boolean", "version synced flag must be boolean");
+    if (preconditionVersion !== null) positiveInt(preconditionVersion, "precondition version");
+    return {
+      observed_version: observedVersion,
+      precondition_version: preconditionVersion,
+      current_synced_version: synced ? observedVersion : null,
+      sync_status: synced ? "synced" : "locally_modified_pending_sync",
+    };
+  }
+
   function text(value, label, allowEmpty = false, maxBytes = 1048576) {
     assertion(typeof value === "string" && (allowEmpty || value.length > 0), `${label} must be a string`);
     assertion(new TextEncoder().encode(value).byteLength <= maxBytes, `${label} is too large`);
@@ -364,6 +376,7 @@ var ZoteroDeclarativeBridgeCore = (() => {
     stableStringify,
     validateCollectionResolutionRequest,
     validateManifest,
+    versionEvidence,
   };
 })();
 

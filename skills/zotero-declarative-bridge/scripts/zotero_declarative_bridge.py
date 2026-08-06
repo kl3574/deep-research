@@ -22,6 +22,9 @@ from typing import Any
 
 
 MANIFEST_SCHEMA = "ZoteroDeclarativeTransaction/v1"
+REVIEWED_BATCH_SCHEMA = "ZoteroReviewedMutationBatch/v1"
+REVIEWED_SOURCE_HASH_CONTRACT = "canonical-json-v1"
+DECISION_SHORT_TITLE_POLICY = "decision-oriented"
 CAPABILITY_SCHEMA = "ZoteroDeclarativeBridgeCapability/v1"
 REQUEST_SCHEMA = "ZoteroDeclarativeBridgeRequest/v1"
 RESPONSE_SCHEMA = "ZoteroDeclarativeBridgeResponse/v1"
@@ -85,6 +88,36 @@ def sha256_value(value: Any) -> str:
     return "sha256:" + hashlib.sha256(canonical_bytes(value)).hexdigest()
 
 
+def reviewed_sha(value: Any, label: str) -> str:
+    value = text(value, label, limit=71)
+    if HEX_RE.fullmatch(value):
+        return "sha256:" + value
+    if SHA_RE.fullmatch(value):
+        return value
+    raise BridgeError(f"{label} must be 64 lowercase hex or sha256:<64 lowercase hex>")
+
+
+def verify_reviewed_canonical_hash(payload: Any, declared: Any, label: str) -> str:
+    try:
+        expected = sha256_value(payload)
+    except (TypeError, ValueError) as exc:
+        raise BridgeError(f"{label} payload is not canonical JSON") from exc
+    normalized = reviewed_sha(declared, label)
+    if normalized != expected:
+        raise BridgeError(
+            f"{label} is inconsistent with {REVIEWED_SOURCE_HASH_CONTRACT}"
+        )
+    return normalized
+
+
+def verify_reviewed_utf8_hash(value: str, declared: Any, label: str) -> str:
+    expected = "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+    normalized = reviewed_sha(declared, label)
+    if normalized != expected:
+        raise BridgeError(f"{label} is inconsistent with the reviewed UTF-8 bytes")
+    return normalized
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -144,6 +177,122 @@ def short_title(value: Any, label: str, *, nonempty: bool) -> str:
     if re.search(r"[\x00-\x1f\x7f]", value):
         raise BridgeError(f"{label} contains control characters")
     return value
+
+
+def _compact_title(value: str) -> str:
+    return "".join(character.casefold() for character in value if character.isalnum())
+
+
+def validate_research_short_title(
+    value: str,
+    bibliography_title: str,
+    *,
+    policy: str | None,
+    language: str | None,
+) -> None:
+    if policy is None:
+        if language is not None:
+            raise BridgeError("short-title language requires an explicit policy")
+        return
+    if policy != DECISION_SHORT_TITLE_POLICY:
+        raise BridgeError("short-title policy is unsupported")
+    if not isinstance(language, str) or not language.strip():
+        raise BridgeError("decision-oriented shortTitle requires a requested language")
+    language = language.strip().lower().replace("_", "-")
+    delimiter_positions = [
+        index for index, character in enumerate(value) if character in {":", "："}
+    ]
+    if len(delimiter_positions) != 1:
+        raise BridgeError(
+            "decision-oriented shortTitle must contain exactly one scenario:decision delimiter"
+        )
+    split_at = delimiter_positions[0]
+    scenario = value[:split_at].strip()
+    decision = value[split_at + 1 :].strip()
+    if not scenario or not decision:
+        raise BridgeError("decision-oriented shortTitle requires scenario and decision text")
+
+    if language == "zh" or language.startswith("zh-"):
+        if len(re.findall(r"[\u3400-\u9fff]", scenario)) < 2 or len(
+            re.findall(r"[\u3400-\u9fff]", decision)
+        ) < 2:
+            raise BridgeError("decision-oriented shortTitle does not match requested Chinese")
+        decision_cues = (
+            "应",
+            "宜",
+            "可",
+            "优先",
+            "避免",
+            "警惕",
+            "谨慎",
+            "不能",
+            "不可",
+            "不宜",
+            "不足",
+            "受限",
+            "失效",
+            "稳健",
+            "有效",
+            "更适合",
+            "仅",
+            "需要",
+            "必须",
+            "低估",
+            "高估",
+            "揭示",
+            "支持",
+            "推荐",
+            "主导",
+            "风险",
+            "误导",
+        )
+        if not any(cue in decision for cue in decision_cues):
+            raise BridgeError(
+                "decision-oriented Chinese shortTitle requires a conclusion or warning cue"
+            )
+    elif language == "en" or language.startswith("en-"):
+        if len(re.findall(r"[A-Za-z]", scenario)) < 4 or len(
+            re.findall(r"[A-Za-z]", decision)
+        ) < 4 or re.search(r"[\u3400-\u9fff]", value):
+            raise BridgeError("decision-oriented shortTitle does not match requested English")
+        decision_words = set(re.findall(r"[a-z]+", decision.casefold()))
+        if not decision_words.intersection(
+            {
+                "should",
+                "prefer",
+                "avoid",
+                "requires",
+                "needs",
+                "works",
+                "fails",
+                "cannot",
+                "robust",
+                "suitable",
+                "unsuitable",
+                "underestimates",
+                "overestimates",
+                "reveals",
+                "supports",
+                "dominates",
+                "risks",
+                "only",
+            }
+        ):
+            raise BridgeError(
+                "decision-oriented English shortTitle requires a conclusion or warning cue"
+            )
+    else:
+        raise BridgeError("decision-oriented shortTitle language is unsupported")
+
+    compact_value = _compact_title(value)
+    compact_source = _compact_title(bibliography_title)
+    if compact_value and compact_source and (
+        compact_value == compact_source
+        or (len(compact_value) >= 8 and compact_value in compact_source)
+    ):
+        raise BridgeError(
+            "decision-oriented shortTitle must not be a simple bibliography-title abbreviation"
+        )
 
 
 def identity_for_parent(parent: dict[str, Any], library_id: int) -> dict[str, Any]:
@@ -528,6 +677,58 @@ def live_parent(group_id: int, parent_key: str, base_url: str = BASE_URL) -> dic
     return record
 
 
+def live_child_notes(
+    group_id: int,
+    parent_key: str,
+    base_url: str = BASE_URL,
+) -> list[dict[str, Any]]:
+    parent_key = item_key(parent_key, "parent key")
+    records: list[Any] = []
+    start = 0
+    while True:
+        query = urllib.parse.urlencode(
+            {"format": "json", "itemType": "note", "limit": 100, "start": start}
+        )
+        page = api_get(
+            f"/api/groups/{group_id}/items/{parent_key}/children?{query}",
+            base_url,
+        )
+        if not isinstance(page, list):
+            raise BridgeError(f"child-note inventory is malformed for {parent_key}")
+        records.extend(page)
+        if len(page) < 100:
+            break
+        start += 100
+        if start > 100:
+            raise BridgeError(f"child-note inventory exceeds bridge limits for {parent_key}")
+
+    notes: list[dict[str, Any]] = []
+    for index, record in enumerate(records):
+        data = record.get("data") if isinstance(record, dict) else None
+        if (
+            not isinstance(data, dict)
+            or data.get("itemType") != "note"
+            or data.get("parentItem") != parent_key
+        ):
+            raise BridgeError(f"child-note record {index} is malformed for {parent_key}")
+        note_html = data.get("note")
+        if not isinstance(note_html, str):
+            raise BridgeError(f"child-note record {index} has no exact note HTML")
+        notes.append(
+            {
+                "key": item_key(data.get("key"), f"child-note record {index}.key"),
+                "version": positive_int(
+                    data.get("version"), f"child-note record {index}.version"
+                ),
+                "html": note_html,
+            }
+        )
+    notes.sort(key=lambda note: note["key"])
+    if len({note["key"] for note in notes}) != len(notes):
+        raise BridgeError(f"child-note inventory contains duplicate keys for {parent_key}")
+    return notes
+
+
 def target_from_parts(
     *,
     group_id: int,
@@ -790,6 +991,12 @@ def compile_short_title(args: argparse.Namespace) -> dict[str, Any]:
     )
     if reviewed_new != reviewed_new.strip():
         raise BridgeError("new_short_title must be trimmed")
+    validate_research_short_title(
+        reviewed_new,
+        str(data.get("title", "")),
+        policy=getattr(args, "short_title_policy", None),
+        language=getattr(args, "short_title_language", None),
+    )
     if parent["version"] != expected_version:
         raise BridgeError(f"shortTitle parent {args.parent_key} version drift")
     if str(data.get("shortTitle", "")) != expected_old:
@@ -811,6 +1018,474 @@ def compile_short_title(args: argparse.Namespace) -> dict[str, Any]:
             "generated_at": now_iso(),
             "target": target,
             "entries": [{"parent": parent, "operations": [operation]}],
+        }
+    )
+
+
+def validate_reviewed_batch_source_seals(batch: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_entries = batch["entries"]
+    if not isinstance(raw_entries, list) or not raw_entries or len(raw_entries) > 100:
+        raise BridgeError("reviewed batch entries must be non-empty and bounded")
+    parent_keys: list[str] = []
+    for entry_index, raw_entry in enumerate(raw_entries):
+        label = f"reviewed batch.entries[{entry_index}]"
+        entry = exact_keys(
+            raw_entry,
+            {"parent", "operations", "draft_entry_sha256", "entry_sha256"},
+            label,
+        )
+        reviewed_sha(entry["draft_entry_sha256"], f"{label}.draft_entry_sha256")
+        verify_reviewed_canonical_hash(
+            {key: value for key, value in entry.items() if key != "entry_sha256"},
+            entry["entry_sha256"],
+            f"{label}.entry_sha256",
+        )
+        parent = exact_keys(
+            entry["parent"],
+            {
+                "key",
+                "version",
+                "title",
+                "doi",
+                "expected_target_membership",
+                "identity_sha256",
+            },
+            f"{label}.parent",
+        )
+        verify_reviewed_canonical_hash(
+            {key: value for key, value in parent.items() if key != "identity_sha256"},
+            parent["identity_sha256"],
+            f"{label}.parent.identity_sha256",
+        )
+        parent_keys.append(item_key(parent["key"], f"{label}.parent.key"))
+        operations = entry["operations"]
+        if not isinstance(operations, list) or not operations or len(operations) > 2:
+            raise BridgeError(f"{label}.operations must contain one or two operations")
+        operation_types = [
+            operation.get("type") if isinstance(operation, dict) else None
+            for operation in operations
+        ]
+        allowed = {"ensure_parent_short_title", "ensure_child_note"}
+        if any(operation_type not in allowed for operation_type in operation_types):
+            raise BridgeError(f"{label}.operations contains an unsupported operation")
+        if len(operation_types) != len(set(operation_types)) or operation_types != sorted(
+            operation_types, key=OP_ORDER.get
+        ):
+            raise BridgeError(f"{label}.operations must be unique and canonically ordered")
+        for operation_index, raw_operation in enumerate(operations):
+            operation_label = f"{label}.operations[{operation_index}]"
+            if raw_operation["type"] == "ensure_parent_short_title":
+                operation = exact_keys(
+                    raw_operation,
+                    {
+                        "type",
+                        "parent_key",
+                        "expected_parent_version",
+                        "expected_old_value",
+                        "new_short_title",
+                        "new_short_title_sha256",
+                    },
+                    operation_label,
+                )
+                value = short_title(
+                    operation["new_short_title"],
+                    f"{operation_label}.new_short_title",
+                    nonempty=True,
+                )
+                verify_reviewed_utf8_hash(
+                    value,
+                    operation["new_short_title_sha256"],
+                    f"{operation_label}.new_short_title_sha256",
+                )
+            else:
+                operation = exact_keys(
+                    raw_operation,
+                    {
+                        "type",
+                        "note_key",
+                        "expected_note_version",
+                        "expected_child_note_keys",
+                        "expected_old_sha256",
+                        "new_html",
+                        "new_sha256",
+                    },
+                    operation_label,
+                )
+                value = text(operation["new_html"], f"{operation_label}.new_html")
+                verify_reviewed_utf8_hash(
+                    value,
+                    operation["new_sha256"],
+                    f"{operation_label}.new_sha256",
+                )
+                if operation["expected_old_sha256"] is not None:
+                    reviewed_sha(
+                        operation["expected_old_sha256"],
+                        f"{operation_label}.expected_old_sha256",
+                    )
+    if parent_keys != sorted(parent_keys) or len(parent_keys) != len(set(parent_keys)):
+        raise BridgeError("reviewed batch entries must be parent-key-sorted and unique")
+    return raw_entries
+
+
+def compile_reviewed_batch(
+    source: Path,
+    *,
+    transaction_id: str,
+    local_collection_id: int,
+    source_hash_contract: str,
+    short_title_policy: str | None,
+    short_title_language: str | None,
+    base_url: str,
+) -> dict[str, Any]:
+    if source_hash_contract != REVIEWED_SOURCE_HASH_CONTRACT:
+        raise BridgeError(
+            "unsupported reviewed source hash contract; use canonical-json-v1 only"
+        )
+    if short_title_policy is None and short_title_language is not None:
+        raise BridgeError("short-title language requires an explicit policy")
+    if short_title_policy is not None and short_title_language is None:
+        raise BridgeError("decision-oriented shortTitle requires a requested language")
+    batch = exact_keys(
+        read_json(source),
+        {
+            "schema",
+            "status",
+            "created_at",
+            "private",
+            "source",
+            "target",
+            "entries",
+            "summary",
+            "executable",
+            "execution_contract",
+            "manifest_sha256",
+        },
+        "reviewed batch",
+    )
+    if batch["schema"] != REVIEWED_BATCH_SCHEMA:
+        raise BridgeError("reviewed batch schema mismatch")
+    if batch["status"] != "reviewed_requires_bridge_compile":
+        raise BridgeError("reviewed batch is not approved for bridge compilation")
+    text(batch["created_at"], "reviewed batch.created_at", limit=64)
+    if batch["private"] is not True or batch["executable"] is not False:
+        raise BridgeError("reviewed batch privacy/executable boundary mismatch")
+    if not isinstance(batch["source"], dict) or not isinstance(batch["summary"], dict):
+        raise BridgeError("reviewed batch source and summary must be objects")
+    if not isinstance(batch["execution_contract"], (dict, str)) or not batch[
+        "execution_contract"
+    ]:
+        raise BridgeError("reviewed batch execution_contract is missing")
+    verify_reviewed_canonical_hash(
+        {key: value for key, value in batch.items() if key != "manifest_sha256"},
+        batch["manifest_sha256"],
+        "reviewed batch.manifest_sha256",
+    )
+    raw_entries = validate_reviewed_batch_source_seals(batch)
+
+    raw_target = exact_keys(
+        batch["target"],
+        {
+            "group_id",
+            "library_type",
+            "library_type_id",
+            "local_library_id",
+            "library_name",
+            "collection_key",
+            "collection_version",
+            "collection_path",
+            "internal_collection_id",
+        },
+        "reviewed batch.target",
+    )
+    group_id = positive_int(raw_target["group_id"], "reviewed batch.target.group_id")
+    if raw_target["library_type"] != "group":
+        raise BridgeError("reviewed batch target must be a group library")
+    library_type_id = positive_int(
+        raw_target["library_type_id"], "reviewed batch.target.library_type_id"
+    )
+    if library_type_id != group_id:
+        raise BridgeError("reviewed batch group identity is inconsistent")
+    library_id = positive_int(
+        raw_target["local_library_id"], "reviewed batch.target.local_library_id"
+    )
+    library_name = text(
+        raw_target["library_name"], "reviewed batch.target.library_name", limit=256
+    )
+    collection_key = item_key(
+        raw_target["collection_key"], "reviewed batch.target.collection_key"
+    )
+    collection_version = positive_int(
+        raw_target["collection_version"], "reviewed batch.target.collection_version"
+    )
+    collection_id = positive_int(local_collection_id, "local_collection_id")
+    reviewed_collection_id = raw_target["internal_collection_id"]
+    if reviewed_collection_id is not None:
+        if positive_int(
+            reviewed_collection_id,
+            "reviewed batch.target.internal_collection_id",
+        ) != collection_id:
+            raise BridgeError("reviewed batch internal collection ID drift")
+    path_names = raw_target["collection_path"]
+    if not isinstance(path_names, list) or not path_names or len(path_names) > 32:
+        raise BridgeError("reviewed batch target collection_path is invalid")
+    for index, name in enumerate(path_names):
+        text(name, f"reviewed batch.target.collection_path[{index}]", limit=512)
+
+    collection_path, leaf = collection_contract(group_id, collection_key, base_url)
+    if [part["name"] for part in collection_path] != path_names:
+        raise BridgeError("reviewed batch collection path drift")
+    leaf_data = leaf.get("data") if isinstance(leaf, dict) else None
+    observed_collection_version = (
+        leaf.get("version")
+        if isinstance(leaf, dict) and leaf.get("version") is not None
+        else leaf_data.get("version") if isinstance(leaf_data, dict) else None
+    )
+    if positive_int(observed_collection_version, "live collection.version") != collection_version:
+        raise BridgeError("reviewed batch collection version drift")
+
+    target = target_from_parts(
+        group_id=group_id,
+        library_id=library_id,
+        library_name=library_name,
+        collection_id=collection_id,
+        collection_key=collection_key,
+        collection_path=collection_path,
+        files=False,
+    )
+    entries: list[dict[str, Any]] = []
+    reviewed_parent_keys: list[str] = []
+    for entry_index, raw_entry in enumerate(raw_entries):
+        label = f"reviewed batch.entries[{entry_index}]"
+        entry = exact_keys(
+            raw_entry,
+            {"parent", "operations", "draft_entry_sha256", "entry_sha256"},
+            label,
+        )
+        reviewed_sha(entry["draft_entry_sha256"], f"{label}.draft_entry_sha256")
+        verify_reviewed_canonical_hash(
+            {key: value for key, value in entry.items() if key != "entry_sha256"},
+            entry["entry_sha256"],
+            f"{label}.entry_sha256",
+        )
+        raw_parent = exact_keys(
+            entry["parent"],
+            {
+                "key",
+                "version",
+                "title",
+                "doi",
+                "expected_target_membership",
+                "identity_sha256",
+            },
+            f"{label}.parent",
+        )
+        verify_reviewed_canonical_hash(
+            {
+                key: value
+                for key, value in raw_parent.items()
+                if key != "identity_sha256"
+            },
+            raw_parent["identity_sha256"],
+            f"{label}.parent.identity_sha256",
+        )
+        parent_key = item_key(raw_parent["key"], f"{label}.parent.key")
+        reviewed_parent_keys.append(parent_key)
+        reviewed_version = positive_int(
+            raw_parent["version"], f"{label}.parent.version"
+        )
+        reviewed_title = text(
+            raw_parent["title"], f"{label}.parent.title", limit=16_384
+        )
+        reviewed_doi = text(
+            raw_parent["doi"], f"{label}.parent.doi", nonempty=False, limit=2048
+        )
+        if raw_parent["expected_target_membership"] is not True:
+            raise BridgeError(f"{label}.parent must be reviewed inside the target")
+
+        record = live_parent(group_id, parent_key, base_url)
+        data = record.get("data") if isinstance(record, dict) else None
+        if not isinstance(data, dict):
+            raise BridgeError(f"reviewed parent {parent_key} record is malformed")
+        if record.get("version") not in {None, data.get("version")}:
+            raise BridgeError(f"reviewed parent {parent_key} Local API version mismatch")
+        if data.get("version") != reviewed_version:
+            raise BridgeError(f"reviewed parent {parent_key} version drift")
+        if str(data.get("title", "")) != reviewed_title:
+            raise BridgeError(f"reviewed parent {parent_key} title drift")
+        if normalize_doi(data.get("DOI", "")) != normalize_doi(reviewed_doi):
+            raise BridgeError(f"reviewed parent {parent_key} DOI drift")
+        collections = data.get("collections")
+        if not isinstance(collections, list) or collection_key not in collections:
+            raise BridgeError(f"reviewed parent {parent_key} is outside the target")
+        parent = parent_from_data(data, library_id, True)
+
+        raw_operations = entry["operations"]
+        if not isinstance(raw_operations, list) or not raw_operations or len(raw_operations) > 2:
+            raise BridgeError(f"{label}.operations must contain one or two operations")
+        operation_types = [
+            operation.get("type") if isinstance(operation, dict) else None
+            for operation in raw_operations
+        ]
+        allowed = {"ensure_parent_short_title", "ensure_child_note"}
+        if any(operation_type not in allowed for operation_type in operation_types):
+            raise BridgeError(f"{label}.operations contains an unsupported operation")
+        if len(operation_types) != len(set(operation_types)) or operation_types != sorted(
+            operation_types, key=OP_ORDER.get
+        ):
+            raise BridgeError(f"{label}.operations must be unique and canonically ordered")
+
+        operations: list[dict[str, Any]] = []
+        observed_notes: list[dict[str, Any]] | None = None
+        for operation_index, raw_operation in enumerate(raw_operations):
+            operation_label = f"{label}.operations[{operation_index}]"
+            if raw_operation["type"] == "ensure_parent_short_title":
+                operation = exact_keys(
+                    raw_operation,
+                    {
+                        "type",
+                        "parent_key",
+                        "expected_parent_version",
+                        "expected_old_value",
+                        "new_short_title",
+                        "new_short_title_sha256",
+                    },
+                    operation_label,
+                )
+                if item_key(operation["parent_key"], f"{operation_label}.parent_key") != parent_key:
+                    raise BridgeError(f"{operation_label}.parent_key disagrees with parent")
+                expected_version = positive_int(
+                    operation["expected_parent_version"],
+                    f"{operation_label}.expected_parent_version",
+                )
+                if expected_version != reviewed_version:
+                    raise BridgeError(f"{operation_label}.expected_parent_version drift")
+                expected_old = short_title(
+                    operation["expected_old_value"],
+                    f"{operation_label}.expected_old_value",
+                    nonempty=False,
+                )
+                reviewed_new = short_title(
+                    operation["new_short_title"],
+                    f"{operation_label}.new_short_title",
+                    nonempty=True,
+                )
+                if reviewed_new != reviewed_new.strip():
+                    raise BridgeError(f"{operation_label}.new_short_title must be trimmed")
+                verify_reviewed_utf8_hash(
+                    reviewed_new,
+                    operation["new_short_title_sha256"],
+                    f"{operation_label}.new_short_title_sha256",
+                )
+                if str(data.get("shortTitle", "")) != expected_old:
+                    raise BridgeError(f"reviewed parent {parent_key} shortTitle old-value drift")
+                if expected_old == reviewed_new:
+                    raise BridgeError(f"reviewed parent {parent_key} shortTitle is unchanged")
+                validate_research_short_title(
+                    reviewed_new,
+                    reviewed_title,
+                    policy=short_title_policy,
+                    language=short_title_language,
+                )
+                operations.append(
+                    {
+                        "type": "ensure_parent_short_title",
+                        "library_id": library_id,
+                        "parent_key": parent_key,
+                        "expected_parent_version": expected_version,
+                        "expected_old_value": expected_old,
+                        "new_short_title": reviewed_new,
+                    }
+                )
+            else:
+                operation = exact_keys(
+                    raw_operation,
+                    {
+                        "type",
+                        "note_key",
+                        "expected_note_version",
+                        "expected_child_note_keys",
+                        "expected_old_sha256",
+                        "new_html",
+                        "new_sha256",
+                    },
+                    operation_label,
+                )
+                new_html = text(operation["new_html"], f"{operation_label}.new_html")
+                new_sha = verify_reviewed_utf8_hash(
+                    new_html,
+                    operation["new_sha256"],
+                    f"{operation_label}.new_sha256",
+                )
+                expected_keys = operation["expected_child_note_keys"]
+                if (
+                    not isinstance(expected_keys, list)
+                    or expected_keys != sorted(expected_keys)
+                    or len(expected_keys) != len(set(expected_keys))
+                ):
+                    raise BridgeError(
+                        f"{operation_label}.expected_child_note_keys must be sorted and unique"
+                    )
+                for key_index, key in enumerate(expected_keys):
+                    item_key(key, f"{operation_label}.expected_child_note_keys[{key_index}]")
+                if observed_notes is None:
+                    observed_notes = live_child_notes(group_id, parent_key, base_url)
+                if [note["key"] for note in observed_notes] != expected_keys:
+                    raise BridgeError(f"reviewed parent {parent_key} child-note inventory drift")
+
+                note_key_value = operation["note_key"]
+                if note_key_value is None:
+                    if (
+                        operation["expected_note_version"] is not None
+                        or operation["expected_old_sha256"] is not None
+                        or expected_keys
+                    ):
+                        raise BridgeError(f"{operation_label} create baseline is inconsistent")
+                    expected_note_version = None
+                    expected_old_sha = None
+                else:
+                    note_key_value = item_key(note_key_value, f"{operation_label}.note_key")
+                    expected_note_version = positive_int(
+                        operation["expected_note_version"],
+                        f"{operation_label}.expected_note_version",
+                    )
+                    expected_old_sha = reviewed_sha(
+                        operation["expected_old_sha256"],
+                        f"{operation_label}.expected_old_sha256",
+                    )
+                    if expected_keys != [note_key_value] or len(observed_notes) != 1:
+                        raise BridgeError(f"{operation_label} update baseline is inconsistent")
+                    observed_note = observed_notes[0]
+                    if observed_note["version"] != expected_note_version:
+                        raise BridgeError(f"reviewed note {note_key_value} version drift")
+                    observed_old_sha = "sha256:" + hashlib.sha256(
+                        observed_note["html"].encode("utf-8")
+                    ).hexdigest()
+                    if observed_old_sha != expected_old_sha:
+                        raise BridgeError(f"reviewed note {note_key_value} old-content hash drift")
+                operations.append(
+                    {
+                        "type": "ensure_child_note",
+                        "note_key": note_key_value,
+                        "expected_note_version": expected_note_version,
+                        "expected_old_sha256": expected_old_sha,
+                        "expected_child_note_keys": expected_keys,
+                        "new_html": new_html,
+                        "new_sha256": new_sha,
+                    }
+                )
+        entries.append({"parent": parent, "operations": operations})
+
+    if reviewed_parent_keys != sorted(reviewed_parent_keys) or len(
+        reviewed_parent_keys
+    ) != len(set(reviewed_parent_keys)):
+        raise BridgeError("reviewed batch entries must be parent-key-sorted and unique")
+    return seal_manifest(
+        {
+            "schema": MANIFEST_SCHEMA,
+            "transaction_id": transaction_id,
+            "generated_at": now_iso(),
+            "target": target,
+            "entries": entries,
         }
     )
 
@@ -966,7 +1641,27 @@ def parse_args() -> argparse.Namespace:
     short_title_parser.add_argument("--expected-parent-version", type=int, required=True)
     short_title_parser.add_argument("--expected-old-value", required=True)
     short_title_parser.add_argument("--new-short-title", required=True)
+    short_title_parser.add_argument(
+        "--short-title-policy", choices=[DECISION_SHORT_TITLE_POLICY]
+    )
+    short_title_parser.add_argument("--short-title-language")
     short_title_parser.add_argument("--base-url", default=BASE_URL)
+
+    reviewed_batch = sub.add_parser("compile-reviewed-batch")
+    reviewed_batch.add_argument("source", type=Path)
+    reviewed_batch.add_argument("output", type=Path)
+    reviewed_batch.add_argument("--transaction-id", required=True)
+    reviewed_batch.add_argument("--local-collection-id", type=int, required=True)
+    reviewed_batch.add_argument(
+        "--source-hash-contract",
+        choices=[REVIEWED_SOURCE_HASH_CONTRACT],
+        required=True,
+    )
+    reviewed_batch.add_argument(
+        "--short-title-policy", choices=[DECISION_SHORT_TITLE_POLICY]
+    )
+    reviewed_batch.add_argument("--short-title-language")
+    reviewed_batch.add_argument("--base-url", default=BASE_URL)
 
     probe = sub.add_parser("probe")
     probe.add_argument("--capability-file", type=Path, required=True)
@@ -1015,6 +1710,19 @@ def main() -> int:
             return 0
         if args.command == "compile-short-title":
             result = compile_short_title(args)
+            write_private_json(args.output, result)
+            print(json.dumps({"status": "compiled", "entries": len(result["entries"]), "manifest_sha256": result["manifest_sha256"]}))
+            return 0
+        if args.command == "compile-reviewed-batch":
+            result = compile_reviewed_batch(
+                args.source,
+                transaction_id=args.transaction_id,
+                local_collection_id=args.local_collection_id,
+                source_hash_contract=args.source_hash_contract,
+                short_title_policy=args.short_title_policy,
+                short_title_language=args.short_title_language,
+                base_url=args.base_url,
+            )
             write_private_json(args.output, result)
             print(json.dumps({"status": "compiled", "entries": len(result["entries"]), "manifest_sha256": result["manifest_sha256"]}))
             return 0

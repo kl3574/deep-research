@@ -85,6 +85,37 @@ def network_fixture():
     return network
 
 
+def discovery_result_set_fixture(discovery_status="complete_bounded"):
+    return {
+        "schema": "ScholarDiscoveryResultSet/v1",
+        "schema_version": "v1",
+        "request_set_id": "request-set-" + "a" * 16,
+        "request_set_digest": "a" * 64,
+        "network_id": "doe-surrogate",
+        "network_snapshot_sha256": "b" * 64,
+        "network_ref": {
+            "network_id": "doe-surrogate",
+            "snapshot_id": "doe-surrogate-s1",
+            "sha256": "b" * 64,
+        },
+        "generated_at": "2026-08-05T00:00:00Z",
+        "results": [
+            {
+                "schema": "ScholarDiscoveryResult/v1",
+                "request_id": "SDR-GAP-001",
+                "request_digest": "c" * 64,
+                "plan_digest": "d" * 64,
+                "discovery_status": discovery_status,
+                "ranked_candidates": [],
+                "hypothesis_id": "gap-inverse-surrogate",
+                "gap_hypothesis_id": "gap-inverse-surrogate",
+            }
+        ],
+        "failures": [],
+        "request_count": 1,
+    }
+
+
 def legacy_execution_fixture(artifact_path):
     execution = initialize_execution(
         scenario_fixture(), as_of="2026-08-05T00:00:00Z"
@@ -95,11 +126,17 @@ def legacy_execution_fixture(artifact_path):
         "topic_discovery",
         "source_acquisition",
     ):
+        selected_artifact = artifact_path
+        if stage_id == "topic_discovery":
+            selected_artifact = artifact_path.with_name("topic-discovery.json")
+            selected_artifact.write_text(
+                json.dumps(discovery_result_set_fixture()), encoding="utf-8"
+            )
         execution = record_stage(
             execution,
             stage_id=stage_id,
             status="completed",
-            artifact_paths=[str(artifact_path)],
+            artifact_paths=[str(selected_artifact)],
             reason=f"{stage_id} complete",
             as_of="2026-08-05T00:01:00Z",
         )
@@ -179,6 +216,10 @@ class ResearchPipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             artifact = Path(tmp) / "stage.json"
             artifact.write_text("{}", encoding="utf-8")
+            discovery_artifact = Path(tmp) / "topic-discovery.json"
+            discovery_artifact.write_text(
+                json.dumps(discovery_result_set_fixture()), encoding="utf-8"
+            )
             timestamp = "2026-08-05T00:01:00Z"
             for stage_id in (
                 "zotero_baseline",
@@ -190,7 +231,11 @@ class ResearchPipelineTests(unittest.TestCase):
                     execution,
                     stage_id=stage_id,
                     status="completed",
-                    artifact_paths=[str(artifact)],
+                    artifact_paths=[
+                        str(discovery_artifact)
+                        if stage_id == "topic_discovery"
+                        else str(artifact)
+                    ],
                     reason="fixture completed",
                     as_of=timestamp,
                 )
@@ -226,6 +271,75 @@ class ResearchPipelineTests(unittest.TestCase):
                 as_of=timestamp,
             )
         self.assertIn("paper_understanding", pipeline_status(execution)["ready_stages"])
+
+    def test_partial_discovery_is_terminal_but_does_not_claim_full_coverage(self):
+        execution = initialize_execution(
+            scenario_fixture(), as_of="2026-08-05T00:00:00Z"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            generic_artifact = Path(tmp) / "stage.json"
+            generic_artifact.write_text("{}", encoding="utf-8")
+            partial_artifact = Path(tmp) / "topic-discovery-partial.json"
+            partial_artifact.write_text(
+                json.dumps(discovery_result_set_fixture("partial_provider")),
+                encoding="utf-8",
+            )
+            timestamp = "2026-08-05T00:01:00Z"
+            for stage_id in ("zotero_baseline", "network_seed"):
+                execution = record_stage(
+                    execution,
+                    stage_id=stage_id,
+                    status="completed",
+                    artifact_paths=[str(generic_artifact)],
+                    reason="fixture completed",
+                    as_of=timestamp,
+                )
+            with self.assertRaisesRegex(
+                ContractError, "record --status partial.*partial_provider"
+            ):
+                record_stage(
+                    execution,
+                    stage_id="topic_discovery",
+                    status="completed",
+                    artifact_paths=[str(partial_artifact)],
+                    reason="all provider actions terminated",
+                    as_of=timestamp,
+                )
+            execution = record_stage(
+                execution,
+                stage_id="topic_discovery",
+                status="partial",
+                artifact_paths=[str(partial_artifact)],
+                reason="one provider route remained truncated",
+                as_of=timestamp,
+            )
+            for stage_id in (
+                "source_acquisition",
+                "source_normalization",
+                "paper_understanding",
+                "zotero_curation",
+                "network_merge",
+                "gap_cycle",
+                "network_publish",
+            ):
+                execution = record_stage(
+                    execution,
+                    stage_id=stage_id,
+                    status="completed",
+                    artifact_paths=[str(generic_artifact)],
+                    reason="bounded downstream work completed",
+                    as_of=timestamp,
+                )
+
+        status = pipeline_status(execution)
+        self.assertEqual(status["partial_stages"], ["topic_discovery"])
+        self.assertEqual(status["terminal_stage_count"], len(execution["stages"]))
+        self.assertTrue(status["stage_actions_terminal"])
+        self.assertFalse(status["coverage_complete"])
+        self.assertFalse(status["can_finalize_complete"])
+        self.assertTrue(status["can_finalize_partial"])
+        self.assertEqual(status["outcome"], "partial")
+        self.assertFalse(status["complete"])
 
     def test_scenario_rejects_credential_fields_and_structural_gap_ids(self):
         secret = scenario_fixture()

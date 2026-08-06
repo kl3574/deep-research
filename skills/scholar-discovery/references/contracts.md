@@ -180,6 +180,10 @@ and `request_set.network_ref.network_id` must match `request_set.network_id`.
 `hypothesis_id` is the canonical field and mirrors `gap_hypothesis_id` for
 backward compatibility.
 
+`request_count` is the total number of terminally represented requests, not only
+the number with result objects. It must equal the number of unique result request
+IDs plus unique failure request IDs; a request cannot appear in both arrays.
+
 `request_set_id` must match `"request-set-" + request_set_digest[:16]`, and all
 `network_ref` fields must be consistent with network fields in the same object.
 

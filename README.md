@@ -56,7 +56,7 @@ RAG、主动筛选、研究知识图谱与完整 Zotero 读写闭环，避免把
 - 把 `version-fit`、全文访问、方法适配和来源身份作为硬门，而不是用名望或引用数代替审查；
 - 对关键论文执行 `Question plan → Source bundle → Document graph → Evidence → Reconstruction → Separate-context attestation`；attestation 只记录可审计的上下文声明，不认证主体身份，逐项证据仍保留可重算的页码/字符区间以及图、表、公式或定理定位；
 - 将适用场景、工作流与结构化 I/O、数据流、数学推导依赖、算法步骤和有边界结论固化为内容寻址的 `PaperUnderstanding/v1`；区分 `answered / unresolved / not_applicable` 与 terminal/understood coverage，禁止把终态覆盖冒充理解；
-- 从同一理解对象确定性投影 `PaperUnderstandingNoteInput/v1 → PaperKnowledgeNote/v2`：先给适用场景与结论，再给工作流、数学和算法原理，最后保留证据、边界与溯源；研究检索短标题只进入子笔记 `<h1>`，不覆盖书目 `shortTitle`；
+- 从同一理解对象确定性投影 `PaperUnderstandingNoteInput/v1 → PaperKnowledgeNote/v2`：先给适用场景与结论，再给工作流、数学和算法原理，最后保留证据、边界与溯源；研究检索标题默认只进入子笔记 `<h1>`，只有显式审阅并启用 `decision-oriented` 策略时，才把“适用场景：结论/警示”写入书目 `shortTitle`；
 - 将 `supports / qualifies / refutes / not_tested` 作为不可随意降维的关系；检索 DOI/URL 与证据段落 locator 永远分离；
 - 所有跨来源结论在主张级综合，主动寻找反证并保留未决冲突；
 - 对长任务使用显式 gap/action 循环；
@@ -274,7 +274,7 @@ python evals/real-world/audit_sparse_dynamics_run.py \
 - 人类阅读/学习研究只作为 agent 工作流的设计类比，不证明模型像人一样学习。
 - 流畅解释不是证据；成功导入父条目也不等于 PDF、笔记和 collection 已正确同步。
 - 结构验证不证明语义正确；自动语义评分也不能替代对原文、推导和适用边界的独立复核。
-- 研究检索标题与 Zotero 书目 `shortTitle` 职责不同；前者写子笔记 `<h1>`，后者默认保持来源元数据不变。
+- 研究检索标题与 Zotero 书目 `shortTitle` 职责不同；前者写子笔记 `<h1>`，后者默认保持来源元数据不变。若研究工作流明确要求决策型短标题，则必须经审阅并启用指定语言的 `decision-oriented` 策略，使用“适用场景：结论/警示”而不是文献标题缩写。
 - 高风险科学、医疗、法律、安全或政策结论仍需要领域专家和适用的正式协议。
 
 ## License

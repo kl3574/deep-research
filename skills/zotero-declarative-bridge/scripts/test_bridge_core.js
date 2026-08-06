@@ -37,6 +37,19 @@ function baseManifest() {
 }
 
 assert.strictEqual(core.stableStringify({b: 2, a: 1}), '{"a":1,"b":2}');
+assert.deepStrictEqual(core.versionEvidence(7, false, 7), {
+  observed_version: 7,
+  precondition_version: 7,
+  current_synced_version: null,
+  sync_status: "locally_modified_pending_sync",
+});
+assert.deepStrictEqual(core.versionEvidence(11, true, 7), {
+  observed_version: 11,
+  precondition_version: 7,
+  current_synced_version: 11,
+  sync_status: "synced",
+});
+assert.throws(() => core.versionEvidence(7, "false", 7), /synced flag/);
 assert.strictEqual(core.validateManifest(baseManifest()), true);
 assert.throws(() => {
   const manifest = baseManifest();
@@ -214,4 +227,4 @@ assert.throws(
   () => core.resolveCollectionID(collectionRequest, groupLibrary, {...exactCollection, deleted: true}),
   error => error.code === "collection_not_found",
 );
-process.stdout.write("bridge_core: 38 checks passed\n");
+process.stdout.write("bridge_core: 41 checks passed\n");

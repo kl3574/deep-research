@@ -1335,6 +1335,68 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
             )
         )
 
+    def test_claim_gap_uses_claim_node_text_instead_of_internal_id(self):
+        network = doe_surrogate_noise_network_fixture(
+            single_source_count=1, isolate_count=0
+        )
+        claim_id = "DOE-000"
+        claim_node = next(
+            node for node in network["nodes"] if node["node_id"] == f"claim:{claim_id}"
+        )
+        claim_node["label"] = (
+            "Adaptive maximin sampling reduces surrogate error only for smooth "
+            "deterministic responses"
+        )
+        claim_gap = next(
+            gap for gap in network["gaps"] if gap.get("claim_id") == claim_id
+        )
+        claim_gap.update(
+            {
+                "gap_type": "explicit",
+                "derivation_rule": "unsupported_high_impact",
+                "description": f"No decisive evidence for high-impact claim {claim_id}",
+            }
+        )
+        attach_network_content_sha256(network)
+
+        hypotheses = generate_hypotheses_from_probe(scan_network(network), network)
+        prioritized = prioritize(hypotheses, network)
+        hypothesis = next(
+            item
+            for item in prioritized["hypotheses"]
+            if item["grounds"][0]["ref_id"] == claim_gap["gap_id"]
+        )
+        self.assertEqual(hypothesis["status"], "selected")
+        self.assertEqual(hypothesis["semantic_label"], claim_node["label"])
+        human_search = json.dumps(
+            {
+                "semantic_label": hypothesis["semantic_label"],
+                "hypothesis": hypothesis["hypothesis"],
+                "target_signature": hypothesis["target_signature"],
+                "search_test": hypothesis["search_test"],
+            }
+        ).lower()
+        self.assertNotIn(claim_id.lower(), human_search)
+        self.assertNotIn("decisive high-impact claim", human_search)
+        self.assertIn("adaptive", human_search)
+        self.assertIn("surrogate", human_search)
+
+        request_set = emit_search_requests(prioritized, network)
+        request = next(
+            item
+            for item in request_set["requests"]
+            if item["gap_hypothesis_id"] == hypothesis["hypothesis_id"]
+        )
+        request_search = json.dumps(
+            {
+                "paper_need": request["paper_need"],
+                "criteria": request["criteria"],
+                "query_seeds": request["query_seeds"],
+            }
+        ).lower()
+        self.assertNotIn(claim_id.lower(), request_search)
+        self.assertIn("adaptive", request_search)
+
     def test_rejects_non_implicit_hypothesis(self):
         document = hypotheses_fixture()
         document["hypotheses"][0]["gap_type"] = "deterministic_structural"
@@ -1455,6 +1517,39 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
         self.assertEqual(first["priority_order"], ["KGH-1", "KGH-2"])
         self.assertIn(
             "decision_impact", first["hypotheses"][0]["priority_components"]
+        )
+
+    def test_prioritize_status_matches_emitted_request_selection(self):
+        network = network_fixture()
+        document = hypotheses_fixture(network)
+        structural = copy.deepcopy(document["hypotheses"][0])
+        structural["hypothesis_id"] = "KGH-STRUCTURAL"
+        structural["structural_only"] = True
+        structural["next_action"] = "structural_only"
+        document["hypotheses"].append(structural)
+
+        prioritized = prioritize(document, network)
+        request_set = emit_search_requests(prioritized, network)
+        selected_ids = {
+            item["hypothesis_id"]
+            for item in prioritized["hypotheses"]
+            if item["status"] == "selected"
+        }
+        emitted_ids = {
+            item["gap_hypothesis_id"] for item in request_set["requests"]
+        }
+        self.assertEqual(selected_ids, emitted_ids)
+        self.assertEqual(
+            prioritized["selection_summary"]["selected_hypothesis_ids"],
+            ["KGH-1"],
+        )
+        self.assertEqual(
+            next(
+                item
+                for item in prioritized["hypotheses"]
+                if item["hypothesis_id"] == "KGH-STRUCTURAL"
+            )["status"],
+            "proposed",
         )
 
     def test_emit_search_requests_is_bounded_to_network_snapshot(self):
@@ -2897,6 +2992,86 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
         self.assertNotEqual(
             request["query_seeds"][0]["query"],
             request["query_seeds"][1]["query"],
+        )
+
+    def test_generated_acceptance_criteria_is_semantic_not_route_boilerplate(self):
+        network = doe_surrogate_noise_network_fixture(
+            single_source_count=0, isolate_count=0
+        )
+        semantic_label = (
+            "expensive simulator adaptive sampling with surrogate uncertainty calibration"
+        )
+        network["gaps"][0]["description"] = semantic_label
+        attach_network_content_sha256(network)
+
+        hypotheses = generate_hypotheses_from_probe(scan_network(network), network)
+        hypothesis = next(
+            row
+            for row in hypotheses["hypotheses"]
+            if row["grounds"][0]["ref_id"] == "gap:morphology_specific_benchmark"
+        )
+        acceptance = hypothesis["search_test"]["acceptance_criteria"].lower()
+        self.assertNotEqual(
+            acceptance, "multiple bounded routes and grounded fallback"
+        )
+        self.assertIn("expensive simulator", acceptance)
+        self.assertIn("primary full-text evidence", acceptance)
+        self.assertGreaterEqual(
+            len(set(hypothesis["search_test"]["route_families"])), 2
+        )
+
+    def test_low_confidence_relation_emits_semantic_paper_need(self):
+        network = network_fixture()
+        network["nodes"][0]["label"] = (
+            "spatial Sobol maps from Gaussian-process surrogates"
+        )
+        network["nodes"][1]["label"] = (
+            "hyperparameter and basis-selection uncertainty"
+        )
+        network["relations"][0].update(
+            {
+                "confidence": "low",
+                "status": "unresolved",
+                "notes": "uncertainty propagation remains unverified",
+            }
+        )
+        network["gaps"] = []
+        network["completion"] = {
+            "status": "partial",
+            "open_gap_ids": [],
+            "gate_checks": {"corpus_snapshotted": True, "conflicts_terminal": True},
+        }
+        attach_network_content_sha256(network)
+
+        hypotheses = prioritize(
+            generate_hypotheses_from_probe(scan_network(network), network), network
+        )
+        hypothesis = next(
+            row
+            for row in hypotheses["hypotheses"]
+            if row["source_signal_kind"] == "low_confidence_relation"
+        )
+        request_set = emit_search_requests(hypotheses, network)
+        request = next(
+            row
+            for row in request_set["requests"]
+            if row["gap_hypothesis_id"] == hypothesis["hypothesis_id"]
+        )
+
+        self.assertEqual(hypothesis["status"], "selected")
+        self.assertNotEqual(
+            request["paper_need"].lower(),
+            "confidence may require independent evidence",
+        )
+        self.assertIn("spatial", request["paper_need"].lower())
+        self.assertIn("uncertainty", request["paper_need"].lower())
+        self.assertEqual(
+            {
+                row["hypothesis_id"]
+                for row in hypotheses["hypotheses"]
+                if row["status"] == "selected"
+            },
+            {row["gap_hypothesis_id"] for row in request_set["requests"]},
         )
 
 if __name__ == "__main__":

@@ -152,6 +152,7 @@ TARGET_KINDS = set(ACTION_FOR_TARGET_KIND)
 PATCH_ACTION_STATUSES = {"proposed", "blocked"}
 STATUSES = {
     "proposed",
+    "selected",
     "testing",
     "awaiting",
     "results",
@@ -165,9 +166,31 @@ STATUSES = {
     "blocked",
     "superseded",
 }
-ACTIVE_STATUSES = {"proposed", "testing", "awaiting", "results", "unresolved", "no_signal"}
-DISCOVERY_ACTIVE_STATUSES = {"proposed", "testing", "unresolved", "no_signal", "awaiting"}
-SATURATION_BLOCKING_STATUSES = {"proposed", "testing", "unresolved", "awaiting", "results"}
+ACTIVE_STATUSES = {
+    "proposed",
+    "selected",
+    "testing",
+    "awaiting",
+    "results",
+    "unresolved",
+    "no_signal",
+}
+DISCOVERY_ACTIVE_STATUSES = {
+    "proposed",
+    "selected",
+    "testing",
+    "unresolved",
+    "no_signal",
+    "awaiting",
+}
+SATURATION_BLOCKING_STATUSES = {
+    "proposed",
+    "selected",
+    "testing",
+    "unresolved",
+    "awaiting",
+    "results",
+}
 SATURATION_TERMINAL_STATUSES = {
     "no_signal",
     "content_found",
@@ -286,7 +309,10 @@ GAP_REASON_TERM_BLOCKLIST = {
     "benchmark",
     "complete",
     "coverage",
+    "claim",
+    "decisive",
     "gap",
+    "high-impact",
     "identify",
     "for",
     "in",
@@ -966,6 +992,26 @@ def _collect_node_labels(node: dict[str, Any] | None) -> list[str]:
     return values
 
 
+def _claim_node_for_gap(
+    gap: dict[str, Any] | None,
+    node_lookup: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    if not isinstance(gap, dict):
+        return None
+    claim_id = gap.get("claim_id")
+    if not isinstance(claim_id, str) or not claim_id.strip():
+        return None
+    claim_id = claim_id.strip()
+    candidates = [claim_id]
+    if not claim_id.startswith("claim:"):
+        candidates.insert(0, f"claim:{claim_id}")
+    for candidate in candidates:
+        node = node_lookup.get(candidate)
+        if isinstance(node, dict) and node.get("kind") == "claim":
+            return node
+    return None
+
+
 def _collect_semantic_terms(values: list[Any]) -> list[str]:
     terms: list[str] = []
     for value in values:
@@ -1077,28 +1123,31 @@ def _build_semantic_search_spec(
     terms: list[str] = []
     structural_only = False
     gap_context_terms = _collect_research_context_terms(network)
-    terms.extend(gap_context_terms)
 
     explicit_gap = kind == "explicit_open_gap"
 
     if explicit_gap:
         gap = gap_lookup.get(ref)
+        claim_node = _claim_node_for_gap(gap, node_lookup)
         if ref.startswith("derived:missing-dimension:") or (
-            gap is not None and gap.get("gap_type") == "deterministic_structural"
+            gap is not None
+            and gap.get("gap_type") == "deterministic_structural"
         ):
             return [], True
         if gap is not None:
-            terms.extend(
-                _collect_semantic_terms(
-                    [
-                        gap.get("title"),
-                        gap.get("name"),
-                        gap.get("reason"),
-                        gap.get("description"),
-                        gap.get("next_action"),
-                    ]
+            terms.extend(_collect_node_terms(claim_node))
+            if claim_node is None:
+                terms.extend(
+                    _collect_semantic_terms(
+                        [
+                            gap.get("title"),
+                            gap.get("name"),
+                            gap.get("reason"),
+                            gap.get("description"),
+                            gap.get("next_action"),
+                        ]
+                    )
                 )
-            )
 
     elif kind == "unmet_declared_gate":
         structural_only = True
@@ -1123,6 +1172,7 @@ def _build_semantic_search_spec(
         if signal.get("reason") and isinstance(signal["reason"], str):
             terms.extend(_collect_semantic_terms([signal["reason"]]))
 
+    terms.extend(gap_context_terms)
     terms = _normalize_search_terms(terms)
 
     if _need_semantic_enrichment(terms):
@@ -1187,6 +1237,54 @@ def _build_semantic_search_query(
     if objective == "refute":
         return " ".join(query_tokens[:SEMANTIC_QUERY_MAX_WORDS])
     return " ".join(query_tokens[:SEMANTIC_QUERY_MAX_WORDS])
+
+
+GENERIC_DISCOVERY_TEXT = {
+    "confidence may require independent evidence",
+    "multiple bounded routes and grounded fallback",
+    "semantic enrichment required",
+}
+
+
+def _is_generic_discovery_text(value: Any) -> bool:
+    if not isinstance(value, str):
+        return True
+    normalized = re.sub(r"\s+", " ", value.strip().casefold())
+    return not normalized or normalized in GENERIC_DISCOVERY_TEXT
+
+
+def _semantic_paper_need(
+    label: Any,
+    search_terms: list[str],
+    *,
+    independent_evidence: bool = False,
+) -> str:
+    if (
+        isinstance(label, str)
+        and not _is_generic_discovery_text(label)
+        and not _query_has_internal_marker(label)
+        and _query_has_semantic_content(label)
+    ):
+        return label.strip()
+
+    semantic_query = _build_semantic_search_query(search_terms, "confirm", fallback="")
+    if semantic_query.strip():
+        prefix = (
+            "Find independent primary evidence that directly tests"
+            if independent_evidence
+            else "Find primary evidence that directly tests"
+        )
+        return f"{prefix}: {semantic_query}."
+    return "Resolve missing semantic source and target labels before scholarly search."
+
+
+def _semantic_acceptance_criteria(label: Any, search_terms: list[str]) -> str:
+    paper_need = _semantic_paper_need(label, search_terms)
+    return (
+        "Primary full-text evidence must directly evaluate the bounded need "
+        f'"{paper_need}" and report the tested method or comparison, assumptions, '
+        "result or limitation, and an exact source locator."
+    )
 
 
 def network_ref(network: dict[str, Any]) -> dict[str, str]:
@@ -1327,18 +1425,39 @@ def _candidate_signal_context(
         claim_id = gap.get("claim_id")
         if isinstance(claim_id, str) and claim_id:
             subject = claim_id if claim_id.startswith("claim:") else f"claim:{claim_id}"
+            node_lookup = {
+                str(node.get("node_id")): node
+                for node in network["nodes"]
+                if node.get("node_id")
+            }
+            claim_node = _claim_node_for_gap(gap, node_lookup)
+            claim_label = (
+                str(claim_node.get("label") or "").strip()
+                if claim_node is not None
+                else ""
+            )
+            label = (
+                claim_label
+                if claim_label and not _query_has_internal_marker(claim_label)
+                else "Claim evidence requires semantic enrichment"
+            )
         else:
             label = str(gap.get("description") or gap.get("reason") or ref)
             normalized = re.sub(r"\W+", " ", label.casefold()).strip()
             subject = f"gap-semantic:{normalized or ref}"
-        label = str(gap.get("description") or gap.get("reason") or ref)
         return tier, priority, subject, label
     if kind == "unmet_declared_gate":
         return "unmet_gate", "decision_high", ref, str(signal.get("reason") or ref)
     if kind == "topological_isolate":
         return "isolate", "low", ref, str(signal.get("reason") or ref)
     if kind == "low_confidence_relation":
-        return "low_confidence", "low", ref, str(signal.get("reason") or ref)
+        search_terms, _ = _build_semantic_search_spec(signal, network)
+        label = _semantic_paper_need(
+            signal.get("reason"),
+            search_terms,
+            independent_evidence=True,
+        )
+        return "low_confidence", "low", ref, label
     return "structural", "low", ref, str(signal.get("reason") or ref)
 
 
@@ -1679,7 +1798,9 @@ def generate_hypotheses_from_probe(
                     "a primary source with bounded comparison to the same network objects"
                 ),
                 "expected_disconfirming_observation": "a scope/alias explanation for absence",
-                "acceptance_criteria": "multiple bounded routes and grounded fallback",
+                "acceptance_criteria": _semantic_acceptance_criteria(
+                    semantic_label, criteria_terms
+                ),
                 "criteria": {
                     "must": criteria_terms,
                     "should": [],
@@ -1952,6 +2073,14 @@ def priority_components(hypothesis: dict[str, Any]) -> dict[str, int]:
     }
 
 
+def _is_search_request_candidate(hypothesis: dict[str, Any]) -> bool:
+    return (
+        hypothesis["status"] in ACTIVE_STATUSES
+        and not hypothesis.get("structural_only")
+        and not hypothesis.get("needs_semantic_enrichment")
+    )
+
+
 def prioritize(value: Any, network: dict[str, Any] | None = None) -> dict[str, Any]:
     document = validate_hypotheses(value, network)
     output = json.loads(json.dumps(document))
@@ -1970,6 +2099,23 @@ def prioritize(value: Any, network: dict[str, Any] | None = None) -> dict[str, A
         )
     )
     output["priority_order"] = [item["hypothesis_id"] for item in output["hypotheses"]]
+    selected_ids: list[str] = []
+    for hypothesis in output["hypotheses"]:
+        if hypothesis["status"] == "proposed" and _is_search_request_candidate(
+            hypothesis
+        ):
+            hypothesis["status"] = "selected"
+        if hypothesis["status"] == "selected":
+            selected_ids.append(hypothesis["hypothesis_id"])
+    output["selection_summary"] = {
+        "selected_count": len(selected_ids),
+        "selected_hypothesis_ids": selected_ids,
+        "unselected_proposed_hypothesis_ids": [
+            hypothesis["hypothesis_id"]
+            for hypothesis in output["hypotheses"]
+            if hypothesis["status"] == "proposed"
+        ],
+    }
     return output
 
 
@@ -2088,11 +2234,18 @@ def emit_search_requests(
             if "google_scholar" in route_families
             else "disabled"
         )
+        paper_need = _semantic_paper_need(
+            hypothesis.get("semantic_label", hypothesis["hypothesis"]),
+            optional_list(criteria.get("must")),
+            independent_evidence=(
+                hypothesis.get("source_signal_kind") == "low_confidence_relation"
+            ),
+        )
 
         request = {
             "schema": REQUEST_SCHEMA,
             "request_id": request_id,
-            "paper_need": hypothesis.get("semantic_label", hypothesis["hypothesis"]),
+            "paper_need": paper_need,
             "intent": "topic_set",
             "effort": "diligent" if hypothesis["decision_impact"] == "high" else "fast",
             "criteria": {
