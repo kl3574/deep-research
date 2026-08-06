@@ -1,4 +1,4 @@
-/* global Zotero, Services, IOUtils, PathUtils, crypto, TextEncoder, Ci */
+/* global Zotero, Services, IOUtils, PathUtils, crypto, TextEncoder, DOMParser, Ci */
 
 var ZoteroDeclarativeBridge = (() => {
   "use strict";
@@ -54,6 +54,16 @@ var ZoteroDeclarativeBridge = (() => {
 
   async function sha256Value(value) {
     return sha256Text(ZoteroDeclarativeBridgeCore.stableStringify(value));
+  }
+
+  async function noteStorageFingerprint(noteHTML) {
+    try {
+      const fingerprint = ZoteroDeclarativeBridgeCore.noteStorageHTMLFingerprint(noteHTML, DOMParser);
+      return sha256Text(fingerprint);
+    }
+    catch (_error) {
+      return null;
+    }
   }
 
   async function hmacHex(secretHex, value) {
@@ -262,11 +272,13 @@ var ZoteroDeclarativeBridge = (() => {
     const noteStates = [];
     for (const note of notes.filter(Boolean)) {
       if (note.parentItemID !== parent.id) throw new ProtocolError("child note parent drift", 409, "child_drift");
+      const noteHTML = note.getNote();
       noteStates.push({
         key: String(note.key),
         version: Number(note.version),
         synced: note.synced === true,
-        sha256: await sha256Text(note.getNote()),
+        sha256: await sha256Text(noteHTML),
+        storage_fingerprint_sha256: await noteStorageFingerprint(noteHTML),
       });
     }
     noteStates.sort((left, right) => left.key.localeCompare(right.key));
@@ -310,7 +322,16 @@ var ZoteroDeclarativeBridge = (() => {
       }
       else if (operation.type === "ensure_child_note") {
         if (await sha256Text(operation.new_html) !== operation.new_sha256) throw new ProtocolError("new note hash mismatch", 409, "source_drift");
-        decisions.push({...ZoteroDeclarativeBridgeCore.classifyNote(operation, live.noteStates), type: operation.type});
+        const runtimeOperation = {
+          ...operation,
+          new_storage_fingerprint_sha256: await noteStorageFingerprint(operation.new_html),
+        };
+        try {
+          decisions.push({...ZoteroDeclarativeBridgeCore.classifyNote(runtimeOperation, live.noteStates), type: operation.type});
+        }
+        catch (error) {
+          throw new ProtocolError(error.message, 409, "child_drift");
+        }
       }
       else {
         const source = await fileEvidence(operation.source_path);
@@ -568,6 +589,7 @@ var ZoteroDeclarativeBridge = (() => {
     }
     let writeAttempted = false;
     let createdAttachmentKeys = [];
+    let dbCommitConfirmed = false;
     const executionProfile = before.publicState.execution_profile;
     try {
       const repeatAndApply = async () => {
@@ -577,7 +599,10 @@ var ZoteroDeclarativeBridge = (() => {
         createdAttachmentKeys = await applyRows(repeated);
       };
       if (executionProfile === "single_attachment_import") await repeatAndApply();
-      else await Zotero.DB.executeTransaction(repeatAndApply);
+      else {
+        await Zotero.DB.executeTransaction(repeatAndApply);
+        dbCommitConfirmed = true;
+      }
       const after = await preflight(manifest);
       if (!after.allSatisfied) throw new ProtocolError("committed readback mismatch", 500, "readback_mismatch");
       return {
@@ -596,26 +621,18 @@ var ZoteroDeclarativeBridge = (() => {
       let commitState = "unknown";
       try {
         inspection = await preflight(manifest);
-        const satisfied = inspection.rows.filter(row => row.allSatisfied).length;
-        if (!writeAttempted) {
-          commitState = "not_started";
-        }
-        else if (executionProfile === "single_attachment_import") {
-          commitState = inspection.allSatisfied
-            ? "committed"
-            : createdAttachmentKeys.length
-              ? "committed_unverified"
-              : "unknown";
-        }
-        else {
-          commitState = inspection.stateSHA256 === before.stateSHA256
-            ? "rolled_back"
-            : satisfied === inspection.rows.length
-              ? "committed"
-              : "partial_commit";
-        }
       }
       catch (_inspectionError) {}
+      commitState = ZoteroDeclarativeBridgeCore.commitStateAfterFailure({
+        write_attempted: writeAttempted,
+        execution_profile: executionProfile,
+        db_commit_confirmed: dbCommitConfirmed,
+        inspection_available: inspection !== null,
+        before_state_sha256: before.stateSHA256,
+        inspection_state_sha256: inspection ? inspection.stateSHA256 : null,
+        inspection_all_satisfied: inspection ? inspection.allSatisfied : false,
+        created_attachment_count: createdAttachmentKeys.length,
+      });
       const wrapped = new ProtocolError(
         `transaction failed; commit_state=${commitState}`,
         error instanceof ProtocolError ? error.status : 500,

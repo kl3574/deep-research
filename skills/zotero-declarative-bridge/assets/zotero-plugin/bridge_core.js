@@ -10,6 +10,11 @@ var ZoteroDeclarativeBridgeCore = (() => {
     ["ensure_child_note", 2],
     ["ensure_pdf_attachment", 3],
   ]);
+  const STORAGE_BLOCK_TAGS = new Set([
+    "blockquote", "div", "h1", "h2", "h3", "h4", "h5", "h6", "li",
+    "ol", "p", "pre", "table", "tbody", "td", "th", "thead", "tr", "ul",
+  ]);
+  const STORAGE_ROOT_ATTRIBUTES = new Set(["data-citation-items", "data-schema-version"]);
 
   function assertion(condition, message) {
     if (!condition) throw new Error(message);
@@ -19,6 +24,136 @@ var ZoteroDeclarativeBridgeCore = (() => {
     if (value === null || typeof value !== "object") return JSON.stringify(value);
     if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
     return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(",")}}`;
+  }
+
+  function domAttributes(node) {
+    const attributes = Array.from(node.attributes || []).map(attribute => {
+      assertion(attribute && typeof attribute.name === "string", "note DOM attribute is invalid");
+      return [attribute.name.toLowerCase(), String(attribute.value)];
+    });
+    attributes.sort((left, right) => left[0].localeCompare(right[0]) || left[1].localeCompare(right[1]));
+    for (let index = 1; index < attributes.length; index++) {
+      assertion(attributes[index - 1][0] !== attributes[index][0], "note DOM has duplicate attributes");
+    }
+    return attributes;
+  }
+
+  function elementTag(node) {
+    assertion(node && node.nodeType === 1 && typeof node.tagName === "string", "note DOM element is invalid");
+    return node.tagName.toLowerCase();
+  }
+
+  function hasFormattingLineBreak(value) {
+    return /[\r\n]/.test(value);
+  }
+
+  function blockElement(node) {
+    return node && node.nodeType === 1 && STORAGE_BLOCK_TAGS.has(elementTag(node));
+  }
+
+  function normalizedStorageText(value, parentTag, siblings, index, insideMath) {
+    if (insideMath || !hasFormattingLineBreak(value) || !STORAGE_BLOCK_TAGS.has(parentTag)) return value;
+    if (/^[\t\r\n ]+$/.test(value)) {
+      const previous = index > 0 ? siblings[index - 1] : null;
+      const next = index + 1 < siblings.length ? siblings[index + 1] : null;
+      if (index === 0 || index === siblings.length - 1 || blockElement(previous) || blockElement(next)) return null;
+      return value;
+    }
+    let normalized = value;
+    if (index === 0) normalized = normalized.replace(/^(?:[\t ]*\r?\n)+[\t\r\n ]*/, "");
+    if (index === siblings.length - 1) normalized = normalized.replace(/[\t ]*(?:\r?\n[\t ]*)+$/, "");
+    return normalized;
+  }
+
+  function noteStorageDOMFingerprint(root) {
+    const rootTag = elementTag(root);
+    const rootAttributes = domAttributes(root);
+    assertion(rootTag === "div", "note DOM root must be div");
+    assertion(
+      rootAttributes.some(([name, value]) => name === "data-schema-version" && value === "9"),
+      "note DOM root must use data-schema-version=9",
+    );
+    assertion(
+      rootAttributes.every(([name]) => STORAGE_ROOT_ATTRIBUTES.has(name)),
+      "note DOM root has unsupported attributes",
+    );
+    const tokens = [];
+    const visit = (node, insideMath = false) => {
+      if (node.nodeType === 3) {
+        assertion(typeof node.nodeValue === "string", "note DOM text is invalid");
+        tokens.push(["text", node.nodeValue]);
+        return;
+      }
+      const tag = elementTag(node);
+      const attributes = domAttributes(node);
+      const classValue = (attributes.find(([name]) => name === "class") || [null, ""])[1];
+      const hasMathClass = classValue.split(/\s+/).filter(Boolean).includes("math");
+      if (hasMathClass) {
+        assertion(tag === "pre" || tag === "span", "math class is allowed only on pre or span");
+        assertion(
+          attributes.length === 1 && attributes[0][0] === "class" && attributes[0][1] === "math",
+          "math node attributes are invalid",
+        );
+      }
+      assertion(!insideMath || node.nodeType === 3, "math nodes must contain text only");
+      tokens.push(["start", tag, attributes]);
+      const children = Array.from(node.childNodes || []);
+      for (let index = 0; index < children.length; index++) {
+        const child = children[index];
+        if (child.nodeType === 3) {
+          assertion(typeof child.nodeValue === "string", "note DOM text is invalid");
+          const value = normalizedStorageText(child.nodeValue, tag, children, index, hasMathClass || insideMath);
+          if (value !== null) tokens.push(["text", value]);
+        }
+        else {
+          assertion(child.nodeType === 1, "note DOM contains an unsupported node");
+          assertion(!hasMathClass && !insideMath, "math nodes must contain text only");
+          visit(child, false);
+        }
+      }
+      tokens.push(["end", tag]);
+    };
+    visit(root);
+    return stableStringify(tokens);
+  }
+
+  function noteStorageHTMLFingerprint(noteHTML, DOMParserConstructor) {
+    assertion(typeof noteHTML === "string", "note HTML is invalid");
+    assertion(typeof DOMParserConstructor === "function", "DOMParser is unavailable");
+    const document = new DOMParserConstructor().parseFromString(noteHTML, "text/html");
+    assertion(document && document.body, "note DOM document is invalid");
+    const parserErrors = document.getElementsByTagName("parsererror");
+    assertion(
+      parserErrors && typeof parserErrors.length === "number" && parserErrors.length === 0,
+      "note DOM parse failed",
+    );
+    const bodyNodes = Array.from(document.body.childNodes || []);
+    const roots = bodyNodes.filter(node => node && node.nodeType === 1);
+    assertion(roots.length === 1, "note DOM must have exactly one root element");
+    assertion(
+      bodyNodes.every(node => node === roots[0] || (
+        node && node.nodeType === 3 && typeof node.nodeValue === "string" && !node.nodeValue.trim()
+      )),
+      "note DOM contains content outside its root",
+    );
+    return noteStorageDOMFingerprint(roots[0]);
+  }
+
+  function commitStateAfterFailure(context) {
+    assertion(context && typeof context === "object", "commit-state context is invalid");
+    if (context.write_attempted !== true) return "not_started";
+    if (context.execution_profile === "db_atomic") {
+      if (context.db_commit_confirmed === true) return "committed_unverified";
+      if (context.inspection_available !== true) return "unknown";
+      if (context.inspection_state_sha256 === context.before_state_sha256) return "rolled_back";
+      if (context.inspection_all_satisfied === true) return "committed";
+      return "partial_commit";
+    }
+    if (context.execution_profile === "single_attachment_import") {
+      if (context.inspection_available === true && context.inspection_all_satisfied === true) return "committed";
+      if (context.created_attachment_count > 0) return "committed_unverified";
+    }
+    return "unknown";
   }
 
   function exactKeys(value, expected, label) {
@@ -313,21 +448,31 @@ var ZoteroDeclarativeBridgeCore = (() => {
 
   function classifyNote(operation, notes) {
     const keys = liveKeys(notes);
+    const contentMatch = note => {
+      if (note.sha256 === operation.new_sha256) return "exact";
+      if (
+        typeof operation.new_storage_fingerprint_sha256 === "string"
+        && typeof note.storage_fingerprint_sha256 === "string"
+        && note.storage_fingerprint_sha256 === operation.new_storage_fingerprint_sha256
+      ) return "zotero_storage_equivalent";
+      return null;
+    };
     if (operation.note_key === null) {
-      const matches = notes.filter(note => note.sha256 === operation.new_sha256);
+      const matches = notes.map(note => ({note, content_match: contentMatch(note)})).filter(item => item.content_match);
       assertion(matches.length <= 1, "multiple child notes already match the requested content");
       if (matches.length === 1) {
         assertion(notes.length === 1, "matching child note exists beside unapproved notes");
-        return {decision: "satisfied", note_key: matches[0].key};
+        return {decision: "satisfied", note_key: matches[0].note.key, content_match: matches[0].content_match};
       }
       assertion(stableStringify(keys) === stableStringify(operation.expected_child_note_keys), "child note inventory drift");
       return {decision: "needs_write", note_key: null};
     }
     const note = notes.find(item => item.key === operation.note_key);
     assertion(note, "approved child note disappeared");
-    if (note.sha256 === operation.new_sha256) {
+    const match = contentMatch(note);
+    if (match) {
       assertion(notes.length === 1, "updated child note exists beside unapproved notes");
-      return {decision: "satisfied", note_key: note.key};
+      return {decision: "satisfied", note_key: note.key, content_match: match};
     }
     assertion(stableStringify(keys) === stableStringify(operation.expected_child_note_keys), "child note inventory drift");
     assertion(note.version === operation.expected_note_version, "child note version drift");
@@ -365,10 +510,13 @@ var ZoteroDeclarativeBridgeCore = (() => {
   return {
     assertion,
     classifyAttachment,
+    commitStateAfterFailure,
     classifyMembership,
     classifyNote,
     classifyShortTitle,
     normalizeDOI,
+    noteStorageDOMFingerprint,
+    noteStorageHTMLFingerprint,
     parentIdentity,
     planWrites,
     readbackMembershipSatisfied,

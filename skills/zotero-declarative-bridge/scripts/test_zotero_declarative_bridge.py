@@ -147,7 +147,7 @@ class BridgeTests(unittest.TestCase):
     def test_manifest_and_bootstrap_expose_zotero_9_diagnostics(self) -> None:
         manifest = json.loads((PLUGIN_ROOT / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["manifest_version"], 2)
-        self.assertEqual(manifest["version"], "0.1.7")
+        self.assertEqual(manifest["version"], "0.1.8")
         self.assertEqual(
             manifest["applications"]["zotero"]["update_url"],
             (
@@ -166,6 +166,10 @@ class BridgeTests(unittest.TestCase):
         self.assertIn('"locally_modified_pending_sync"', (PLUGIN_ROOT / "bridge_core.js").read_text(encoding="utf-8"))
         self.assertIn('action === "resolve_collection"', bootstrap)
         self.assertIn("getByLibraryAndKeyAsync(", bootstrap)
+        self.assertIn("dbCommitConfirmed = true", bootstrap)
+        self.assertIn("commitStateAfterFailure", bootstrap)
+        self.assertIn('new ProtocolError(error.message, 409, "child_drift")', bootstrap)
+        self.assertIn("noteStorageHTMLFingerprint", bootstrap)
 
     def test_xpi_build_rejects_missing_zotero_update_url(self) -> None:
         builder = load_builder()
@@ -278,6 +282,14 @@ class BridgeTests(unittest.TestCase):
             (plugin_root / "updates.json").write_text("{not-json", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "invalid external update manifest"):
                 builder.build(Path(directory) / "malformed-updates.xpi", plugin_root)
+
+    def test_bootstrap_uses_plugin_sandbox_dom_parser(self) -> None:
+        bootstrap = (PLUGIN_ROOT / "bootstrap.js").read_text(encoding="utf-8")
+        self.assertIn(
+            "noteStorageHTMLFingerprint(noteHTML, DOMParser)",
+            bootstrap,
+        )
+        self.assertNotIn("hiddenDOMWindow.DOMParser", bootstrap)
 
     def test_stable_skill_excludes_security_sensitive_development_proxy(self) -> None:
         self.assertFalse((HERE / "install_development_proxy.py").exists())
@@ -710,7 +722,7 @@ class BridgeTests(unittest.TestCase):
             timeout=15,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("41 checks passed", result.stdout)
+        self.assertIn("storage-equivalence and transaction checks passed", result.stdout)
 
     def test_membership_compiler_binds_live_parent_and_keyed_path(self) -> None:
         args = types.SimpleNamespace(

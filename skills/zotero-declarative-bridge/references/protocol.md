@@ -123,9 +123,18 @@ a title abbreviation. This is a semantic-shape safeguard, not validation that
 the stated research conclusion is scientifically correct.
 
 Idempotence is state-based. A rerun is `no_changes` only when every requested
-state already matches exactly. If only part of a prior transaction is present,
-the old version/baseline normally conflicts and a fresh reviewed manifest is
-required.
+state already matches. Parent fields, membership, attachments, and note raw
+content remain exact. A child note may additionally match by the strict Zotero
+storage-equivalence fingerprint: it parses both HTML values as one schema-9
+note DOM and ignores only serializer-added line-break indentation between block
+nodes or at block boundaries. Element type/order, the complete attribute set,
+visible characters, punctuation, meaningful internal spaces, math-node
+type/order, and decoded LaTeX payload remain exact. Parse failure disables this
+equivalence and falls back to the raw hash contract. Satisfied note decisions
+report `content_match` as `exact` or `zotero_storage_equivalent`; child-note
+state continues to expose the observed raw `sha256`. If only part of a prior
+transaction is present, the old version/baseline normally conflicts and a
+fresh reviewed manifest is required.
 
 Receipt version evidence separates the reviewed precondition from Zotero's
 currently observed sync-object version. Parent rows expose
@@ -153,7 +162,12 @@ PDF import calls Zotero's public `importFromFile()` without a bridge-owned outer
 transaction because that API owns its own database and storage transaction.
 An attachment failure is `unknown` until readback proves the result; only a
 failed `db_atomic` write whose state digest equals its preflight baseline may be
-reported as `rolled_back`.
+reported as `rolled_back`. Once Zotero's `executeTransaction()` promise returns,
+the database commit is known to have completed. Any later verification or
+response-construction failure is therefore `committed_unverified`, never
+`unknown`, even if a concurrently active note editor immediately serializes a
+note again. A true child-content/version conflict is returned as structured
+`child_drift`, not a generic `internal_error`.
 
 ## Commands
 
@@ -261,8 +275,13 @@ create semantics and mode `0600`. The command exits nonzero and stderr contains
 only `error_code`, `commit_state`, and the receipt path; private inspection
 state, item keys, source paths, and hashes remain inside the receipt. Treat
 `unknown` and `committed_unverified` as requiring a fresh authenticated
-readback. `rolled_back` is evidence that the post-failure database state digest
-matched the bound preflight baseline, not evidence that no write was attempted.
+readback. Never retry apply after `committed_unverified`: first quiesce active
+note editors and synchronization, then read back the sealed manifest. A
+`zotero_storage_equivalent` readback is acceptable only under the strict DOM
+contract above; material prose, structure, attribute, list, or formula changes
+remain drift. `rolled_back` is evidence that the post-failure database state
+digest matched the bound preflight baseline, not evidence that no write was
+attempted.
 
 All manifests and receipts contain private Zotero state. Keep them outside the
 public repository in a user-only directory.

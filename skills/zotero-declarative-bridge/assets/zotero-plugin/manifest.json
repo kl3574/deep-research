@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Zotero Declarative Bridge",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Constrained exact collection resolution and capability-bound local transactions for reviewed Zotero manifests.",
   "author": "deep-research",
   "applications": {

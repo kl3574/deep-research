@@ -36,6 +36,70 @@ function baseManifest() {
   };
 }
 
+function textNode(value) {
+  return {nodeType: 3, nodeValue: value};
+}
+
+function elementNode(tag, attributes = {}, children = []) {
+  return {
+    nodeType: 1,
+    tagName: tag.toUpperCase(),
+    attributes: Object.entries(attributes).map(([name, value]) => ({name, value})),
+    childNodes: children,
+  };
+}
+
+function storageNoteFixture(options = {}) {
+  const displayFormula = options.displayFormula || "$$S=\\sum_{i=1}^{n}x_i$$";
+  const inlineFormula = options.inlineFormula || "$\\exp(2)$";
+  const firstText = options.firstText || "证据甲。";
+  const secondText = options.secondText || "证据乙。";
+  const paragraphPrefix = options.paragraphPrefix === undefined ? "结论为 " : options.paragraphPrefix;
+  const paragraphSuffix = options.paragraphSuffix || "，并保留边界。";
+  const inline = elementNode(options.inlineTag || "span", {class: options.mathClass || "math"}, [textNode(inlineFormula)]);
+  const paragraph = elementNode(options.paragraphTag || "p", options.paragraphAttributes || {}, [
+    textNode(paragraphPrefix), inline, textNode(paragraphSuffix),
+  ]);
+  const listItems = [
+    elementNode("li", {}, [textNode(options.formatted ? `\n${firstText}\n` : firstText)]),
+    elementNode("li", {}, [textNode(options.formatted ? `\n${secondText}\n` : secondText)]),
+  ];
+  if (options.reverseList) listItems.reverse();
+  if (options.removeSecond) listItems.pop();
+  const listChildren = options.formatted
+    ? [textNode("\n"), ...listItems.flatMap(item => [item, textNode("\n")])]
+    : listItems;
+  const blocks = [
+    elementNode("h1", {}, [textNode("受限采样时：结论保持可审计")]),
+    elementNode(options.displayTag || "pre", {class: "math"}, [textNode(displayFormula)]),
+    paragraph,
+    elementNode("ul", {}, listChildren),
+  ];
+  const rootChildren = options.formatted
+    ? blocks.flatMap((block, index) => index === blocks.length - 1 ? [block] : [block, textNode("\n")])
+    : [textNode("\n"), blocks[0], textNode("\n"), blocks[1], blocks[2], blocks[3], textNode("\n")];
+  return elementNode("div", options.rootAttributes || {"data-schema-version": "9"}, rootChildren);
+}
+
+function runtimeDocument(root, parserError = false) {
+  return {
+    body: {childNodes: [textNode("\n"), root, textNode("\n")]},
+    getElementsByTagName(tag) {
+      return tag === "parsererror" && parserError ? [{}] : [];
+    },
+  };
+}
+
+const runtimeParserInputs = [];
+class RuntimeDOMParser {
+  parseFromString(value, type) {
+    runtimeParserInputs.push({value, type});
+    if (value === "reviewed") return runtimeDocument(storageNoteFixture());
+    if (value === "stored") return runtimeDocument(storageNoteFixture({formatted: true}));
+    return runtimeDocument(storageNoteFixture(), true);
+  }
+}
+
 assert.strictEqual(core.stableStringify({b: 2, a: 1}), '{"a":1,"b":2}');
 assert.deepStrictEqual(core.versionEvidence(7, false, 7), {
   observed_version: 7,
@@ -95,6 +159,141 @@ assert.strictEqual(
   core.classifyNote(noteOperation, [{key: "NOTE0001", version: 2, sha256: noteOperation.new_sha256}]).decision,
   "satisfied",
 );
+assert.strictEqual(
+  core.classifyNote(noteOperation, [{key: "NOTE0001", version: 2, sha256: noteOperation.new_sha256}]).content_match,
+  "exact",
+);
+const reviewedFingerprint = core.noteStorageDOMFingerprint(storageNoteFixture());
+const zoteroFormattedFingerprint = core.noteStorageDOMFingerprint(storageNoteFixture({formatted: true}));
+assert.strictEqual(reviewedFingerprint, zoteroFormattedFingerprint);
+const reviewedRuntimeFingerprint = core.noteStorageHTMLFingerprint("reviewed", RuntimeDOMParser);
+const storedRuntimeFingerprint = core.noteStorageHTMLFingerprint("stored", RuntimeDOMParser);
+assert.strictEqual(reviewedRuntimeFingerprint, storedRuntimeFingerprint);
+assert.deepStrictEqual(runtimeParserInputs, [
+  {value: "reviewed", type: "text/html"},
+  {value: "stored", type: "text/html"},
+]);
+assert.throws(() => core.noteStorageHTMLFingerprint("reviewed", undefined), /DOMParser is unavailable/);
+assert.throws(() => core.noteStorageHTMLFingerprint("invalid", RuntimeDOMParser), /note DOM parse failed/);
+const semanticNoteOperation = {
+  note_key: "NOTE0001",
+  expected_child_note_keys: ["NOTE0001"],
+  expected_note_version: 2,
+  expected_old_sha256: "sha256:" + "1".repeat(64),
+  new_sha256: "sha256:" + "2".repeat(64),
+  new_storage_fingerprint_sha256: "sha256:" + "3".repeat(64),
+};
+assert.deepStrictEqual(
+  core.classifyNote(semanticNoteOperation, [{
+    key: "NOTE0001",
+    version: 99,
+    sha256: semanticNoteOperation.new_sha256,
+    storage_fingerprint_sha256: "sha256:" + "5".repeat(64),
+  }]),
+  {decision: "satisfied", note_key: "NOTE0001", content_match: "exact"},
+);
+assert.deepStrictEqual(
+  core.classifyNote(semanticNoteOperation, [{
+    key: "NOTE0001",
+    version: 99,
+    sha256: "sha256:" + "4".repeat(64),
+    storage_fingerprint_sha256: semanticNoteOperation.new_storage_fingerprint_sha256,
+  }]),
+  {decision: "satisfied", note_key: "NOTE0001", content_match: "zotero_storage_equivalent"},
+);
+const replayDecisions = Array.from({length: 62}, (_value, index) => {
+  const key = `N${String(index).padStart(7, "0")}`;
+  const operation = {
+    ...semanticNoteOperation,
+    note_key: key,
+    expected_child_note_keys: [key],
+    expected_note_version: index + 1,
+  };
+  return core.classifyNote(operation, [{
+    key,
+    version: 1000 + index,
+    sha256: index === 12 ? "sha256:" + "4".repeat(64) : operation.new_sha256,
+    storage_fingerprint_sha256: index === 12
+      ? operation.new_storage_fingerprint_sha256
+      : "sha256:" + "5".repeat(64),
+  }]);
+});
+assert.strictEqual(replayDecisions.every(decision => decision.decision === "satisfied"), true);
+assert.strictEqual(replayDecisions.filter(decision => decision.content_match === "exact").length, 61);
+assert.strictEqual(replayDecisions.filter(decision => decision.content_match === "zotero_storage_equivalent").length, 1);
+for (const changed of [
+  storageNoteFixture({firstText: "证据丙。"}),
+  storageNoteFixture({firstText: "证据甲！"}),
+  storageNoteFixture({paragraphAttributes: {title: "changed"}}),
+  storageNoteFixture({removeSecond: true}),
+  storageNoteFixture({reverseList: true}),
+  storageNoteFixture({paragraphPrefix: "结论为"}),
+  storageNoteFixture({paragraphTag: "div"}),
+  storageNoteFixture({inlineTag: "pre"}),
+  storageNoteFixture({inlineFormula: "$\\exp(3)$"}),
+  storageNoteFixture({displayFormula: "$$S=\\sum_{i=1}^{n}y_i$$"}),
+]) {
+  assert.notStrictEqual(core.noteStorageDOMFingerprint(changed), reviewedFingerprint);
+}
+assert.throws(
+  () => core.noteStorageDOMFingerprint(storageNoteFixture({mathClass: "math changed"})),
+  /math node attributes/,
+);
+assert.throws(
+  () => core.noteStorageDOMFingerprint(storageNoteFixture({rootAttributes: {"data-schema-version": "9", private: "x"}})),
+  /unsupported attributes/,
+);
+const unsupportedDOM = storageNoteFixture();
+unsupportedDOM.childNodes.push({nodeType: 8, nodeValue: "comment"});
+assert.throws(() => core.noteStorageDOMFingerprint(unsupportedDOM), /unsupported node/);
+assert.throws(
+  () => core.classifyNote(semanticNoteOperation, [{
+    key: "NOTE0001",
+    version: 99,
+    sha256: "sha256:" + "4".repeat(64),
+    storage_fingerprint_sha256: "sha256:" + "5".repeat(64),
+  }]),
+  /child note version drift/,
+);
+assert.strictEqual(core.commitStateAfterFailure({write_attempted: false}), "not_started");
+assert.strictEqual(core.commitStateAfterFailure({
+  write_attempted: true,
+  execution_profile: "db_atomic",
+  db_commit_confirmed: true,
+  inspection_available: false,
+}), "committed_unverified");
+assert.strictEqual(core.commitStateAfterFailure({
+  write_attempted: true,
+  execution_profile: "db_atomic",
+  db_commit_confirmed: false,
+  inspection_available: true,
+  before_state_sha256: "before",
+  inspection_state_sha256: "before",
+}), "rolled_back");
+assert.strictEqual(core.commitStateAfterFailure({
+  write_attempted: true,
+  execution_profile: "db_atomic",
+  db_commit_confirmed: false,
+  inspection_available: false,
+}), "unknown");
+assert.strictEqual(core.commitStateAfterFailure({
+  write_attempted: true,
+  execution_profile: "db_atomic",
+  db_commit_confirmed: false,
+  inspection_available: true,
+  before_state_sha256: "before",
+  inspection_state_sha256: "after",
+  inspection_all_satisfied: true,
+}), "committed");
+assert.strictEqual(core.commitStateAfterFailure({
+  write_attempted: true,
+  execution_profile: "db_atomic",
+  db_commit_confirmed: false,
+  inspection_available: true,
+  before_state_sha256: "before",
+  inspection_state_sha256: "after",
+  inspection_all_satisfied: false,
+}), "partial_commit");
 const pdfOperation = {
   source_sha256: "sha256:" + "d".repeat(64),
   expected_attachments: [{key: "ATTACH01", version: 1, content_type: "application/pdf", link_mode: "imported_file"}],
@@ -227,4 +426,4 @@ assert.throws(
   () => core.resolveCollectionID(collectionRequest, groupLibrary, {...exactCollection, deleted: true}),
   error => error.code === "collection_not_found",
 );
-process.stdout.write("bridge_core: 41 checks passed\n");
+process.stdout.write("bridge_core: storage-equivalence and transaction checks passed\n");

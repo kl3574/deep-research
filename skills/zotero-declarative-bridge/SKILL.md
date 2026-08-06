@@ -34,8 +34,11 @@ reviewed target or manifest.
    authenticated `probe` before `preview`. XPI presence alone proves nothing.
 7. Pass the explicit private capability file to `probe`, then run `preview`.
    Review its receipt before `apply --yes`.
-8. Run `readback` against the same sealed manifest. Treat partial, unknown,
-   drift, or hash mismatch as failure, not success.
+8. Run `readback` against the same sealed manifest. A child note is satisfied
+   only by an exact raw hash or the strict Zotero storage-equivalence contract
+   in [protocol.md](references/protocol.md). Treat partial, unknown, material
+   drift, or formula mismatch as failure. Never retry an apply reported as
+   `committed_unverified`; quiesce editors and perform a fresh readback.
 
 The bridge is loopback-only and accepts `application/octet-stream` envelopes
 authenticated with a nonce and HMAC. The random capability token never crosses
