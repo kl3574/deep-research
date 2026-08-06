@@ -212,6 +212,52 @@ def _compact_title(value: str) -> str:
     return "".join(character.casefold() for character in value if character.isalnum())
 
 
+CHINESE_DECISION_CUE_CATEGORIES = {
+    "normative": re.compile(
+        r"(?:应|宜|须|必须|需要|需|优先|避免|警惕|谨慎|推荐|不可|不能|不宜|不得|"
+        r"可(?=先|用于|采用|识别|估计|忽略|解释|支持|替代|作为|提高|降低|保留|实现))"
+    ),
+    "negative-boundary": re.compile(
+        r"(?:未必|不覆盖|不代表|不等于|不保证|不适用|不成立|"
+        r"仅(?=反映|适用|支持|覆盖|用于|保留|识别|估计|衡量|说明))"
+    ),
+    "warning-outcome": re.compile(
+        r"(?:无效|不足|受限|失效|低估|高估|误导|有风险|更?稳健|更?有效|"
+        r"偏高|偏低|失真)(?:$|[，、；但而])"
+    ),
+    "comparative": re.compile(
+        r"(?:优于|劣于|不如|更适合|(?:最优|次优)(?:$|[，、；但而]))"
+    ),
+    "evidential": re.compile(
+        r"(?:揭示|支持(?=该|此|结论|排序|筛选|校准|决策|解释|识别|比较|估计|推断)|"
+        r"主导(?=误差|方差|响应|结果|排序|风险|不确定性))"
+    ),
+}
+CHINESE_CONTRAST_CUE_RE = re.compile(r"(?:但|然而|却|而非|否则)")
+CHINESE_DESCRIPTIVE_TAIL_RE = re.compile(
+    r"(?:方法|模型|算法|分析|研究|综述|框架|指标|设计|采样|校准|理论|"
+    r"实验|应用|流程|技术|方案|数据|问题|结果|文献)$"
+)
+
+
+def _has_chinese_decision_predicate(decision: str) -> bool:
+    if any(
+        pattern.search(decision)
+        for pattern in CHINESE_DECISION_CUE_CATEGORIES.values()
+    ):
+        return True
+    clauses = [
+        clause.strip()
+        for clause in CHINESE_CONTRAST_CUE_RE.split(decision)
+    ]
+    if len(clauses) < 2 or any(
+        len(re.findall(r"[\u3400-\u9fff]", clause)) < 2
+        for clause in clauses
+    ):
+        return False
+    return CHINESE_DESCRIPTIVE_TAIL_RE.search(clauses[-1]) is None
+
+
 def validate_research_short_title(
     value: str,
     bibliography_title: str,
@@ -241,43 +287,26 @@ def validate_research_short_title(
     if not scenario or not decision:
         raise BridgeError("decision-oriented shortTitle requires scenario and decision text")
 
+    compact_value = _compact_title(value)
+    compact_source = _compact_title(bibliography_title)
+    if compact_value and compact_source and (
+        compact_value == compact_source
+        or (len(compact_value) >= 8 and compact_value in compact_source)
+    ):
+        raise BridgeError(
+            "decision-oriented shortTitle must not be a simple "
+            "bibliography-title abbreviation"
+        )
+
     if language == "zh" or language.startswith("zh-"):
         if len(re.findall(r"[\u3400-\u9fff]", scenario)) < 2 or len(
             re.findall(r"[\u3400-\u9fff]", decision)
         ) < 2:
             raise BridgeError("decision-oriented shortTitle does not match requested Chinese")
-        decision_cues = (
-            "应",
-            "宜",
-            "可",
-            "优先",
-            "避免",
-            "警惕",
-            "谨慎",
-            "不能",
-            "不可",
-            "不宜",
-            "不足",
-            "受限",
-            "失效",
-            "稳健",
-            "有效",
-            "更适合",
-            "仅",
-            "需要",
-            "必须",
-            "低估",
-            "高估",
-            "揭示",
-            "支持",
-            "推荐",
-            "主导",
-            "风险",
-            "误导",
-        )
-        if not any(cue in decision for cue in decision_cues):
+        if not _has_chinese_decision_predicate(decision):
             raise BridgeError(
-                "decision-oriented Chinese shortTitle requires a conclusion or warning cue"
+                "decision-oriented Chinese shortTitle requires a decision or "
+                "warning predicate"
             )
     elif language == "en" or language.startswith("en-"):
         if len(re.findall(r"[A-Za-z]", scenario)) < 4 or len(
@@ -312,17 +341,6 @@ def validate_research_short_title(
             )
     else:
         raise BridgeError("decision-oriented shortTitle language is unsupported")
-
-    compact_value = _compact_title(value)
-    compact_source = _compact_title(bibliography_title)
-    if compact_value and compact_source and (
-        compact_value == compact_source
-        or (len(compact_value) >= 8 and compact_value in compact_source)
-    ):
-        raise BridgeError(
-            "decision-oriented shortTitle must not be a simple bibliography-title abbreviation"
-        )
-
 
 def identity_for_parent(parent: dict[str, Any], library_id: int) -> dict[str, Any]:
     return {
