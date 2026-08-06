@@ -132,6 +132,11 @@ Failed results contain controlled codes and messages but never raw response bodi
 request headers, exception URLs, query values, cookies, session material, or
 credentials. A malformed input can therefore produce `candidate: null`,
 `candidate_digest: null`, and `request: null` while remaining a valid failed result.
+CLI-supplied execution limits are validated before the candidate is loaded. A
+limit violation remains a structured failed result, but its safe detail starts
+with `Acquisition limits are invalid` rather than incorrectly attributing the
+failure to the candidate contract. Current hard maxima are 512 MiB, 120 seconds,
+and five redirects.
 
 ## Fetch policy
 

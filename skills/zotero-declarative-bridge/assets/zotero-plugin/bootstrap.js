@@ -109,7 +109,7 @@ var ZoteroDeclarativeBridge = (() => {
       || !/^[0-9a-f]{32}$/.test(envelope.request_id)
       || !/^[0-9a-f]{32}$/.test(envelope.nonce)
       || envelope.key_id !== STATE.keyID
-      || !["probe", "preview", "apply", "readback"].includes(envelope.action)
+      || !["probe", "resolve_collection", "preview", "apply", "readback"].includes(envelope.action)
       || !envelope.payload || typeof envelope.payload !== "object" || Array.isArray(envelope.payload)
       || !/^[0-9a-f]{64}$/.test(envelope.mac)
     ) throw new ProtocolError("authentication failed", 403, "authentication_failed");
@@ -435,6 +435,7 @@ var ZoteroDeclarativeBridge = (() => {
         plugin_version: STATE.pluginVersion,
         zotero_version: Zotero.version,
         endpoint: ENDPOINT,
+        read_only_actions: ["resolve_collection"],
         operations: ["ensure_collection_membership", "ensure_parent_short_title", "ensure_child_note", "ensure_pdf_attachment"],
         execution_profiles: {
           db_atomic: ["ensure_collection_membership", "ensure_parent_short_title", "ensure_child_note"],
@@ -445,6 +446,32 @@ var ZoteroDeclarativeBridge = (() => {
         arbitrary_javascript: false,
         sqlite_access: false,
       };
+    }
+    if (action === "resolve_collection") {
+      let payload;
+      try {
+        payload = ZoteroDeclarativeBridgeCore.validateCollectionResolutionRequest(envelope.payload);
+      }
+      catch (error) {
+        throw new ProtocolError(error.message);
+      }
+      const library = Zotero.Libraries.get(payload.library_id);
+      const collection = await Zotero.Collections.getByLibraryAndKeyAsync(
+        payload.library_id,
+        payload.collection_key,
+      );
+      try {
+        return ZoteroDeclarativeBridgeCore.resolveCollectionID(payload, library, collection);
+      }
+      catch (error) {
+        const resolutionCodes = new Set([
+          "library_not_found", "library_mismatch", "library_not_group",
+          "collection_not_found", "collection_ambiguous", "collection_mismatch",
+        ]);
+        if (!resolutionCodes.has(error.code)) throw error;
+        const status = ["library_not_found", "collection_not_found"].includes(error.code) ? 404 : 409;
+        throw new ProtocolError("exact collection resolution failed", status, error.code);
+      }
     }
     const allowedPayload = action === "apply"
       ? ["manifest", "preview_id", "preview_token", "state_sha256"]

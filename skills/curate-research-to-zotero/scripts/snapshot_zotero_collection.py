@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import hashlib
+from html.parser import HTMLParser
 import json
 import os
 from pathlib import Path
@@ -20,6 +21,7 @@ import urllib.request
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 MAX_PAGINATION_PAGES = 10_000
 NOTE_SCHEMA_RE = re.compile(r"""data-schema-version=["']([^"']+)["']""")
+SEMANTIC_BLOCK_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "blockquote", "pre"}
 
 
 def canonical_json_bytes(value: Any) -> bytes:
@@ -34,6 +36,86 @@ def canonical_json_bytes(value: Any) -> bytes:
 
 def digest_value(value: Any) -> str:
     return "sha256:" + hashlib.sha256(canonical_json_bytes(value)).hexdigest()
+
+
+def digest_text(value: str) -> str:
+    return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+class NoteSemanticParser(HTMLParser):
+    """Project note HTML to stable structural text without retaining raw markup."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.blocks: list[dict[str, Any]] = []
+        self.headings: list[dict[str, Any]] = []
+        self._active_tag: str | None = None
+        self._active_text: list[str] = []
+        self._counts: dict[str, int] = {}
+        self._ignored_depth = 0
+        self._all_text: list[str] = []
+
+    @staticmethod
+    def _normalize(parts: list[str]) -> str:
+        return " ".join("".join(parts).split())
+
+    def _finish_block(self) -> None:
+        if self._active_tag is None:
+            return
+        text = self._normalize(self._active_text)
+        tag = self._active_tag
+        self._active_tag = None
+        self._active_text = []
+        if not text:
+            return
+        ordinal = self._counts.get(tag, 0) + 1
+        self._counts[tag] = ordinal
+        self.blocks.append(
+            {"kind": tag, "location": f"{tag}[{ordinal}]", "text": text}
+        )
+        if tag.startswith("h"):
+            self.headings.append({"level": int(tag[1]), "text": text})
+
+    def handle_starttag(
+        self, tag: str, attrs: list[tuple[str, str | None]]
+    ) -> None:
+        del attrs
+        tag = tag.lower()
+        if tag in {"script", "style"}:
+            self._ignored_depth += 1
+            return
+        if self._ignored_depth:
+            return
+        if tag in SEMANTIC_BLOCK_TAGS:
+            self._finish_block()
+            self._active_tag = tag
+        elif tag == "br" and self._active_tag is not None:
+            self._active_text.append(" ")
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag in {"script", "style"} and self._ignored_depth:
+            self._ignored_depth -= 1
+            return
+        if not self._ignored_depth and tag == self._active_tag:
+            self._finish_block()
+
+    def handle_data(self, data: str) -> None:
+        if self._ignored_depth:
+            return
+        self._all_text.append(data)
+        if self._active_tag is not None:
+            self._active_text.append(data)
+
+    def payload(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        self._finish_block()
+        if not self.blocks:
+            fallback = self._normalize(self._all_text)
+            if fallback:
+                self.blocks.append(
+                    {"kind": "text", "location": "document[1]", "text": fallback}
+                )
+        return self.headings, self.blocks
 
 
 def validate_base_url(value: str) -> str:
@@ -201,6 +283,50 @@ def child_record(child: dict[str, Any]) -> dict[str, Any]:
     return output
 
 
+def semantic_note_record(child: dict[str, Any]) -> dict[str, Any]:
+    data = data_of(child)
+    if str(data.get("itemType") or "") != "note":
+        raise ValueError("semantic note projection requires a note child")
+    note = str(data.get("note") or "")
+    parser = NoteSemanticParser()
+    parser.feed(note)
+    parser.close()
+    heading_tree, normalized_blocks = parser.payload()
+    match = NOTE_SCHEMA_RE.search(note)
+    payload = {
+        "root_contract": (
+            {"schema_version": match.group(1)} if match else None
+        ),
+        "heading_tree": heading_tree,
+        "normalized_blocks": normalized_blocks,
+    }
+    return {
+        "key": str(child.get("key") or data.get("key") or ""),
+        "version": int(child.get("version") or data.get("version") or 0),
+        "content_sha256": digest_text(note),
+        "semantic_status": "structured" if match else "legacy_unstructured",
+        "semantic_payload": payload,
+        "semantic_sha256": digest_value(payload),
+    }
+
+
+def semantic_parent_record(
+    parent: dict[str, Any], children: list[dict[str, Any]]
+) -> dict[str, Any]:
+    data = data_of(parent)
+    notes = [
+        semantic_note_record(child)
+        for child in children
+        if str(data_of(child).get("itemType") or "") == "note"
+    ]
+    return {
+        "key": str(parent.get("key") or data.get("key") or ""),
+        "version": int(parent.get("version") or data.get("version") or 0),
+        "short_title": str(data.get("shortTitle") or ""),
+        "notes": sorted(notes, key=lambda item: item["key"]),
+    }
+
+
 def parent_record(
     parent: dict[str, Any], children: list[dict[str, Any]]
 ) -> dict[str, Any]:
@@ -221,9 +347,9 @@ def parent_record(
     }
 
 
-def build_snapshot(
+def build_snapshots(
     base_url: str, group_id: int, collection_key: str
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
     base_url = validate_base_url(base_url)
     if group_id <= 0:
         raise ValueError("group_id must be positive")
@@ -238,6 +364,7 @@ def build_snapshot(
         raise ValueError("collection is malformed")
     path = get_collection_path(base_url, group_id, collection)
     parents: list[dict[str, Any]] = []
+    semantic_parents: list[dict[str, Any]] = []
     top = get_all(
         base_url,
         f"/api/groups/{group_id}/collections/{collection_key}/items/top",
@@ -253,7 +380,9 @@ def build_snapshot(
             base_url, f"/api/groups/{group_id}/items/{key}/children"
         )
         parents.append(parent_record(parent, children))
+        semantic_parents.append(semantic_parent_record(parent, children))
     parents.sort(key=lambda item: item["key"])
+    semantic_parents.sort(key=lambda item: item["key"])
     version = int(
         collection.get("version") or data_of(collection).get("version") or 0
     )
@@ -272,9 +401,10 @@ def build_snapshot(
             ],
         }
     )
-    return {
+    retrieved_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    snapshot = {
         "schema": "ZoteroCorpusSnapshot/v1",
-        "retrieved_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "retrieved_at": retrieved_at,
         "collection": collection_record,
         "parents": parents,
         "identity_sha256": identity,
@@ -286,6 +416,30 @@ def build_snapshot(
             }
         ),
     }
+    semantic_snapshot = {
+        "schema": "ZoteroCorpusSemanticSnapshot/v1",
+        "retrieved_at": retrieved_at,
+        "corpus_identity_sha256": snapshot["identity_sha256"],
+        "corpus_state_sha256": snapshot["state_sha256"],
+        "parents": semantic_parents,
+    }
+    semantic_snapshot["state_sha256"] = digest_value(
+        {
+            "corpus_identity_sha256": semantic_snapshot["corpus_identity_sha256"],
+            "corpus_state_sha256": semantic_snapshot["corpus_state_sha256"],
+            "parents": semantic_parents,
+        }
+    )
+    return snapshot, semantic_snapshot
+
+
+def build_snapshot(
+    base_url: str, group_id: int, collection_key: str
+) -> dict[str, Any]:
+    snapshot, _semantic_snapshot = build_snapshots(
+        base_url, group_id, collection_key
+    )
+    return snapshot
 
 
 def write_private_snapshot(path: Path, snapshot: dict[str, Any]) -> None:
@@ -293,8 +447,10 @@ def write_private_snapshot(path: Path, snapshot: dict[str, Any]) -> None:
     if not path.is_absolute():
         raise ValueError("output must be absolute")
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
     try:
+        os.fchmod(descriptor, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
             json.dump(snapshot, stream, ensure_ascii=False, sort_keys=True, indent=2)
             stream.write("\n")
@@ -317,12 +473,28 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--group-id", type=int, required=True)
     parser.add_argument("--collection-key", required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--semantic-audit-output",
+        type=Path,
+        help=(
+            "optional private ZoteroCorpusSemanticSnapshot/v1 with parent "
+            "shortTitle, note hashes, and normalized structural text"
+        ),
+    )
     args = parser.parse_args(argv)
     try:
-        value = build_snapshot(
+        value, semantic_value = build_snapshots(
             args.base_url, args.group_id, args.collection_key
         )
+        if (
+            args.semantic_audit_output is not None
+            and args.semantic_audit_output.expanduser()
+            == args.output.expanduser()
+        ):
+            raise ValueError("semantic audit output must differ from inventory output")
         write_private_snapshot(args.output, value)
+        if args.semantic_audit_output is not None:
+            write_private_snapshot(args.semantic_audit_output, semantic_value)
     except (
         OSError,
         ValueError,
@@ -332,15 +504,19 @@ def main(argv: list[str] | None = None) -> int:
     ) as exc:
         print(f"snapshot failed: {exc}", file=sys.stderr)
         return 2
-    print(
-        json.dumps(
+    result = {
+        "output": str(args.output),
+        "parents": len(value["parents"]),
+        "state_sha256": value["state_sha256"],
+    }
+    if args.semantic_audit_output is not None:
+        result.update(
             {
-                "output": str(args.output),
-                "parents": len(value["parents"]),
-                "state_sha256": value["state_sha256"],
+                "semantic_audit_output": str(args.semantic_audit_output),
+                "semantic_state_sha256": semantic_value["state_sha256"],
             }
         )
-    )
+    print(json.dumps(result))
     return 0
 
 

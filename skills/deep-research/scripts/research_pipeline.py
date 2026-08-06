@@ -8,6 +8,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import os
 import re
 import sys
 from datetime import datetime
@@ -737,8 +738,29 @@ def write_json_exclusive(path_value: str, value: Any) -> None:
     path = Path(path_value)
     if path.exists() or path.is_symlink():
         raise ContractError(f"refusing to overwrite output: {path}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(canonical_bytes(value) + b"\n")
+    if path.parent.is_symlink():
+        raise ContractError(f"refusing symlink output parent: {path.parent}")
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    payload = canonical_bytes(value) + b"\n"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
+    created = False
+    try:
+        descriptor = os.open(path, flags, 0o600)
+        created = True
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = -1
+            handle.write(payload)
+    except FileExistsError as exc:
+        raise ContractError(f"refusing to overwrite output: {path}") from exc
+    except BaseException:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if created:
+            path.unlink(missing_ok=True)
+        raise
 
 
 def parser() -> argparse.ArgumentParser:

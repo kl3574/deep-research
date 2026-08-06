@@ -769,10 +769,17 @@ def _result_payload(
     }
 
 
-def _input_failure_result(operation: str, generated_at: str, message: str) -> dict[str, Any]:
+def _input_failure_result(
+    operation: str,
+    generated_at: str,
+    message: str,
+    *,
+    check_detail: str = "Candidate input is invalid",
+    error_code: str = "invalid_candidate",
+) -> dict[str, Any]:
     checks = _base_checks()
-    _set_check(checks, "candidate_contract", "failed", "Candidate input is invalid")
-    error = AcquisitionError("invalid_candidate", "candidate_contract", message)
+    _set_check(checks, "candidate_contract", "failed", check_detail)
+    error = AcquisitionError(error_code, "candidate_contract", message)
     return _finish_result(
         _result_payload(
             operation=operation,
@@ -1567,7 +1574,23 @@ def main(argv: list[str] | None = None) -> int:
     if candidate_path == output_path:
         print(json.dumps({"valid": False, "error": "candidate and output paths must differ"}, sort_keys=True), file=sys.stderr)
         return 2
-    raw_candidate, failure_result = _read_candidate_or_failure(args.candidate, args.command, timestamp)
+    try:
+        _validate_limits(
+            args.max_bytes, args.timeout_seconds, args.redirect_limit
+        )
+    except ContractError as error:
+        raw_candidate = None
+        failure_result = _input_failure_result(
+            args.command,
+            timestamp,
+            f"Acquisition limits are invalid: {error}",
+            check_detail=f"Acquisition limits are invalid: {error}",
+            error_code="invalid_limits",
+        )
+    else:
+        raw_candidate, failure_result = _read_candidate_or_failure(
+            args.candidate, args.command, timestamp
+        )
     if failure_result is not None:
         result = failure_result
     else:

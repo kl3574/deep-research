@@ -462,6 +462,26 @@ def validate_bridge_response(value: Any, action: str, request_id: str) -> dict[s
     return response
 
 
+def validate_collection_resolution(
+    value: Any,
+    expected_library_id: int,
+    expected_collection_key: str,
+) -> dict[str, Any]:
+    result = exact_keys(
+        value,
+        {"status", "library_id", "collection_key", "collection_id"},
+        "collection resolution",
+    )
+    if result["status"] != "resolved":
+        raise BridgeError("collection resolution status mismatch")
+    library_id = positive_int(result["library_id"], "collection resolution library_id")
+    collection_key = item_key(result["collection_key"], "collection resolution collection_key")
+    positive_int(result["collection_id"], "collection resolution collection_id")
+    if library_id != expected_library_id or collection_key != expected_collection_key:
+        raise BridgeError("collection resolution request binding mismatch")
+    return result
+
+
 def api_get(path: str, base_url: str = BASE_URL) -> Any:
     parsed = urllib.parse.urlsplit(base_url)
     if parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or parsed.username or parsed.password or parsed.query or parsed.fragment:
@@ -951,6 +971,11 @@ def parse_args() -> argparse.Namespace:
     probe = sub.add_parser("probe")
     probe.add_argument("--capability-file", type=Path, required=True)
 
+    resolver = sub.add_parser("resolve-collection")
+    resolver.add_argument("--capability-file", type=Path, required=True)
+    resolver.add_argument("--library-id", type=int, required=True)
+    resolver.add_argument("--collection-key", required=True)
+
     for command in ("preview", "readback"):
         child = sub.add_parser(command)
         child.add_argument("manifest", type=Path)
@@ -995,6 +1020,21 @@ def main() -> int:
             return 0
 
         capability = load_capability(args.capability_file)
+        if args.command == "resolve-collection":
+            library_id = positive_int(args.library_id, "library_id")
+            collection_key = item_key(args.collection_key, "collection_key")
+            response = bridge_request(
+                capability,
+                "resolve_collection",
+                {"library_id": library_id, "collection_key": collection_key},
+            )
+            result = validate_collection_resolution(
+                response["result"],
+                library_id,
+                collection_key,
+            )
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+            return 0
         if args.command == "probe":
             response = bridge_request(capability, "probe", {})
             public = copy.deepcopy(response)

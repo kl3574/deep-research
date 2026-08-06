@@ -39,6 +39,12 @@ Primary references:
   JavaScript names. No `eval`, `Function`, module path, SQL, delete, or arbitrary
   metadata operation exists. The only parent-field operation is the literal
   `ensure_parent_short_title`; callers cannot supply a field name.
+- `resolve_collection` is a separate authenticated read-only action, not a
+  manifest operation. It accepts exactly one internal group-library ID and one
+  collection key, performs one composite keyed lookup, and returns only the
+  exact inputs plus Zotero's numeric collection ID. It never lists or searches
+  libraries or collections. Missing, ambiguous, deleted, non-group, or
+  mismatched results fail closed without a write attempt.
 
 ## Stable installation boundary
 
@@ -86,6 +92,20 @@ failed `db_atomic` write whose state digest equals its preflight baseline may be
 reported as `rolled_back`.
 
 ## Commands
+
+Resolve Zotero's internal numeric collection ID after the exact group-library
+ID and collection key have been explicitly authorized:
+
+```bash
+python scripts/zotero_declarative_bridge.py resolve-collection \
+  --capability-file /absolute/profile/zotero-declarative-bridge-capability.json \
+  --library-id 2 --collection-key COLL0001
+```
+
+The success output contains exactly `status`, `library_id`, `collection_key`,
+and `collection_id`. The capability token is never printed. This command does
+not accept a name, partial key, user-library fallback, or search mode; it cannot
+be used to discover either input.
 
 Compile an existing attachment-repair manifest:
 

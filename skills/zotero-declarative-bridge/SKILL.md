@@ -1,32 +1,37 @@
 ---
 name: zotero-declarative-bridge
-description: Execute reviewed, hash-bound mutations on existing Zotero Desktop parents through a constrained local plugin. Use when curation must add exact collection membership, update only a reviewed parent shortTitle, create or update one child note, or attach a verified local PDF without SQLite edits, cloud credentials, arbitrary JavaScript, or blind UI automation.
+description: Resolve an exact collection key read-only or execute reviewed, hash-bound mutations on existing Zotero Desktop parents through a constrained local plugin. Use when a compiler needs Zotero's internal numeric collection ID, or curation must add exact collection membership, update only a reviewed parent shortTitle, create or update one child note, or attach a verified local PDF without SQLite edits, cloud credentials, arbitrary JavaScript, or blind UI automation.
 ---
 
 # Zotero Declarative Bridge
 
 Keep semantic curation in `$curate-research-to-zotero`. This skill is only the
-local transaction executor for an already reviewed manifest.
+authenticated exact-key resolver and local transaction executor for an already
+reviewed target or manifest.
 
 ## Fixed workflow
 
-1. Read [protocol.md](references/protocol.md) and compile one of the four
+1. If an authorized group-library ID and collection key are known but Zotero's
+   internal collection ID is not, use the read-only `resolve-collection`
+   command in [protocol.md](references/protocol.md). Do not enumerate libraries
+   or collections to guess either input.
+2. Read [protocol.md](references/protocol.md) and compile one of the four
    supported operations with [zotero_declarative_bridge.py](scripts/zotero_declarative_bridge.py).
-2. Validate the sealed manifest. Never add an operation type or dynamic method
+3. Validate the sealed manifest. Never add an operation type or dynamic method
    name to bypass the protocol.
-3. Build and inspect the XPI with [build_xpi.py](scripts/build_xpi.py). The build
+4. Build and inspect the XPI with [build_xpi.py](scripts/build_xpi.py). The build
    must bind the external update manifest and final XPI hash. Follow
    [install-uninstall.md](references/install-uninstall.md); prefer Zotero's
    visible Plugins action for the packed XPI. The stable skill does not install
    source proxies or change profile discovery preferences.
-4. Before installation, require Zotero's own `loadManifestFromFile` preflight to
+5. Before installation, require Zotero's own `loadManifestFromFile` preflight to
    return the expected ID/version with no `additionalErrors`; offline JSON-schema
    checks are not a substitute for this runtime loader gate.
-5. Require registry-active ID/version, a private capability file, and an
+6. Require registry-active ID/version, a private capability file, and an
    authenticated `probe` before `preview`. XPI presence alone proves nothing.
-6. Pass the explicit private capability file to `probe`, then run `preview`.
+7. Pass the explicit private capability file to `probe`, then run `preview`.
    Review its receipt before `apply --yes`.
-7. Run `readback` against the same sealed manifest. Treat partial, unknown,
+8. Run `readback` against the same sealed manifest. Treat partial, unknown,
    drift, or hash mismatch as failure, not success.
 
 The bridge is loopback-only and accepts `application/octet-stream` envelopes
@@ -37,6 +42,12 @@ HTTP. It supports only:
 - `ensure_parent_short_title`
 - `ensure_child_note`
 - `ensure_pdf_attachment`
+
+The separate authenticated `resolve_collection` action is read-only and is not
+a transaction operation. It accepts exactly one authorized internal group
+library ID plus one exact collection key and returns only that pair plus the
+numeric collection ID. Missing, ambiguous, deleted, non-group, or mismatched
+lookups fail closed.
 
 A sealed manifest is either a multi-operation `db_atomic` transaction containing
 only collection, short-title, and note operations, or an attachment-only plan.

@@ -1,4 +1,4 @@
 interface:
   display_name: "Zotero Declarative Bridge"
-  short_description: "Apply constrained existing-parent Zotero transactions"
-  default_prompt: "Use $zotero-declarative-bridge to preview, apply, and read back this reviewed hash-bound Zotero Desktop transaction, including only the explicit shortTitle field operation when requested, without arbitrary JavaScript or SQLite edits."
+  short_description: "Resolve exact collections or apply constrained Zotero transactions"
+  default_prompt: "Use $zotero-declarative-bridge to resolve an authorized exact group-library collection key read-only when its internal collection ID is needed, or to preview, apply, and read back this reviewed hash-bound Zotero Desktop transaction, without enumeration, arbitrary JavaScript, or SQLite edits."

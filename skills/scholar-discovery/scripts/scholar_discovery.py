@@ -16,7 +16,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -103,6 +103,7 @@ SCREENING_DECISIONS = {"include", "exclude", "maybe", "unscreened"}
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 IDENTIFIER_RE = re.compile(r"^([0-9A-Za-z_\-.:/]+)$")
 DOI_RE = re.compile(r"^10\.\d{4,9}/\S+$")
+MAX_FUTURE_SKEW = timedelta(minutes=5)
 
 PAPER_UNDERSTANDING_GAP_QUERY_TERMS = {
     "missing_input_format": {
@@ -307,6 +308,10 @@ def require_positive_int(value: Any, label: str, maximum: int) -> int:
     return value
 
 
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def require_timestamp(value: Any, label: str) -> str:
     text = require_string(value, label)
     try:
@@ -315,6 +320,10 @@ def require_timestamp(value: Any, label: str) -> str:
         raise ContractError(f"{label} must be an ISO-8601 timestamp") from exc
     if parsed.tzinfo is None:
         raise ContractError(f"{label} must include a timezone")
+    if parsed.astimezone(timezone.utc) > utc_now() + MAX_FUTURE_SKEW:
+        raise ContractError(
+            f"{label} must not be more than {int(MAX_FUTURE_SKEW.total_seconds())} seconds in the future"
+        )
     return text
 
 

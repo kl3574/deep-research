@@ -79,7 +79,7 @@ class BridgeTests(unittest.TestCase):
     def test_manifest_and_bootstrap_expose_zotero_9_diagnostics(self) -> None:
         manifest = json.loads((PLUGIN_ROOT / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["manifest_version"], 2)
-        self.assertEqual(manifest["version"], "0.1.5")
+        self.assertEqual(manifest["version"], "0.1.6")
         self.assertEqual(
             manifest["applications"]["zotero"]["update_url"],
             (
@@ -93,6 +93,8 @@ class BridgeTests(unittest.TestCase):
         self.assertIn("Zotero.logError(error)", bootstrap)
         self.assertIn('row.live.parent.setField("shortTitle", operation.new_short_title)', bootstrap)
         self.assertIn('"ensure_parent_short_title"', bootstrap)
+        self.assertIn('action === "resolve_collection"', bootstrap)
+        self.assertIn("getByLibraryAndKeyAsync(", bootstrap)
 
     def test_xpi_build_rejects_missing_zotero_update_url(self) -> None:
         builder = load_builder()
@@ -147,7 +149,9 @@ class BridgeTests(unittest.TestCase):
             updates_path = plugin_root / "updates.json"
             updates = json.loads(updates_path.read_text(encoding="utf-8"))
             entry = updates["addons"][builder.PLUGIN_ID]["updates"][0]
-            entry["update_link"] = entry["update_link"].replace("/v0.6.1/", "/v0.6.0/")
+            entry["update_link"] = entry["update_link"].replace(
+                f"/{builder.RELEASE_TAG}/", "/v0.0.0/"
+            )
             updates_path.write_text(json.dumps(updates), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "release tag and asset"):
                 builder.build(Path(directory) / "wrong-release-tag.xpi", plugin_root)
@@ -327,6 +331,51 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(mac, expected)
         self.assertEqual(captured["content_type"], "application/octet-stream")
         self.assertNotIn("capability_token", captured["body"])
+
+    def test_collection_resolver_cli_binds_exact_input_and_prints_no_secret(self) -> None:
+        capability = {
+            "endpoint": "http://127.0.0.1:23119" + bridge.ENDPOINT_PATH,
+            "key_id": "a" * 16,
+            "capability_token": "b" * 64,
+        }
+        response = {
+            "schema": bridge.RESPONSE_SCHEMA,
+            "status": "resolved",
+            "action": "resolve_collection",
+            "request_id": "c" * 32,
+            "result": {
+                "status": "resolved",
+                "library_id": 2,
+                "collection_key": "COLL0001",
+                "collection_id": 40,
+            },
+            "error": None,
+        }
+        args = types.SimpleNamespace(
+            command="resolve-collection",
+            capability_file=Path("/private/capability.json"),
+            library_id=2,
+            collection_key="COLL0001",
+        )
+        stdout = io.StringIO()
+        with mock.patch.object(bridge, "parse_args", return_value=args), mock.patch.object(
+            bridge, "load_capability", return_value=capability
+        ), mock.patch.object(
+            bridge, "bridge_request", return_value=response
+        ) as request_mock, contextlib.redirect_stdout(stdout):
+            self.assertEqual(bridge.main(), 0)
+        request_mock.assert_called_once_with(
+            capability,
+            "resolve_collection",
+            {"library_id": 2, "collection_key": "COLL0001"},
+        )
+        self.assertEqual(json.loads(stdout.getvalue()), response["result"])
+        self.assertNotIn(capability["capability_token"], stdout.getvalue())
+        unexpected = {**response["result"], "library_name": "private"}
+        with self.assertRaisesRegex(bridge.BridgeError, "keys differ"):
+            bridge.validate_collection_resolution(unexpected, 2, "COLL0001")
+        with self.assertRaisesRegex(bridge.BridgeError, "binding mismatch"):
+            bridge.validate_collection_resolution(response["result"], 3, "COLL0001")
 
     def test_cli_persists_structured_http_errors_without_stderr_leaks(self) -> None:
         capability = {
@@ -590,7 +639,7 @@ class BridgeTests(unittest.TestCase):
             timeout=15,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("28 checks passed", result.stdout)
+        self.assertIn("38 checks passed", result.stdout)
 
     def test_membership_compiler_binds_live_parent_and_keyed_path(self) -> None:
         args = types.SimpleNamespace(

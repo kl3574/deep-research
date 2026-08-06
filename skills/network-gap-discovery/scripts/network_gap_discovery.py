@@ -5128,31 +5128,56 @@ def validate_any(value: Any, network: dict[str, Any] | None = None) -> dict[str,
     raise ContractError(f"unsupported schema: {schema!r}")
 
 
+NETWORK_INPUT_HELP = (
+    "Path to exported KnowledgeNetwork/v1 JSON; do not pass "
+    "networks/<id>/network.json"
+)
+
+
+def load_exported_knowledge_network(path_value: str | Path) -> dict[str, Any]:
+    value = load_json(path_value)
+    if not isinstance(value, dict):
+        raise ContractError("network must be a KnowledgeNetwork/v1 object")
+    if value.get("schema") == NETWORK_SCHEMA:
+        return validate_network(value)
+    if (
+        "schema" not in value
+        and "schema_version" in value
+        and "network_id" in value
+    ):
+        raise ContractError(
+            "--network requires an exported KnowledgeNetwork/v1 JSON, not the "
+            "RKN storage network.json/NetworkManifest; run the "
+            "research-knowledge-network export command first"
+        )
+    raise ContractError("network.schema must equal KnowledgeNetwork/v1")
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     subcommands = root.add_subparsers(dest="command", required=True)
 
     scan = subcommands.add_parser("scan", help="scan a KnowledgeNetwork/v1")
-    scan.add_argument("--network", required=True)
+    scan.add_argument("--network", required=True, help=NETWORK_INPUT_HELP)
     scan.add_argument("--output", required=True)
 
     generate = subcommands.add_parser(
         "generate-hypotheses", help="emit deterministic gap hypotheses from network scan"
     )
-    generate.add_argument("--network", required=True)
+    generate.add_argument("--network", required=True, help=NETWORK_INPUT_HELP)
     generate.add_argument("--round-id")
     generate.add_argument("--output", required=True)
 
     rank = subcommands.add_parser("prioritize", help="rank gap hypotheses")
     rank.add_argument("--input", required=True)
-    rank.add_argument("--network")
+    rank.add_argument("--network", help=NETWORK_INPUT_HELP)
     rank.add_argument("--output", required=True)
 
     emit = subcommands.add_parser(
         "emit-search-requests", help="emit scholar-discovery requests"
     )
     emit.add_argument("--input", required=True)
-    emit.add_argument("--network", required=True)
+    emit.add_argument("--network", required=True, help=NETWORK_INPUT_HELP)
     emit.add_argument("--output", required=True)
     emit.add_argument(
         "--google-scholar-policy",
@@ -5164,7 +5189,7 @@ def parser() -> argparse.ArgumentParser:
         "consume-results", help="consume result set and transition hypothesis status"
     )
     consume.add_argument("--hypotheses", required=True)
-    consume.add_argument("--network", required=True)
+    consume.add_argument("--network", required=True, help=NETWORK_INPUT_HELP)
     consume.add_argument("--requests", required=True)
     consume.add_argument("--result", action="append", default=[], required=True)
     consume.add_argument("--output", required=True)
@@ -5174,7 +5199,7 @@ def parser() -> argparse.ArgumentParser:
         "consume-reviewed-evidence", help="consume reviewed evidence and transition hypothesis status"
     )
     consume_review.add_argument("--hypotheses", required=True)
-    consume_review.add_argument("--network", required=True)
+    consume_review.add_argument("--network", required=True, help=NETWORK_INPUT_HELP)
     consume_review.add_argument("--review-requests", required=True)
     consume_review.add_argument("--reading-reports", required=True)
     consume_review.add_argument("--dossier", required=True)
@@ -5188,7 +5213,7 @@ def parser() -> argparse.ArgumentParser:
         "propose-patch", help="emit proposal-only NetworkPatchProposal/v2"
     )
     propose.add_argument("--input", required=True)
-    propose.add_argument("--network", required=True)
+    propose.add_argument("--network", required=True, help=NETWORK_INPUT_HELP)
     propose.add_argument("--review-requests", required=True)
     propose.add_argument("--reading-reports", required=True)
     propose.add_argument("--dossier", required=True)
@@ -5199,10 +5224,10 @@ def parser() -> argparse.ArgumentParser:
 
     validate = subcommands.add_parser("validate", help="validate one contract")
     validate.add_argument("--input", required=True)
-    validate.add_argument("--network")
+    validate.add_argument("--network", help=NETWORK_INPUT_HELP)
 
     cycle = subcommands.add_parser("cycle", help="run bounded discovery cycle")
-    cycle.add_argument("--network", required=True)
+    cycle.add_argument("--network", required=True, help=NETWORK_INPUT_HELP)
     cycle.add_argument("--hypotheses-output", required=True)
     cycle.add_argument("--requests-output", required=True)
     cycle.add_argument(
@@ -5218,10 +5243,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
         if args.command == "scan":
-            write_json(args.output, scan_network(load_json(args.network)))
+            write_json(args.output, scan_network(load_exported_knowledge_network(args.network)))
 
         elif args.command == "generate-hypotheses":
-            network = load_json(args.network)
+            network = load_exported_knowledge_network(args.network)
             validate_network(network)
             probe = scan_network(network)
             write_json(
@@ -5234,11 +5259,11 @@ def main(argv: list[str] | None = None) -> int:
             )
 
         elif args.command == "prioritize":
-            network = load_json(args.network) if args.network else None
+            network = load_exported_knowledge_network(args.network) if args.network else None
             write_json(args.output, prioritize(load_json(args.input), network))
 
         elif args.command == "emit-search-requests":
-            network = load_json(args.network)
+            network = load_exported_knowledge_network(args.network)
             validate_network(network)
             write_json(
                 args.output,
@@ -5250,7 +5275,7 @@ def main(argv: list[str] | None = None) -> int:
             )
 
         elif args.command == "consume-results":
-            network = load_json(args.network)
+            network = load_exported_knowledge_network(args.network)
             validate_network(network)
             hypotheses = load_json(args.hypotheses)
             request_set = load_json(args.requests)
@@ -5265,7 +5290,7 @@ def main(argv: list[str] | None = None) -> int:
             write_json(args.output, output)
 
         elif args.command == "consume-reviewed-evidence":
-            network = load_json(args.network)
+            network = load_exported_knowledge_network(args.network)
             validate_network(network)
             output = consume_reviewed_evidence(
                 load_json(args.hypotheses),
@@ -5281,7 +5306,7 @@ def main(argv: list[str] | None = None) -> int:
             write_json(args.output, output)
 
         elif args.command == "propose-patch":
-            network = load_json(args.network)
+            network = load_exported_knowledge_network(args.network)
             validate_network(network)
             write_json(
                 args.output,
@@ -5298,7 +5323,7 @@ def main(argv: list[str] | None = None) -> int:
             )
 
         elif args.command == "cycle":
-            network = load_json(args.network)
+            network = load_exported_knowledge_network(args.network)
             validate_network(network)
             probe = scan_network(network)
             hypotheses = generate_hypotheses_from_probe(probe, network)
@@ -5312,7 +5337,7 @@ def main(argv: list[str] | None = None) -> int:
             write_json(args.requests_output, request_set)
 
         else:
-            network = load_json(args.network) if args.network else None
+            network = load_exported_knowledge_network(args.network) if args.network else None
             output = validate_any(load_json(args.input), network)
             print(json.dumps({"valid": True, "schema": output["schema"]}, sort_keys=True))
         return 0

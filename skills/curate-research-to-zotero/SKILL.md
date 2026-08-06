@@ -77,3 +77,7 @@ through readback.
 Use [snapshot_zotero_collection.py](scripts/snapshot_zotero_collection.py) for a
 private read-only `ZoteroCorpusSnapshot/v1`. It is research input only; do not
 write temporary knowledge-graph state back as a permanent Zotero note.
+When an explicit semantic audit needs parent `shortTitle` and note content
+bindings, use the opt-in `--semantic-audit-output` companion projection. Keep it
+private; it stores normalized note semantics and hashes, while the default
+inventory intentionally continues to omit note bodies and `shortTitle`.

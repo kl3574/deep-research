@@ -174,4 +174,44 @@ assert.throws(() => core.planWrites([
   {entry: {operations: [fullPDFOperation]}, decisions: [{decision: "needs_write"}]},
   {entry: {operations: [fullPDFOperation]}, decisions: [{decision: "needs_write"}]},
 ]), /multiple PDF attachment mutations/);
-process.stdout.write("bridge_core: 28 checks passed\n");
+const collectionRequest = {library_id: 2, collection_key: "COLL0001"};
+const groupLibrary = {libraryID: 2, libraryType: "group"};
+const exactCollection = {id: 40, libraryID: 2, key: "COLL0001", deleted: false};
+assert.strictEqual(core.validateCollectionResolutionRequest(collectionRequest), collectionRequest);
+assert.throws(
+  () => core.validateCollectionResolutionRequest({...collectionRequest, name: "guess"}),
+  /keys differ/,
+);
+assert.deepStrictEqual(
+  core.resolveCollectionID(collectionRequest, groupLibrary, exactCollection),
+  {status: "resolved", library_id: 2, collection_key: "COLL0001", collection_id: 40},
+);
+assert.throws(
+  () => core.resolveCollectionID(collectionRequest, null, exactCollection),
+  error => error.code === "library_not_found",
+);
+assert.throws(
+  () => core.resolveCollectionID(collectionRequest, {libraryID: 2, libraryType: "user"}, exactCollection),
+  error => error.code === "library_not_group",
+);
+assert.throws(
+  () => core.resolveCollectionID(collectionRequest, groupLibrary, null),
+  error => error.code === "collection_not_found",
+);
+assert.throws(
+  () => core.resolveCollectionID(collectionRequest, groupLibrary, [exactCollection, {...exactCollection, id: 41}]),
+  error => error.code === "collection_ambiguous",
+);
+assert.throws(
+  () => core.resolveCollectionID(collectionRequest, groupLibrary, {...exactCollection, libraryID: 3}),
+  error => error.code === "collection_mismatch",
+);
+assert.throws(
+  () => core.resolveCollectionID(collectionRequest, groupLibrary, {...exactCollection, key: "OTHER001"}),
+  error => error.code === "collection_mismatch",
+);
+assert.throws(
+  () => core.resolveCollectionID(collectionRequest, groupLibrary, {...exactCollection, deleted: true}),
+  error => error.code === "collection_not_found",
+);
+process.stdout.write("bridge_core: 38 checks passed\n");

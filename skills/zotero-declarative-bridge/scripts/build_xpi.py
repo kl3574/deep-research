@@ -13,11 +13,11 @@ from pathlib import Path
 
 FILES = ("manifest.json", "bridge_core.js", "bootstrap.js")
 PLUGIN_ID = "zotero-declarative-bridge@deep-research.local"
-PLUGIN_VERSION = "0.1.5"
-REPOSITORY_RELEASE_VERSION = "0.6.1"
+PLUGIN_VERSION = "0.1.6"
+REPOSITORY_RELEASE_VERSION = "0.6.2"
 RELEASE_TAG = f"v{REPOSITORY_RELEASE_VERSION}"
 XPI_FILENAME = f"zotero-declarative-bridge-{PLUGIN_VERSION}.xpi"
-XPI_SHA256 = "10c0e06c7a7fa85afe73b3a9c49d518d7777513a1d55cb01eb8ed8182d1db76b"
+XPI_SHA256 = "f2c5b238756b0b70bf262e184012dec840b3f5fcb7ea1e773e9b3b5f0813856e"
 PLUGIN_UPDATE_URL = (
     "https://raw.githubusercontent.com/kl3574/deep-research/main/skills/"
     "zotero-declarative-bridge/assets/zotero-plugin/updates.json"

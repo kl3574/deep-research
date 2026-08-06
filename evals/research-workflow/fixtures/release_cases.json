@@ -35,7 +35,7 @@
             "skill": "curate-research-to-zotero",
             "operation": "inventory_existing_corpus",
             "execution": "local_readonly",
-            "consumes": ["ZoteroTarget/v1#wolfs"],
+            "consumes": ["ZoteroTarget/v1#example-library"],
             "produces": ["ZoteroCorpusSnapshot/v1#zs-001"]
           },
           {

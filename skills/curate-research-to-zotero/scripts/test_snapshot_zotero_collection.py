@@ -63,6 +63,7 @@ class FakeZoteroHandler(BaseHTTPRequestHandler):
                         "key": "ABCDEFGH",
                         "itemType": "journalArticle",
                         "title": "Sparse dynamics",
+                        "shortTitle": "Existing bibliographic shorthand",
                         "date": "2026",
                         "DOI": "10.1000/example",
                         "abstractNote": "FULL ABSTRACT MUST NOT LEAK",
@@ -173,6 +174,64 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(api["collection"], api_slash["collection"])
         self.assertEqual(api["parents"], api_slash["parents"])
         self.assertEqual(api["state_sha256"], api_slash["state_sha256"])
+
+    def test_semantic_snapshot_binds_short_title_and_note_semantics(self) -> None:
+        inventory, semantic = snapshotter.build_snapshots(
+            self.base_url, 1234567, "COLL0001"
+        )
+        self.assertNotIn("shortTitle", inventory["parents"][0])
+        parent = semantic["parents"][0]
+        self.assertEqual("Existing bibliographic shorthand", parent["short_title"])
+        note = parent["notes"][0]
+        self.assertEqual("structured", note["semantic_status"])
+        self.assertEqual(
+            {"schema_version": "9"}, note["semantic_payload"]["root_contract"]
+        )
+        self.assertEqual(
+            "PRIVATE NOTE BODY",
+            note["semantic_payload"]["normalized_blocks"][0]["text"],
+        )
+        serialized = json.dumps(semantic, ensure_ascii=False)
+        self.assertNotIn("<div", serialized)
+        self.assertNotIn("</div>", serialized)
+        self.assertEqual(inventory["identity_sha256"], semantic["corpus_identity_sha256"])
+        self.assertEqual(inventory["state_sha256"], semantic["corpus_state_sha256"])
+
+    def test_semantic_hash_ignores_markup_only_change(self) -> None:
+        def child(note: str) -> dict[str, object]:
+            return {
+                "key": "NOTENOTE",
+                "version": 2,
+                "data": {"itemType": "note", "note": note},
+            }
+
+        plain = snapshotter.semantic_note_record(
+            child('<div data-schema-version="9"><p>Same meaning</p></div>')
+        )
+        marked = snapshotter.semantic_note_record(
+            child('<div data-schema-version="9"><p>Same <b>meaning</b></p></div>')
+        )
+        changed = snapshotter.semantic_note_record(
+            child('<div data-schema-version="9"><p>Changed meaning</p></div>')
+        )
+        self.assertNotEqual(plain["content_sha256"], marked["content_sha256"])
+        self.assertEqual(plain["semantic_sha256"], marked["semantic_sha256"])
+        self.assertNotEqual(plain["semantic_sha256"], changed["semantic_sha256"])
+
+    def test_legacy_fragment_is_explicitly_unstructured(self) -> None:
+        note = snapshotter.semantic_note_record(
+            {
+                "key": "LEGACY01",
+                "version": 4,
+                "data": {
+                    "itemType": "note",
+                    "note": "<h1>Decision title</h1><p>Preserved evidence</p>",
+                },
+            }
+        )
+        self.assertEqual("legacy_unstructured", note["semantic_status"])
+        self.assertIsNone(note["semantic_payload"]["root_contract"])
+        self.assertEqual([1], [item["level"] for item in note["semantic_payload"]["heading_tree"]])
 
     def test_get_all_paginates_101_top_parents_and_children_without_loss(self) -> None:
         top_path = "/api/groups/1234567/collections/COLL0001/items/top"

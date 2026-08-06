@@ -2859,7 +2859,7 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
 
     def test_real_gap_queries_preserve_semantic_label_and_drop_internal_template_terms(self):
         network = doe_surrogate_noise_network_fixture(single_source_count=0, isolate_count=0)
-        semantic_label = "形貌反问题的 adaptive DoE sampling 与 surrogate uncertainty calibration"
+        semantic_label = "expensive simulator adaptive sampling and surrogate uncertainty calibration"
         network["gaps"][0]["description"] = semantic_label
         network["gaps"][0]["reason"] = (
             "Targeted evidence needed for claim:rank_correlation_fulltext"
@@ -2884,7 +2884,7 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
         provider_queries = " ".join(
             seed["query"] for seed in request["query_seeds"]
         ).lower()
-        self.assertIn("形貌反问题", provider_queries)
+        self.assertIn("expensive simulator", provider_queries)
         for forbidden in (
             "claim:",
             "rank_correlation_fulltext",

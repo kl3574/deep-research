@@ -159,3 +159,23 @@ Using `--base-url http://127.0.0.1:23119/api` is equivalent.
 
 Output is created exclusively with mode `0600`; an existing file is never
 overwritten.
+
+For a bounded semantic audit, add `--semantic-audit-output` with a distinct
+absolute private path. This creates a companion
+`ZoteroCorpusSemanticSnapshot/v1` from the same Zotero reads. The companion is
+bound to the inventory identity/state digests and contains parent `shortTitle`,
+exact note byte hashes, normalized heading/block projections, and semantic
+hashes. It never changes `ZoteroCorpusSnapshot/v1`, never feeds note content
+into paper identity, and never retains raw note HTML. Notes without a declared
+root schema are marked `legacy_unstructured`; their byte hash and normalized
+projection are audit evidence, not an inferred contract. The companion is
+private, exclusive, and mode `0600`.
+
+```bash
+python scripts/snapshot_zotero_collection.py \
+  --base-url http://127.0.0.1:23119 \
+  --group-id 1234567 \
+  --collection-key COLL0001 \
+  --output /private/staging/corpus-snapshot.json \
+  --semantic-audit-output /private/staging/corpus-semantic-snapshot.json
+```

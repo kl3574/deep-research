@@ -46,6 +46,53 @@ var ZoteroDeclarativeBridgeCore = (() => {
     return value;
   }
 
+  function resolutionFailure(code) {
+    const error = new Error("exact collection resolution failed");
+    error.code = code;
+    throw error;
+  }
+
+  function validateCollectionResolutionRequest(value) {
+    exactKeys(value, ["library_id", "collection_key"], "collection resolution request");
+    positiveInt(value.library_id, "collection resolution request.library_id");
+    key(value.collection_key, "collection resolution request.collection_key");
+    return value;
+  }
+
+  function resolveCollectionID(request, library, lookupResult) {
+    validateCollectionResolutionRequest(request);
+    if (!library || typeof library !== "object" || Array.isArray(library)) {
+      resolutionFailure("library_not_found");
+    }
+    const observedLibraryID = Number(library.libraryID || library.id);
+    if (observedLibraryID !== request.library_id) resolutionFailure("library_mismatch");
+    if (String(library.libraryType) !== "group") resolutionFailure("library_not_group");
+    const matches = lookupResult == null
+      ? []
+      : Array.isArray(lookupResult)
+        ? lookupResult
+        : [lookupResult];
+    if (matches.length === 0) resolutionFailure("collection_not_found");
+    if (matches.length !== 1) resolutionFailure("collection_ambiguous");
+    const collection = matches[0];
+    if (!collection || typeof collection !== "object" || collection.deleted) {
+      resolutionFailure("collection_not_found");
+    }
+    const collectionID = Number(collection.id);
+    if (
+      !Number.isInteger(collectionID)
+      || collectionID <= 0
+      || Number(collection.libraryID) !== request.library_id
+      || String(collection.key) !== request.collection_key
+    ) resolutionFailure("collection_mismatch");
+    return {
+      status: "resolved",
+      library_id: request.library_id,
+      collection_key: request.collection_key,
+      collection_id: collectionID,
+    };
+  }
+
   function sha(value, label) {
     assertion(typeof value === "string" && SHA_RE.test(value), `${label} is not a SHA-256 value`);
     return value;
@@ -313,7 +360,9 @@ var ZoteroDeclarativeBridgeCore = (() => {
     parentIdentity,
     planWrites,
     readbackMembershipSatisfied,
+    resolveCollectionID,
     stableStringify,
+    validateCollectionResolutionRequest,
     validateManifest,
   };
 })();

@@ -7,6 +7,7 @@ import copy
 import contextlib
 import hashlib
 import io
+import json
 import os
 import tempfile
 import threading
@@ -104,6 +105,37 @@ class BlockingCloseTricklingResponse(TricklingResponse):
 
 
 class SourceAcquisitionTests(unittest.TestCase):
+    def test_cli_reports_limit_error_without_mislabeling_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate_path = root / "candidate.json"
+            output_path = root / "result.json"
+            destination = root / "paper.pdf"
+            candidate_path.write_text(json.dumps(candidate()), encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()):
+                status = acquisition.main(
+                    [
+                        "plan",
+                        "--candidate",
+                        str(candidate_path),
+                        "--destination",
+                        str(destination),
+                        "--output",
+                        str(output_path),
+                        "--generated-at",
+                        FIXED_TIME,
+                        "--redirect-limit",
+                        str(acquisition.HARD_MAX_REDIRECT_LIMIT + 1),
+                    ]
+                )
+            result = json.loads(output_path.read_text(encoding="utf-8"))
+        self.assertEqual(1, status)
+        self.assertEqual("failed", result["status"])
+        self.assertIsNone(result["candidate"])
+        self.assertIn("Acquisition limits are invalid", result["checks"][0]["detail"])
+        self.assertIn("redirect", result["checks"][0]["detail"].lower())
+        self.assertEqual("invalid_limits", result["failures"][0]["code"])
+
     def test_plan_is_offline_and_query_free(self) -> None:
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(
             acquisition.socket, "getaddrinfo", side_effect=AssertionError("network called")
