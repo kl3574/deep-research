@@ -51,6 +51,32 @@ class ChineseDecisionShortTitleTests(unittest.TestCase):
         with self.assertRaisesRegex(bridge.BridgeError, "bibliography-title"):
             self.validate(value, source=value)
 
+    def test_accepts_causal_warning_equivalence_and_determination(self) -> None:
+        valid = [
+            "采样分布漂移：会改变变量重要性排序",
+            "相关输入忽略：会破坏方差分解解释",
+            "代理误差累积：会导致交互项排序反转",
+            "输出尺度变换：会影响敏感度量结论",
+            "噪声传播分析：可能扭曲变量重要性排序",
+            "度量解释边界：相关性不等同于敏感性",
+            "预算配置分析：复制次数决定排序稳定性",
+        ]
+        for value in valid:
+            with self.subTest(value=value):
+                self.validate(value)
+
+    def test_rejects_causal_words_used_as_descriptive_nouns(self) -> None:
+        invalid = [
+            "因果研究：影响因素分析",
+            "算法综述：决定理论方法",
+            "模型综述：改变检测方法",
+            "误差研究：破坏机制分析",
+        ]
+        for value in invalid:
+            with self.subTest(value=value):
+                with self.assertRaises(bridge.BridgeError):
+                    self.validate(value)
+
 
 if __name__ == "__main__":
     unittest.main()

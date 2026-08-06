@@ -4,7 +4,7 @@
       "updates": [
         {
           "version": "0.1.7",
-          "update_link": "https://github.com/kl3574/deep-research/releases/download/v0.6.5/zotero-declarative-bridge-0.1.7.xpi",
+          "update_link": "https://github.com/kl3574/deep-research/releases/download/v0.6.6/zotero-declarative-bridge-0.1.7.xpi",
           "update_hash": "sha256:31c803d748dc8a1add4c8703f1ad958ef30e07114ce85d113e46e98f94e2c674",
           "applications": {
             "zotero": {
