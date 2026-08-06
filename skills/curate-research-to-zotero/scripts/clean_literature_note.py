@@ -207,6 +207,84 @@ class CleanNoteParser(HTMLParser):
             self.errors.append("CN-02: text occurs outside the root element")
 
 
+OPERATIONAL_SENTINEL_RE = re.compile(
+    r"(?i)(?<![\w-])(?:"
+    r"ShortTitleReview/v[A-Za-z0-9._+-]+|"
+    r"old_note_or_explicit_missing_disclosure|"
+    r"preserved_old_locator_or_nonfull_disclosure|"
+    r"bounded_classification_boilerplate"
+    r")(?![\w-])"
+)
+METADATA_FIELD_NAMES = (
+    r"applicability|decision|predicate|hash|manifest|transaction|sync|audit|"
+    r"validator|status"
+)
+METADATA_HTML_ATTRIBUTE_RE = re.compile(
+    rf"(?is)<[^>]*\s(?:data[-_:])?(?:{METADATA_FIELD_NAMES})\s*="
+)
+METADATA_STRUCTURED_FIELD_RE = re.compile(
+    rf"(?im)(?:^|[{{\[,]\s*)[\"']?(?:{METADATA_FIELD_NAMES})[\"']?\s*(?::|=)"
+)
+METADATA_LINE_FIELD_RE = re.compile(
+    rf"(?im)^\s*(?:[-*]\s*)?[\"']?(?:{METADATA_FIELD_NAMES})[\"']?"
+    r"\s*(?::|=)\s*\S"
+)
+HTML_BLOCK_BREAK_RE = re.compile(
+    r"(?is)</?(?:p|div|li|tr|td|th|h[1-6]|pre|blockquote|br)\b[^>]*>"
+)
+HTML_MATH_NODE_RE = re.compile(
+    r"(?is)<(span|pre)\b[^>]*\bclass=([\"'])math\2[^>]*>.*?</\1\s*>"
+)
+HTML_TAG_RE = re.compile(r"(?s)<[^>]+>")
+HTML_HEADING_RE = re.compile(r"(?is)<h[1-6]\b[^>]*>(.*?)</h[1-6]\s*>")
+OPERATIONAL_HEADING_RE = re.compile(
+    r"(?i)(?:"
+    r"(?:sync|audit|validator|transaction|review|workflow)\s+status|"
+    r"(?:transaction|artifact|sync)\s+manifest|"
+    r"(?:content|note|artifact)\s+hash"
+    r")"
+)
+
+
+def _operational_metadata_errors(note_html: str) -> list[str]:
+    """Reject workflow state while leaving ordinary scientific prose untouched."""
+    decoded = html.unescape(note_html)
+    errors: list[str] = []
+    if OPERATIONAL_SENTINEL_RE.search(decoded):
+        errors.append(
+            "operational metadata/template sentinel is not allowed in a clean "
+            "literature note; store workflow state in a sidecar"
+        )
+    if METADATA_HTML_ATTRIBUTE_RE.search(decoded):
+        errors.append(
+            "operational metadata HTML attribute is not allowed in a clean "
+            "literature note; store workflow state in a sidecar"
+        )
+
+    visible = HTML_MATH_NODE_RE.sub("", decoded)
+    visible = HTML_BLOCK_BREAK_RE.sub("\n", visible)
+    visible = HTML_TAG_RE.sub("", visible)
+    if METADATA_STRUCTURED_FIELD_RE.search(visible) or METADATA_LINE_FIELD_RE.search(
+        visible
+    ):
+        errors.append(
+            "operational metadata/schema field is not allowed in a clean "
+            "literature note; store workflow state in a sidecar"
+        )
+
+    for heading_html in HTML_HEADING_RE.findall(decoded):
+        heading = HTML_TAG_RE.sub("", heading_html).strip()
+        if heading in {"applicability", "decision", "predicate"} or (
+            OPERATIONAL_HEADING_RE.fullmatch(heading) is not None
+        ):
+            errors.append(
+                "operational metadata/schema heading is not allowed in a clean "
+                "literature note; store workflow state in a sidecar"
+            )
+            break
+    return errors
+
+
 def _latex_payload_error(payload: str) -> str | None:
     if not payload or payload != payload.strip():
         return "formula payload must be non-empty and storage-trimmed"
@@ -328,6 +406,7 @@ def validate_clean_note_html(
     warnings: list[str] = []
     if not isinstance(raw, str) or not raw:
         return ["CN-01: note HTML must be a non-empty string"], warnings, {}
+    errors.extend(_operational_metadata_errors(raw))
     if raw != raw.strip():
         errors.append("CN-01: note HTML must be storage-trimmed")
 

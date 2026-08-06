@@ -88,3 +88,20 @@ the lines express separate steps. This is a readability strategy, not a static
 rendering proof: character count, source width, or byte length cannot predict
 KaTeX layout in Zotero's fixed pane. Open representative notes in the actual UI
 and check line breaks, clipping, horizontal overflow, and KaTeX errors.
+
+## Literature-content boundary
+
+A synchronized literature note contains only material about the publication:
+its question, method, assumptions, equations, evidence, limitations, and
+literature-facing interpretation. Review decisions, applicability predicates,
+transaction state, hashes, manifests, synchronization status, audit output,
+validator output, preservation disclosures, and template declarations are not
+literature content. Store all such status data in the run ledger or another
+auditable sidecar, never in the note body.
+
+The validator is deliberately structural rather than a keyword blacklist. It
+rejects exact workflow sentinels, metadata-like HTML attributes, structured
+keys, field labels at the start of a block, and explicit workflow headings.
+Scientific prose may still discuss classification, the status of a system, a
+hash algorithm, predicates, transactions, synchronization, or validators when
+those words are part of normal sentences rather than operational fields.

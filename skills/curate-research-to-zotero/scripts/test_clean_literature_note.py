@@ -107,6 +107,50 @@ class CleanLiteratureNoteTests(unittest.TestCase):
         )
         self.assertEqual(errors, [])
 
+    def test_rejects_operational_metadata_and_template_declarations(self) -> None:
+        polluted_fragments = [
+            "<p>ShortTitleReview/v4.2-rc1</p>",
+            "<p>applicability: selected-note-only</p>",
+            "<p><strong>decision</strong>: apply</p>",
+            "<p>predicate = exact_collection_match</p>",
+            "<p>old_note_or_explicit_missing_disclosure</p>",
+            "<p>preserved_old_locator_or_nonfull_disclosure</p>",
+            "<p>bounded_classification_boilerplate</p>",
+            "<p>hash: sha256:0123456789abcdef</p>",
+            "<p>manifest: reviewed-items.json</p>",
+            "<p>transaction: replace-child-note</p>",
+            "<p>sync: pending</p>",
+            "<p>audit: passed</p>",
+            "<p>validator: clean-note-v2</p>",
+            "<p>status: ready</p>",
+            '<p data-status="ready">A result paragraph.</p>',
+            '<p>{"manifest": "reviewed-items.json"}</p>',
+            "<h2>Sync status</h2><p>ready</p>",
+        ]
+        for fragment in polluted_fragments:
+            with self.subTest(fragment=fragment):
+                errors, _, _ = clean.validate_clean_note_html(note(fragment))
+                self.assertTrue(
+                    any("operational metadata" in error for error in errors),
+                    errors,
+                )
+
+    def test_allows_scientific_uses_of_metadata_vocabulary(self) -> None:
+        scientific_prose = (
+            "<p>The classification of regimes follows the measured Damkohler "
+            "number.</p>"
+            "<p>The stability status of the fixed point changes at the "
+            "bifurcation.</p>"
+            "<p>A locality-sensitive hash algorithm clusters related state "
+            "vectors.</p>"
+            "<p>The predicate is evaluated inside the theorem, while the "
+            "validator function denotes a mathematical map.</p>"
+            "<p>The transaction rate and synchronization error are reported as "
+            "physical observables.</p>"
+        )
+        errors, _, _ = clean.validate_clean_note_html(note(scientific_prose))
+        self.assertEqual(errors, [])
+
     def test_rejects_prose_dominated_math_payloads(self) -> None:
         invalid_payloads = [
             "输入变量必须相互独立，否则结果不成立。",
