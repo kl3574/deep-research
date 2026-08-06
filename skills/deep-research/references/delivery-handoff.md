@@ -303,3 +303,11 @@ Validate with:
 ```bash
 python scripts/validate_research_handoff.py /private/run/handoff.json
 ```
+
+## Clean Zotero note handoff
+
+Keep formula order and raw LaTeX, evidence locators, and content-relevant
+limitations in the semantic handoff. Keep hashes, paths, timestamps, run and
+transaction state in private state artifacts. Route note HTML projection and
+validation to `$curate-research-to-zotero`, then route the reviewed mutation to
+`$zotero-declarative-bridge`; do not duplicate either contract here.

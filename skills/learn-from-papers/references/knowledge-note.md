@@ -128,3 +128,11 @@ one representation as the other.
 
 The curation workflow must verify that the HTML note is attached to the intended
 parent item and read back its content or a stable content digest when supported.
+
+## Zotero projection boundary
+
+Produce source-related semantic content, equations as raw LaTeX, evidence
+locators, and natural-language limitations. Do not emit Zotero HTML or embed
+hashes, paths, timestamps, transaction state, or tool state in prose. Delegate
+HTML escaping, math-node projection, and clean-note validation to
+`$curate-research-to-zotero`'s `ZoteroCleanLiteratureNote/v1` contract.

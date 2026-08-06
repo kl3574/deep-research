@@ -122,3 +122,10 @@ manifests from public output.
 
 [knowledge-network.md](references/knowledge-network.md) defines snapshot
 semantics; [research-basis.md](references/research-basis.md) is maintenance-only.
+
+## Clean-note orchestration
+
+When delivery includes Zotero literature notes, keep operational state outside
+the prose, route semantic and raw-LaTeX content through `$learn-from-papers`,
+HTML projection through `$curate-research-to-zotero`, and only reviewed
+mutations through `$zotero-declarative-bridge`.

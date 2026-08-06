@@ -81,3 +81,10 @@ When an explicit semantic audit needs parent `shortTitle` and note content
 bindings, use the opt-in `--semantic-audit-output` companion projection. Keep it
 private; it stores normalized note semantics and hashes, while the default
 inventory intentionally continues to omit note bodies and `shortTitle`.
+
+## Clean literature-note boundary
+
+For every newly authored or substantively rewritten literature note, read
+[`references/clean-literature-note.md`](references/clean-literature-note.md) and
+run `scripts/clean_literature_note.py validate` before staging. Keep operational
+state in the private batch or sidecar, never in synchronized literature HTML.

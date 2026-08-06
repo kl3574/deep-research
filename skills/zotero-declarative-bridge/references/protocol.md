@@ -266,3 +266,21 @@ matched the bound preflight baseline, not evidence that no write was attempted.
 
 All manifests and receipts contain private Zotero state. Keep them outside the
 public repository in a user-only directory.
+
+## Reviewed literature-note prerequisite
+
+The bridge does not author or reinterpret literature notes. For
+`ZoteroReviewedMutationBatch/v1`, compilation fail-closes unless `new_html`
+passes the sole content authority in
+`$curate-research-to-zotero/scripts/clean_literature_note.py`. Workflow state
+remains in the reviewed batch; only clean literature HTML reaches `setNote()`.
+Generic declarative note transactions retain their narrower execution contract.
+
+## Reviewed shortTitle preservation
+
+`compile-reviewed-batch` rejects `expected_old_value == new_short_title` by
+default. Use `--allow-unchanged-short-titles` only when a reviewed entry must
+prove that an already-correct decision-oriented short title was preserved while
+its child note changes. The compiler still validates the short-title policy,
+retains the no-op operation for preview/readback, requires a changing note in
+the same entry, and rejects every all-no-op entry.

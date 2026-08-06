@@ -70,3 +70,14 @@ policy requires `适用场景：结论/警示` semantics (or the documented Engl
 equivalent) and rejects a simple truncation of the bibliography title. The
 policy is a deterministic structural gate, not a substitute for human review of
 the scientific conclusion.
+
+## Literature-note authority
+
+Execute reviewed literature HTML but do not author it. Install
+`$curate-research-to-zotero` alongside this skill when compiling reviewed
+literature batches; its clean-note validator is the sole content authority.
+
+For a reviewed note update that intentionally preserves an already-correct
+short title, pass `--allow-unchanged-short-titles`. Never use it to admit an
+all-no-op entry; compilation remains fail closed unless the same entry changes
+the note.

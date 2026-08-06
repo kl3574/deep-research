@@ -4,7 +4,9 @@ This is the Zotero projection of the canonical paper card and claim ledger from
 `$learn-from-papers`. It is a retrieval surface, not an independent source of
 truth.
 
-This document describes the legacy structured-note layout. A reviewed
+For new notes, use the forward
+[`ZoteroCleanLiteratureNote/v1`](clean-literature-note.md) contract. The layout
+below is retained only for legacy structured-note migration. A reviewed
 `PaperUnderstandingNoteInput/v1` uses the stricter deterministic
 [`PaperKnowledgeNote/v2`](paper-knowledge-note-v2.md) pyramid projection. The
 shared validator dispatches by `data-note-contract="PaperKnowledgeNote/v2"`.
@@ -110,7 +112,9 @@ For combined main-text/supplement files, use dual locators such as:
 
 - Explanatory prose is Chinese unless the user requests another language.
 - Preserve original terminology, notation, units, and version labels.
-- Inline mathematics uses `$...$`.
+- Legacy inline mathematics must still use the canonical
+  `<span class="math">$...$</span>` node; bare `$...$` text is invalid for new
+  or migrated notes.
 - Display mathematics uses:
 
 ```html

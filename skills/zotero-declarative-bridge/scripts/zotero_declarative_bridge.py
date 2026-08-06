@@ -8,6 +8,7 @@ import copy
 import datetime as dt
 import hashlib
 import hmac
+import importlib.util
 import json
 import os
 import re
@@ -72,6 +73,34 @@ class BridgeResponseError(BridgeError):
         self.error_code = response["error"]["code"]
         self.commit_state = response["error"]["commit_state"]
         super().__init__("bridge returned a structured error response")
+
+
+def validate_clean_literature_note(value: str, label: str) -> dict[str, object]:
+    """Load the curation-owned validator for reviewed literature batches."""
+    validator_path = (
+        Path(__file__).resolve().parents[2]
+        / "curate-research-to-zotero"
+        / "scripts"
+        / "clean_literature_note.py"
+    )
+    if not validator_path.is_file():
+        raise BridgeError(
+            f"{label} cannot be validated: install curate-research-to-zotero"
+        )
+    spec = importlib.util.spec_from_file_location(
+        "deep_research_clean_literature_note_validator",
+        validator_path,
+    )
+    if spec is None or spec.loader is None:
+        raise BridgeError(f"{label} clean-note validator cannot be loaded")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    errors, _warnings, summary = module.validate_clean_note_html(value)
+    if errors:
+        raise BridgeError(
+            f"{label} violates clean-note contract: {errors[0]}"
+        )
+    return summary
 
 
 def canonical_bytes(value: Any) -> bytes:
@@ -1136,6 +1165,7 @@ def compile_reviewed_batch(
     short_title_policy: str | None,
     short_title_language: str | None,
     base_url: str,
+    allow_unchanged_short_titles: bool = False,
 ) -> dict[str, Any]:
     if source_hash_contract != REVIEWED_SOURCE_HASH_CONTRACT:
         raise BridgeError(
@@ -1336,6 +1366,9 @@ def compile_reviewed_batch(
 
         operations: list[dict[str, Any]] = []
         observed_notes: list[dict[str, Any]] | None = None
+        entry_has_write = False
+        has_changing_note = False
+        unchanged_short_title = False
         for operation_index, raw_operation in enumerate(raw_operations):
             operation_label = f"{label}.operations[{operation_index}]"
             if raw_operation["type"] == "ensure_parent_short_title":
@@ -1378,8 +1411,11 @@ def compile_reviewed_batch(
                 )
                 if str(data.get("shortTitle", "")) != expected_old:
                     raise BridgeError(f"reviewed parent {parent_key} shortTitle old-value drift")
-                if expected_old == reviewed_new:
-                    raise BridgeError(f"reviewed parent {parent_key} shortTitle is unchanged")
+                unchanged_short_title = expected_old == reviewed_new
+                if unchanged_short_title and not allow_unchanged_short_titles:
+                    raise BridgeError(
+                        f"reviewed parent {parent_key} shortTitle is unchanged"
+                    )
                 validate_research_short_title(
                     reviewed_new,
                     reviewed_title,
@@ -1396,6 +1432,7 @@ def compile_reviewed_batch(
                         "new_short_title": reviewed_new,
                     }
                 )
+                entry_has_write = entry_has_write or not unchanged_short_title
             else:
                 operation = exact_keys(
                     raw_operation,
@@ -1411,6 +1448,10 @@ def compile_reviewed_batch(
                     operation_label,
                 )
                 new_html = text(operation["new_html"], f"{operation_label}.new_html")
+                validate_clean_literature_note(
+                    new_html,
+                    f"{operation_label}.new_html",
+                )
                 new_sha = verify_reviewed_utf8_hash(
                     new_html,
                     operation["new_sha256"],
@@ -1442,6 +1483,7 @@ def compile_reviewed_batch(
                         raise BridgeError(f"{operation_label} create baseline is inconsistent")
                     expected_note_version = None
                     expected_old_sha = None
+                    note_changes = True
                 else:
                     note_key_value = item_key(note_key_value, f"{operation_label}.note_key")
                     expected_note_version = positive_int(
@@ -1462,6 +1504,9 @@ def compile_reviewed_batch(
                     ).hexdigest()
                     if observed_old_sha != expected_old_sha:
                         raise BridgeError(f"reviewed note {note_key_value} old-content hash drift")
+                    note_changes = new_sha != expected_old_sha
+                has_changing_note = has_changing_note or note_changes
+                entry_has_write = entry_has_write or note_changes
                 operations.append(
                     {
                         "type": "ensure_child_note",
@@ -1473,6 +1518,12 @@ def compile_reviewed_batch(
                         "new_sha256": new_sha,
                     }
                 )
+        if not entry_has_write:
+            raise BridgeError(f"{label}.operations are all no-op")
+        if unchanged_short_title and not has_changing_note:
+            raise BridgeError(
+                f"{label} unchanged shortTitle requires a changing note mutation"
+            )
         entries.append({"parent": parent, "operations": operations})
 
     if reviewed_parent_keys != sorted(reviewed_parent_keys) or len(
@@ -1661,6 +1712,13 @@ def parse_args() -> argparse.Namespace:
         "--short-title-policy", choices=[DECISION_SHORT_TITLE_POLICY]
     )
     reviewed_batch.add_argument("--short-title-language")
+    reviewed_batch.add_argument(
+        "--allow-unchanged-short-titles",
+        action="store_true",
+        help=(
+            "permit reviewed shortTitle preservation only beside a changing note"
+        ),
+    )
     reviewed_batch.add_argument("--base-url", default=BASE_URL)
 
     probe = sub.add_parser("probe")
@@ -1721,6 +1779,7 @@ def main() -> int:
                 source_hash_contract=args.source_hash_contract,
                 short_title_policy=args.short_title_policy,
                 short_title_language=args.short_title_language,
+                allow_unchanged_short_titles=args.allow_unchanged_short_titles,
                 base_url=args.base_url,
             )
             write_private_json(args.output, result)

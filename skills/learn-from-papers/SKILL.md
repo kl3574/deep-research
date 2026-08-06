@@ -119,3 +119,9 @@ claim-level confidence, and next highest-information check. Use
 [paper-routes.md](references/paper-routes.md) only for domain adapters.
 
 [research-basis.md](references/research-basis.md) is maintenance-only.
+
+## Clean-note handoff
+
+When a result will become a Zotero note, hand off raw LaTeX, ordered formulas,
+source locators, and content-relevant limitations. Keep workflow metadata in
+the dossier or sidecar and route HTML projection to `$curate-research-to-zotero`.

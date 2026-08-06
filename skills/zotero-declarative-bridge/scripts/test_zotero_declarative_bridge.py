@@ -76,10 +76,14 @@ def unsigned_manifest() -> dict:
 
 
 def reviewed_batch_fixture(old_note_html: str = "<h1>Old</h1><p>Baseline</p>") -> dict:
-    new_note_html = "<h1>检索主题</h1><p>审阅后的通用研究笔记。</p>"
+    new_note_html = (
+        '<div data-schema-version="9"><h1>高维代理模型分析</h1>'
+        "<p>适用场景：先筛选，再校准总效应。局限：仅由摘要支持。</p>"
+        '<p>指标 <span class="math">$S_i=V_i/V$</span> 用于排序。</p></div>'
+    )
     new_short_title = "高维代理模型分析：应先筛选再校准总效应"
     parent = {
-        "key": "PAPER001",
+        "key": "PARENT01",
         "version": 7,
         "title": "A generic sensitivity study",
         "doi": "10.1/generic",
@@ -91,7 +95,7 @@ def reviewed_batch_fixture(old_note_html: str = "<h1>Old</h1><p>Baseline</p>") -
         "operations": [
             {
                 "type": "ensure_parent_short_title",
-                "parent_key": "PAPER001",
+                "parent_key": "PARENT01",
                 "expected_parent_version": 7,
                 "expected_old_value": "Old",
                 "new_short_title": new_short_title,
@@ -799,7 +803,7 @@ class BridgeTests(unittest.TestCase):
         record = {
             "version": 7,
             "data": {
-                "key": "PAPER001",
+                "key": "PARENT01",
                 "version": 7,
                 "itemType": "journalArticle",
                 "title": "A generic sensitivity study",
@@ -873,7 +877,7 @@ class BridgeTests(unittest.TestCase):
         record = {
             "version": 7,
             "data": {
-                "key": "PAPER001",
+                "key": "PARENT01",
                 "version": 7,
                 "itemType": "journalArticle",
                 "title": "A generic sensitivity study",
