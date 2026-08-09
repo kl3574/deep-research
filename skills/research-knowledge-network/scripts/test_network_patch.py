@@ -1032,12 +1032,16 @@ class NetworkPatchTest(unittest.TestCase):
         before = {path.name: path.read_bytes() for path in live_files}
         original_replace = os.replace
         call_count = 0
+        live_replace_count = 0
+        live_targets = set(live_files)
 
         def fail_after_first_live_replace(source, target):
-            nonlocal call_count
+            nonlocal call_count, live_replace_count
             call_count += 1
-            if call_count == 3:
-                raise OSError("injected transaction replace failure")
+            if Path(target) in live_targets:
+                live_replace_count += 1
+                if live_replace_count == 2:
+                    raise OSError("injected transaction replace failure")
             return original_replace(source, target)
 
         with mock.patch.object(
@@ -1059,6 +1063,7 @@ class NetworkPatchTest(unittest.TestCase):
         self.assertEqual(failed[0], 1)
         self.assertIn("injected transaction replace failure", failed[2])
         self.assertGreaterEqual(call_count, 4)
+        self.assertGreaterEqual(live_replace_count, 3)
         after = {path.name: path.read_bytes() for path in live_files}
         self.assertEqual(after, before)
         self.assertFalse((network_dir / ".transaction.json").exists())

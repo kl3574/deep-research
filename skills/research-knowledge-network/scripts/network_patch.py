@@ -1771,15 +1771,13 @@ def command_apply(args: argparse.Namespace) -> int:  # noqa: C901
             }
             if not args.dry_run:
                 contents = {
-                    paths.state: staging_paths.state.read_text(encoding="utf-8"),
-                    **{
-                        paths.ledger(name): staging_paths.ledger(name).read_text(
-                            encoding="utf-8"
-                        )
-                        for name in kn.LEDGER_NAMES
-                    },
+                    paths.state: staging_paths.state.read_text(encoding="utf-8")
                 }
-                kn._replace_files_transactionally(contents)
+                ledger_updates = {
+                    paths.ledger(name): (records[name], staged_records[name])
+                    for name in kn.LEDGER_NAMES
+                }
+                kn._replace_files_transactionally(contents, ledger_updates)
     print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
     return 0
 

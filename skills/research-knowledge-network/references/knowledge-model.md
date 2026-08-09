@@ -17,6 +17,16 @@ This skill models a local, auditable graph with explicit provenance boundaries:
 ## Ledger invariants
 
 - Files are append-only JSONL ledgers with one JSON object per line.
+- Append-only is a physical byte contract, not only a logical record contract:
+  every successful mutation preserves the complete prior file byte-for-byte as
+  the new file prefix and appends only canonical JSONL rows. Before staging, the
+  writer requires a terminating newline (unless the ledger is empty), parses
+  the exact prior bytes, and matches those records to the caller's locked prior
+  state. It never canonicalizes, reorders, or rewrites historical lines.
+- Ledger appends use a unique same-directory temporary file, explicit mode
+  `0600`, file and directory `fsync`, and `os.replace`. Empty suffixes are true
+  no-ops. Handled failures retain the old bytes and remove temporary files; a
+  multi-file prepared journal still blocks ambiguous crash recovery.
 - Records must carry:
   - `schema_version`, `network_id`, `record_id`, `sequence`, `recorded_at`.
 - IDs are collision-safe, deterministic, and must not auto-merge.

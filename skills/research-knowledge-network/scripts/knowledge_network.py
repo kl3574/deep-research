@@ -675,6 +675,10 @@ def _jsonl_text(rows: list[dict[str, Any]]) -> str:
 
 
 def _restore_file(path: Path, content: bytes) -> None:
+    _restore_file_with_mode(path, content, 0o600)
+
+
+def _restore_file_with_mode(path: Path, content: bytes, mode: int) -> None:
     temp_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -682,6 +686,7 @@ def _restore_file(path: Path, content: bytes) -> None:
         ) as handle:
             temp_path = Path(handle.name)
             handle.write(content)
+            os.fchmod(handle.fileno(), mode)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_path, path)
@@ -691,12 +696,18 @@ def _restore_file(path: Path, content: bytes) -> None:
 
 
 def _rollback_replaced_files(
-    replaced: list[Path], originals: dict[Path, bytes]
+    replaced: list[Path],
+    originals: dict[Path, bytes],
+    original_modes: dict[Path, int],
 ) -> bool:
     rollback_failed = False
     for path in reversed(replaced):
         try:
-            _restore_file(path, originals[path])
+            _restore_file_with_mode(
+                path,
+                originals[path],
+                original_modes[path],
+            )
         except OSError:
             rollback_failed = True
     return rollback_failed
@@ -710,31 +721,132 @@ def _fsync_directory(path: Path) -> None:
         os.close(directory_fd)
 
 
-def _replace_files_transactionally(contents: dict[Path, str]) -> None:
-    """Stage files and roll back handled failures under the caller's lock."""
+def _parse_jsonl_bytes(path: Path, content: bytes) -> list[dict[str, Any]]:
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"{path.name}: ledger is not valid UTF-8") from exc
+    records: list[dict[str, Any]] = []
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            row = json.loads(stripped)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"{path.name}: invalid JSON at line {line_number}"
+            ) from exc
+        if not isinstance(row, dict):
+            raise ValueError(f"{path.name}: line {line_number} is not an object")
+        records.append(row)
+    return records
+
+
+def _replace_files_transactionally(
+    contents: dict[Path, str],
+    ledger_updates: dict[
+        Path,
+        tuple[list[dict[str, Any]], list[dict[str, Any]]],
+    ]
+    | None = None,
+) -> None:
+    """Commit ordinary replacements and physical-prefix ledger appends.
+
+    Each ledger update binds the records parsed before staging to the complete
+    intended record list. Existing bytes are copied verbatim and only the
+    canonical suffix is appended. Handled failures restore prior bytes and
+    modes under the caller's lock.
+    """
+    ledger_updates = ledger_updates or {}
+    ledger_filenames = {f"{name}.jsonl" for name in LEDGER_NAMES}
+    duplicate_paths = set(contents) & set(ledger_updates)
+    if duplicate_paths:
+        raise ValueError("transaction path cannot be both replaced and appended")
+    ordinary_ledger_paths = [
+        path for path in contents if path.name in ledger_filenames
+    ]
+    if ordinary_ledger_paths:
+        raise ValueError(
+            "append-only ledgers require an expected-prior ledger update"
+        )
+    invalid_ledger_paths = [
+        path for path in ledger_updates if path.name not in ledger_filenames
+    ]
+    if invalid_ledger_paths:
+        raise ValueError("ledger update target is not a known append-only ledger")
+
+    planned: dict[Path, tuple[bytes, bytes]] = {}
+    original_modes: dict[Path, int] = {}
+    for path, content in contents.items():
+        if path.is_symlink():
+            raise ValueError(f"transaction target is symbolic link: {path}")
+        if not path.is_file():
+            raise ValueError(f"transaction target is not a file: {path}")
+        before = path.read_bytes()
+        after = content.encode("utf-8")
+        if before != after:
+            planned[path] = (before, after)
+            original_modes[path] = stat.S_IMODE(path.stat().st_mode)
+
+    for path, (expected_prior_records, intended_records) in ledger_updates.items():
+        if path.is_symlink():
+            raise ValueError(f"transaction target is symbolic link: {path}")
+        if not path.is_file():
+            raise ValueError(f"transaction target is not a file: {path}")
+        if not all(isinstance(row, dict) for row in expected_prior_records):
+            raise ValueError(f"{path.name}: expected prior records must be objects")
+        if not all(isinstance(row, dict) for row in intended_records):
+            raise ValueError(f"{path.name}: intended records must be objects")
+        prior_count = len(expected_prior_records)
+        if (
+            len(intended_records) < prior_count
+            or intended_records[:prior_count] != expected_prior_records
+        ):
+            raise ValueError(
+                f"{path.name}: intended records do not preserve expected prior records"
+            )
+        appended_records = intended_records[prior_count:]
+        if not appended_records:
+            continue
+        before = path.read_bytes()
+        if before and not before.endswith(b"\n"):
+            raise ValueError(
+                f"{path.name}: append-only ledger must end with a newline"
+            )
+        observed_prior_records = _parse_jsonl_bytes(path, before)
+        if observed_prior_records != expected_prior_records:
+            raise ValueError(
+                f"{path.name}: current records differ from expected prior records"
+            )
+        suffix = _jsonl_text(appended_records).encode("utf-8")
+        planned[path] = (before, before + suffix)
+        original_modes[path] = stat.S_IMODE(path.stat().st_mode)
+
+    if not planned:
+        return
+    parents = {path.parent for path in planned}
+    if len(parents) != 1:
+        raise ValueError("transaction targets must share one directory")
+
     staged: dict[Path, Path] = {}
-    originals: dict[Path, bytes] = {}
+    originals = {path: before for path, (before, _) in planned.items()}
     replaced: list[Path] = []
-    first_path = next(iter(contents))
+    first_path = next(iter(planned))
     journal_path = first_path.parent / ".transaction.json"
     if journal_path.exists() or journal_path.is_symlink():
         raise ValueError("incomplete transaction journal requires recovery")
     try:
-        for path, content in contents.items():
-            if path.is_symlink():
-                raise ValueError(f"transaction target is symbolic link: {path}")
-            if not path.is_file():
-                raise ValueError(f"transaction target is not a file: {path}")
-            originals[path] = path.read_bytes()
+        for path, (_, after) in planned.items():
             with tempfile.NamedTemporaryFile(
-                "w",
+                "wb",
                 dir=path.parent,
                 prefix=f".{path.name}.stage.",
-                encoding="utf-8",
                 delete=False,
             ) as handle:
                 staged[path] = Path(handle.name)
-                handle.write(content)
+                handle.write(after)
+                os.fchmod(handle.fileno(), 0o600)
                 handle.flush()
                 os.fsync(handle.fileno())
 
@@ -747,24 +859,26 @@ def _replace_files_transactionally(contents: dict[Path, str]) -> None:
                     {
                         "name": path.name,
                         "before_sha256": hashlib.sha256(originals[path]).hexdigest(),
-                        "after_sha256": hashlib.sha256(
-                            contents[path].encode("utf-8")
-                        ).hexdigest(),
+                        "after_sha256": hashlib.sha256(planned[path][1]).hexdigest(),
                     }
-                    for path in contents
+                    for path in planned
                 ],
             },
         )
         _fsync_directory(first_path.parent)
 
-        for path in contents:
+        for path in planned:
             os.replace(staged[path], path)
             replaced.append(path)
         _fsync_directory(first_path.parent)
         journal_path.unlink()
         _fsync_directory(first_path.parent)
     except Exception:
-        rollback_failed = _rollback_replaced_files(replaced, originals)
+        rollback_failed = _rollback_replaced_files(
+            replaced,
+            originals,
+            original_modes,
+        )
         if not rollback_failed:
             _fsync_directory(first_path.parent)
             journal_path.unlink(missing_ok=True)
@@ -775,12 +889,20 @@ def _replace_files_transactionally(contents: dict[Path, str]) -> None:
             temp_path.unlink(missing_ok=True)
 
 
-def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
-    line = json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n"
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(line)
-        handle.flush()
-        os.fsync(handle.fileno())
+def _append_jsonl(
+    path: Path,
+    payload: dict[str, Any],
+    expected_prior_records: list[dict[str, Any]],
+) -> None:
+    _replace_files_transactionally(
+        {},
+        {
+            path: (
+                expected_prior_records,
+                [*expected_prior_records, payload],
+            )
+        },
+    )
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -893,7 +1015,7 @@ def _append_candidate(
         "recorded_at": _utcnow(),
         **payload,
     }
-    _append_jsonl(target, row)
+    _append_jsonl(target, row, records[ledger])
     records[ledger].append(row)
     return True
 
@@ -915,7 +1037,7 @@ def _append_event(
         "event_type": event_type,
         **payload,
     }
-    _append_jsonl(paths.ledger("events"), event)
+    _append_jsonl(paths.ledger("events"), event, records["events"])
     records["events"].append(event)
 
 
@@ -934,7 +1056,7 @@ def _append_source_row(
         "recorded_at": _utcnow(),
         **payload,
     }
-    _append_jsonl(paths.ledger("sources"), row)
+    _append_jsonl(paths.ledger("sources"), row, records["sources"])
     records["sources"].append(row)
     return True
 
@@ -3010,16 +3132,20 @@ def command_ingest_zotero_snapshot(args: argparse.Namespace) -> int:  # noqa: C9
                 },
             )
 
-        transaction_files = {
-            paths.ledger("sources"): _jsonl_text(staged_records["sources"]),
-            paths.state: _json_text(staged_state),
+        transaction_files = {paths.state: _json_text(staged_state)}
+        ledger_updates = {
+            paths.ledger("sources"): (
+                records["sources"],
+                staged_records["sources"],
+            )
         }
         if allow_refresh:
-            transaction_files[paths.ledger("events")] = _jsonl_text(
-                staged_records["events"]
+            ledger_updates[paths.ledger("events")] = (
+                records["events"],
+                staged_records["events"],
             )
         try:
-            _replace_files_transactionally(transaction_files)
+            _replace_files_transactionally(transaction_files, ledger_updates)
         except (OSError, ValueError) as exc:
             print(f"snapshot ingest transaction failed: {exc}", file=sys.stderr)
             return 1
@@ -3261,13 +3387,22 @@ def command_derive_gaps(args: argparse.Namespace) -> int:
             for error in staged_errors:
                 print(f"derive staged state invalid: {error}", file=sys.stderr)
             return 1
-        contents: dict[Path, str] = {}
+        ledger_updates: dict[
+            Path,
+            tuple[list[dict[str, Any]], list[dict[str, Any]]],
+        ] = {}
         if new_payloads:
-            contents[paths.ledger("gaps")] = _jsonl_text(staged_records["gaps"])
+            ledger_updates[paths.ledger("gaps")] = (
+                records["gaps"],
+                staged_records["gaps"],
+            )
         if event_state == "append":
-            contents[paths.ledger("events")] = _jsonl_text(staged_records["events"])
-        if contents:
-            _replace_files_transactionally(contents)
+            ledger_updates[paths.ledger("events")] = (
+                records["events"],
+                staged_records["events"],
+            )
+        if ledger_updates:
+            _replace_files_transactionally({}, ledger_updates)
         print(
             json.dumps(
                 {

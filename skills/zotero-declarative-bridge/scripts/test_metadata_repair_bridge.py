@@ -4,12 +4,17 @@
 from __future__ import annotations
 
 import copy
+import contextlib
+import hashlib
 import importlib.util
+import io
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.error
+import urllib.parse
 from pathlib import Path
 from unittest import mock
 
@@ -102,6 +107,80 @@ def compile_source(source: dict, *, library_items: list[dict] | None = None) -> 
             )
 
 
+def v2_live_records(*, post_commit: bool) -> tuple[dict, list[dict]]:
+    parent_data, wrappers = fixture_module.synthetic_v2_state(post_commit=post_commit)
+    parent_record = {"version": parent_data["version"], "data": parent_data}
+    records = []
+    for wrapper in wrappers:
+        record = {"data": wrapper["data"]}
+        if wrapper["data"]["itemType"] == "attachment":
+            record["links"] = {
+                "enclosure": {
+                    "href": "file://" + urllib.parse.quote(wrapper["storage_path"]),
+                }
+            }
+        records.append(record)
+    return parent_record, records
+
+
+def compile_v2_source(
+    source: dict,
+    *,
+    post_commit: bool = False,
+    readback_only: bool = False,
+    parent_version: int | None = None,
+    attachment_evidence: dict | None = None,
+) -> dict:
+    keyed_path = [
+        {"key": "ROOT0001", "name": "Research"},
+        {"key": "COLL0001", "name": "Methods"},
+    ]
+    parent_record, child_records = v2_live_records(post_commit=post_commit)
+    if parent_version is not None:
+        parent_record["version"] = parent_version
+        parent_record["data"]["version"] = parent_version
+    attachment_record = next(
+        record
+        for record in child_records
+        if record["data"]["itemType"] == "attachment"
+    )
+    storage_path = bridge._storage_path_from_child_record(attachment_record)
+
+    def observed_attachment(*_args, **kwargs):
+        return attachment_evidence or {
+            "storage_path": storage_path,
+            "content_sha256": kwargs["expected_content_sha256"],
+            "size_bytes": kwargs["expected_size_bytes"],
+        }
+
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "source-v2.json"
+        path.write_text(json.dumps(source), encoding="utf-8")
+        with mock.patch.object(
+            bridge,
+            "collection_contract",
+            return_value=(keyed_path, {"version": 7, "data": {"version": 7}}),
+        ), mock.patch.object(
+            bridge, "live_parent", return_value=parent_record
+        ), mock.patch.object(
+            bridge, "live_all_child_records", return_value=child_records
+        ), mock.patch.object(
+            bridge,
+            "local_api_attachment_file_evidence",
+            side_effect=observed_attachment,
+        ), mock.patch.object(
+            bridge, "live_library_top_items", return_value=[parent_record]
+        ):
+            return bridge.compile_reviewed_metadata_repair(
+                path,
+                transaction_id="synthetic-metadata-repair-v2",
+                local_collection_id=40,
+                source_hash_contract="canonical-json-v1",
+                base_url=bridge.BASE_URL,
+                readback_only=readback_only,
+            )
+
+
 class MetadataRepairBridgeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.source = fixture_module.build_reviewed()
@@ -121,6 +200,181 @@ class MetadataRepairBridgeTests(unittest.TestCase):
         bridge.validate_any_manifest(manifest)
         with self.assertRaisesRegex(bridge.BridgeError, "manifest keys differ"):
             bridge.validate_manifest(manifest)
+
+    def test_v2_compiler_binds_guard_and_preserves_v1_operation_write_domain(self) -> None:
+        source = fixture_module.build_reviewed(fixture_module.synthetic_v2_draft())
+        manifest = compile_v2_source(source)
+        self.assertEqual(manifest["schema"], bridge.METADATA_REPAIR_MANIFEST_SCHEMA_V2)
+        self.assertEqual(manifest["execution_intent"], "repair")
+        self.assertEqual(
+            manifest["entry"]["operation"]["type"],
+            "ensure_parent_journal_metadata_v1",
+        )
+        self.assertEqual(
+            manifest["entry"]["serializer_guard"],
+            source["entry"]["serializer_guard"],
+        )
+        bridge.validate_any_manifest(manifest)
+
+    def test_v2_readback_only_compiles_post_commit_managed_equivalence_without_apply(self) -> None:
+        source = fixture_module.build_reviewed(fixture_module.synthetic_v2_draft())
+        manifest = compile_v2_source(
+            source,
+            post_commit=True,
+            readback_only=True,
+        )
+        self.assertEqual(manifest["execution_intent"], "readback_only")
+        self.assertEqual(
+            manifest["entry"]["parent"]["version"],
+            source["entry"]["parent"]["version"],
+        )
+        bridge.validate_any_manifest(manifest)
+
+    def test_local_api_attachment_redirect_reads_bytes_and_rejects_drift_or_escape(self) -> None:
+        payload = b"%PDF-synthetic-local-api-evidence\n"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "Zotero" / "storage"
+            attachment_dir = root / "PDF00001"
+            attachment_dir.mkdir(parents=True)
+            pdf_path = attachment_dir / "paper.pdf"
+            pdf_path.write_bytes(payload)
+            expected_sha = "sha256:" + hashlib.sha256(payload).hexdigest()
+
+            class RedirectingOpener:
+                location = pdf_path.as_uri()
+
+                def open(self, request, timeout):
+                    self.request_url = request.full_url
+                    raise urllib.error.HTTPError(
+                        request.full_url,
+                        302,
+                        "Found",
+                        {"Location": self.location},
+                        None,
+                    )
+
+            opener = RedirectingOpener()
+            with mock.patch.object(bridge, "ZOTERO_STORAGE_ROOT", root), mock.patch.object(
+                bridge.urllib.request,
+                "build_opener",
+                return_value=opener,
+            ):
+                evidence = bridge.local_api_attachment_file_evidence(
+                    999999,
+                    "PDF00001",
+                    expected_size_bytes=len(payload),
+                    expected_content_sha256=expected_sha,
+                )
+                self.assertEqual(evidence["content_sha256"], expected_sha)
+                self.assertEqual(evidence["size_bytes"], len(payload))
+                self.assertTrue(opener.request_url.endswith("/items/PDF00001/file"))
+
+                with self.assertRaisesRegex(bridge.BridgeError, "size drift"):
+                    bridge.local_api_attachment_file_evidence(
+                        999999,
+                        "PDF00001",
+                        expected_size_bytes=len(payload) + 1,
+                        expected_content_sha256=expected_sha,
+                    )
+                with self.assertRaisesRegex(bridge.BridgeError, "content hash drift"):
+                    bridge.local_api_attachment_file_evidence(
+                        999999,
+                        "PDF00001",
+                        expected_size_bytes=len(payload),
+                        expected_content_sha256="sha256:" + "a" * 64,
+                    )
+
+                escaped = Path(directory) / "private-path-must-not-leak.pdf"
+                escaped.write_bytes(payload)
+                opener.location = escaped.as_uri()
+                with self.assertRaises(bridge.BridgeError) as caught:
+                    bridge.local_api_attachment_file_evidence(
+                        999999,
+                        "PDF00001",
+                        expected_size_bytes=len(payload),
+                        expected_content_sha256=expected_sha,
+                    )
+                self.assertNotIn(str(escaped), str(caught.exception))
+
+    def test_v2_compiler_never_backfills_observed_attachment_evidence(self) -> None:
+        source = fixture_module.build_reviewed(fixture_module.synthetic_v2_draft())
+        with self.assertRaisesRegex(bridge.BridgeError, "observed file evidence drift"):
+            compile_v2_source(
+                source,
+                attachment_evidence={
+                    "storage_path": "/synthetic/storage/PDF00001/paper.pdf",
+                    "content_sha256": "sha256:" + "a" * 64,
+                    "size_bytes": 1234,
+                },
+            )
+
+    def test_v2_readback_only_rejects_regressed_parent_version(self) -> None:
+        source = fixture_module.build_reviewed(fixture_module.synthetic_v2_draft())
+        with self.assertRaisesRegex(bridge.BridgeError, "version regressed"):
+            compile_v2_source(
+                source,
+                post_commit=True,
+                readback_only=True,
+                parent_version=2,
+            )
+
+    def test_readback_only_rejects_v1_reviewed_source(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source-v1.json"
+            path.write_text(json.dumps(self.source), encoding="utf-8")
+            with self.assertRaisesRegex(bridge.BridgeError, "requires reviewed source v2"):
+                bridge.compile_reviewed_metadata_repair(
+                    path,
+                    transaction_id="synthetic-readback-only-v1",
+                    local_collection_id=40,
+                    source_hash_contract="canonical-json-v1",
+                    base_url=bridge.BASE_URL,
+                    readback_only=True,
+                )
+
+    def test_v2_readback_only_rejects_attachment_title_drift(self) -> None:
+        source = fixture_module.build_reviewed(fixture_module.synthetic_v2_draft())
+        parent_record, child_records = v2_live_records(post_commit=True)
+        child_records[1]["data"]["title"] = "Changed attachment title"
+        keyed_path = [
+            {"key": "ROOT0001", "name": "Research"},
+            {"key": "COLL0001", "name": "Methods"},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source-v2.json"
+            path.write_text(json.dumps(source), encoding="utf-8")
+            with mock.patch.object(
+                bridge,
+                "collection_contract",
+                return_value=(keyed_path, {"version": 7, "data": {"version": 7}}),
+            ), mock.patch.object(
+                bridge, "live_parent", return_value=parent_record
+            ), mock.patch.object(
+                bridge, "live_all_child_records", return_value=child_records
+            ), mock.patch.object(
+                bridge,
+                "local_api_attachment_file_evidence",
+                return_value={
+                    "storage_path": bridge._storage_path_from_child_record(
+                        child_records[1]
+                    ),
+                    "content_sha256": source["entry"]["children"][1][
+                        "content_sha256"
+                    ],
+                    "size_bytes": source["entry"]["children"][1]["size_bytes"],
+                },
+            ), mock.patch.object(
+                bridge, "live_library_top_items", return_value=[parent_record]
+            ):
+                with self.assertRaisesRegex(bridge.BridgeError, "stable_data_sha256"):
+                    bridge.compile_reviewed_metadata_repair(
+                        path,
+                        transaction_id="synthetic-drift-v2",
+                        local_collection_id=40,
+                        source_hash_contract="canonical-json-v1",
+                        base_url=bridge.BASE_URL,
+                        readback_only=True,
+                    )
 
     def test_rejects_live_short_title_content_drift(self) -> None:
         record = live_parent_record(self.source)
@@ -189,6 +443,44 @@ class MetadataRepairBridgeTests(unittest.TestCase):
             text=True,
         )
         self.assertIn("--source-hash-contract", result.stdout)
+        self.assertIn("--readback-only", result.stdout)
+
+    def test_cli_readback_only_rejects_preview_and_apply_before_request(self) -> None:
+        source = fixture_module.build_reviewed(fixture_module.synthetic_v2_draft())
+        manifest = compile_v2_source(source, post_commit=True, readback_only=True)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = root / "manifest.json"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            capability_path = root / "capability.json"
+            for action in ("preview", "apply"):
+                with self.subTest(action=action):
+                    argv = [
+                        "zotero_declarative_bridge.py",
+                        action,
+                        str(manifest_path),
+                        "--capability-file",
+                        str(capability_path),
+                        "--receipt",
+                        str(root / f"{action}-receipt.json"),
+                    ]
+                    if action == "apply":
+                        argv.extend(
+                            [
+                                "--preview-receipt",
+                                str(root / "preview.json"),
+                                "--yes",
+                            ]
+                        )
+                    stderr = io.StringIO()
+                    with mock.patch.object(sys, "argv", argv), mock.patch.object(
+                        bridge, "load_capability", return_value={}
+                    ), mock.patch.object(
+                        bridge, "bridge_request"
+                    ) as request, contextlib.redirect_stderr(stderr):
+                        self.assertEqual(bridge.main(), 2)
+                    request.assert_not_called()
+                    self.assertIn("forbids preview and apply", stderr.getvalue())
 
     def test_bootstrap_fail_closes_dirty_parent_and_uses_fresh_failure_readback(self) -> None:
         source = BOOTSTRAP_PATH.read_text(encoding="utf-8")

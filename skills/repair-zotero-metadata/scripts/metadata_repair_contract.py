@@ -17,6 +17,8 @@ from typing import Any
 
 DRAFT_SCHEMA = "ZoteroParentMetadataRepairDraft/v1"
 REVIEWED_SCHEMA = "ZoteroReviewedParentMetadataRepair/v1"
+DRAFT_SCHEMA_V2 = "ZoteroParentMetadataRepairDraft/v2"
+REVIEWED_SCHEMA_V2 = "ZoteroReviewedParentMetadataRepair/v2"
 SOURCE_EVIDENCE_SIDECAR_SCHEMA = "ZoteroParentMetadataRepairLiveSidecar/v1"
 HASH_CONTRACT = "canonical-json-v1"
 PROFILE = "journal_article_core_v1"
@@ -42,6 +44,21 @@ SHA_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 DOI_RE = re.compile(r"^10\.\d{4,9}/\S+$")
 DUPLICATE_TITLE_PREFIX_MIN_CHARS = 20
+SERIALIZER_GUARD_PROFILE = "zotero_managed_storage_equivalence_v1"
+SERIALIZER_PARENT_EXCLUDED_FIELDS = {
+    "DOI",
+    "collections",
+    "creators",
+    "date",
+    "dateModified",
+    "issue",
+    "pages",
+    "publicationTitle",
+    "tags",
+    "version",
+    "volume",
+}
+SERIALIZER_ATTACHMENT_ALLOWED_FIELDS = {"filename", "version"}
 
 
 class ContractError(ValueError):
@@ -250,6 +267,255 @@ def metadata_parent_data(
         "profile": profile,
         "children": children,
     }
+
+
+def _sorted_serializer_values(values: Any, label: str) -> list[Any]:
+    if not isinstance(values, list):
+        raise ContractError(f"{label} must be an array")
+    return sorted(copy.deepcopy(values), key=canonical_bytes)
+
+
+def serializer_parent_stable_data(data: Any) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        raise ContractError("serializer parent data must be an object")
+    return {
+        key: copy.deepcopy(value)
+        for key, value in data.items()
+        if key not in SERIALIZER_PARENT_EXCLUDED_FIELDS
+    }
+
+
+def serializer_attachment_stable_data(data: Any) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        raise ContractError("serializer attachment data must be an object")
+    return {
+        key: copy.deepcopy(value)
+        for key, value in data.items()
+        if key not in SERIALIZER_ATTACHMENT_ALLOWED_FIELDS
+    }
+
+
+def serializer_guard_from_records(
+    parent_data: Any,
+    child_records: Any,
+) -> dict[str, Any]:
+    """Build the hash-only v2 guard from Local-API-shaped pre-state records."""
+    if not isinstance(parent_data, dict):
+        raise ContractError("serializer parent data must be an object")
+    if parent_data.get("itemType") != "journalArticle":
+        raise ContractError("serializer parent must be journalArticle")
+    tags = parent_data.get("tags", [])
+    collections = parent_data.get("collections", [])
+    sorted_tags = _sorted_serializer_values(tags, "serializer parent tags")
+    sorted_collections = _sorted_serializer_values(
+        collections, "serializer parent collections"
+    )
+    if not isinstance(child_records, list) or not child_records or len(child_records) > 100:
+        raise ContractError("serializer child records must be a non-empty bounded array")
+    children: list[dict[str, Any]] = []
+    for index, wrapper in enumerate(child_records):
+        label = f"serializer child records[{index}]"
+        if not isinstance(wrapper, dict) or not isinstance(wrapper.get("data"), dict):
+            raise ContractError(f"{label} must contain data")
+        data = wrapper["data"]
+        key = item_key(data.get("key"), f"{label}.data.key")
+        version = positive_int(data.get("version"), f"{label}.data.version")
+        if data.get("itemType") == "note":
+            note_html = data.get("note")
+            if not isinstance(note_html, str):
+                raise ContractError(f"{label}.data.note must be a string")
+            children.append(
+                {
+                    "key": key,
+                    "item_type": "note",
+                    "version": version,
+                    "raw_data_sha256": sha256_value(data),
+                    "content_sha256": "sha256:"
+                    + hashlib.sha256(note_html.encode("utf-8")).hexdigest(),
+                }
+            )
+            continue
+        if data.get("itemType") != "attachment":
+            raise ContractError(f"{label}.data.itemType is unsupported")
+        filename = text(
+            data.get("filename"), f"{label}.data.filename", nonempty=False, limit=16_384
+        )
+        storage_path = text(
+            wrapper.get("storage_path"),
+            f"{label}.storage_path",
+            nonempty=False,
+            limit=65_536,
+        )
+        content_sha256 = sha(
+            wrapper.get("content_sha256"), f"{label}.content_sha256"
+        )
+        size_bytes = positive_int(
+            wrapper.get("size_bytes"),
+            f"{label}.size_bytes",
+            maximum=268_435_456,
+        )
+        children.append(
+            {
+                "key": key,
+                "item_type": "attachment",
+                "version": version,
+                "raw_data_sha256": sha256_value(data),
+                "stable_data_sha256": sha256_value(
+                    serializer_attachment_stable_data(data)
+                ),
+                "filename_sha256": sha256_value(filename),
+                "storage_path_sha256": sha256_value(storage_path),
+                "content_sha256": content_sha256,
+                "size_bytes": size_bytes,
+            }
+        )
+    children.sort(key=lambda child: child["key"])
+    if len({child["key"] for child in children}) != len(children):
+        raise ContractError("serializer child records contain duplicate keys")
+    unsigned = {
+        "profile": SERIALIZER_GUARD_PROFILE,
+        "parent": {
+            "raw_data_sha256": sha256_value(parent_data),
+            "stable_nonprofile_sha256": sha256_value(
+                serializer_parent_stable_data(parent_data)
+            ),
+            "tags_raw_sha256": sha256_value(tags),
+            "tags_set_sha256": sha256_value(sorted_tags),
+            "collections_raw_sha256": sha256_value(collections),
+            "collections_set_sha256": sha256_value(sorted_collections),
+        },
+        "children": children,
+    }
+    return {**unsigned, "guard_sha256": sha256_value(unsigned)}
+
+
+def validate_serializer_guard(value: Any, label: str) -> dict[str, Any]:
+    guard = exact_keys(value, {"profile", "parent", "children", "guard_sha256"}, label)
+    if guard["profile"] != SERIALIZER_GUARD_PROFILE:
+        raise ContractError(f"{label}.profile is unsupported")
+    parent = exact_keys(
+        guard["parent"],
+        {
+            "raw_data_sha256",
+            "stable_nonprofile_sha256",
+            "tags_raw_sha256",
+            "tags_set_sha256",
+            "collections_raw_sha256",
+            "collections_set_sha256",
+        },
+        f"{label}.parent",
+    )
+    for field, value_sha in parent.items():
+        sha(value_sha, f"{label}.parent.{field}")
+    children = guard["children"]
+    if not isinstance(children, list) or not children or len(children) > 100:
+        raise ContractError(f"{label}.children must be a non-empty bounded array")
+    keys: list[str] = []
+    for index, child in enumerate(children):
+        child_label = f"{label}.children[{index}]"
+        if not isinstance(child, dict):
+            raise ContractError(f"{child_label} must be an object")
+        if child.get("item_type") == "note":
+            child = exact_keys(
+                child,
+                {"key", "item_type", "version", "raw_data_sha256", "content_sha256"},
+                child_label,
+            )
+            sha(child["content_sha256"], f"{child_label}.content_sha256")
+        elif child.get("item_type") == "attachment":
+            child = exact_keys(
+                child,
+                {
+                    "key",
+                    "item_type",
+                    "version",
+                    "raw_data_sha256",
+                    "stable_data_sha256",
+                    "filename_sha256",
+                    "storage_path_sha256",
+                    "content_sha256",
+                    "size_bytes",
+                },
+                child_label,
+            )
+            positive_int(
+                child["size_bytes"], f"{child_label}.size_bytes", maximum=268_435_456
+            )
+            for field in (
+                "stable_data_sha256",
+                "filename_sha256",
+                "storage_path_sha256",
+                "content_sha256",
+            ):
+                sha(child[field], f"{child_label}.{field}")
+        else:
+            raise ContractError(f"{child_label}.item_type is unsupported")
+        keys.append(item_key(child["key"], f"{child_label}.key"))
+        positive_int(child["version"], f"{child_label}.version")
+        sha(child["raw_data_sha256"], f"{child_label}.raw_data_sha256")
+    if keys != sorted(keys) or len(keys) != len(set(keys)):
+        raise ContractError(f"{label}.children must be key-sorted and unique")
+    sha(guard["guard_sha256"], f"{label}.guard_sha256")
+    unsigned = {key: item for key, item in guard.items() if key != "guard_sha256"}
+    if sha256_value(unsigned) != guard["guard_sha256"]:
+        raise ContractError(f"{label}.guard_sha256 is inconsistent")
+    return guard
+
+
+def classify_serializer_guard(
+    expected: Any,
+    observed: Any,
+    *,
+    allow_equivalent: bool,
+) -> str:
+    expected = validate_serializer_guard(expected, "expected serializer guard")
+    observed = validate_serializer_guard(observed, "observed serializer guard")
+    if expected["parent"]["stable_nonprofile_sha256"] != observed["parent"][
+        "stable_nonprofile_sha256"
+    ]:
+        raise ContractError("metadata parent non-profile drift")
+    parent_raw_sets_exact = True
+    for field in ("tags", "collections"):
+        raw_field = f"{field}_raw_sha256"
+        set_field = f"{field}_set_sha256"
+        if expected["parent"][set_field] != observed["parent"][set_field]:
+            raise ContractError(f"metadata parent {field} member drift")
+        parent_raw_sets_exact = parent_raw_sets_exact and (
+            expected["parent"][raw_field] == observed["parent"][raw_field]
+        )
+    if len(expected["children"]) != len(observed["children"]):
+        raise ContractError("metadata child topology drift")
+    children_raw_exact = True
+    for baseline, current in zip(expected["children"], observed["children"], strict=True):
+        if baseline["key"] != current["key"] or baseline["item_type"] != current["item_type"]:
+            raise ContractError("metadata child key or type drift")
+        if baseline["item_type"] == "note":
+            if baseline != current:
+                raise ContractError("metadata note content or metadata drift")
+            continue
+        for field in ("stable_data_sha256", "content_sha256", "size_bytes"):
+            if baseline[field] != current[field]:
+                raise ContractError(f"metadata attachment {baseline['key']} {field} drift")
+        if current["version"] < baseline["version"]:
+            raise ContractError(f"metadata attachment {baseline['key']} version regressed")
+        raw_exact = all(
+            baseline[field] == current[field]
+            for field in (
+                "version",
+                "raw_data_sha256",
+                "filename_sha256",
+                "storage_path_sha256",
+            )
+        )
+        children_raw_exact = children_raw_exact and raw_exact
+    exact = parent_raw_sets_exact and children_raw_exact
+    if not exact and not allow_equivalent:
+        raise ContractError("metadata serializer content drift")
+    return (
+        "exact"
+        if exact
+        else "zotero_managed_attachment_rename_and_set_order_equivalent"
+    )
 
 
 def validate_duplicate_preconditions(
@@ -484,6 +750,12 @@ def build_reviewed_source(
     *,
     source_evidence_sidecar: Path | bytes,
 ) -> dict[str, Any]:
+    if not isinstance(draft, dict):
+        raise ContractError("draft must be an object")
+    draft_schema = draft.get("schema")
+    if draft_schema not in {DRAFT_SCHEMA, DRAFT_SCHEMA_V2}:
+        raise ContractError("draft schema mismatch")
+    is_v2 = draft_schema == DRAFT_SCHEMA_V2
     draft = exact_keys(
         draft,
         {
@@ -499,7 +771,7 @@ def build_reviewed_source(
         },
         "draft",
     )
-    if draft["schema"] != DRAFT_SCHEMA or draft["status"] != "reviewed":
+    if draft["status"] != "reviewed":
         raise ContractError("draft schema or status mismatch")
     text(draft["created_at"], "draft.created_at", limit=64)
     if draft["private"] is not True:
@@ -509,9 +781,12 @@ def build_reviewed_source(
         copy.deepcopy(draft["source_evidence_sidecar_ref"]),
     )
     target = validate_target(copy.deepcopy(draft["target"]), "draft.target")
+    entry_keys = {"parent", "children", "evidence_pdf_key", "duplicate_preconditions", "repair"}
+    if is_v2:
+        entry_keys.add("serializer_guard")
     entry = exact_keys(
         draft["entry"],
-        {"parent", "children", "evidence_pdf_key", "duplicate_preconditions", "repair"},
+        entry_keys,
         "draft.entry",
     )
     parent = validate_parent(copy.deepcopy(entry["parent"]), "draft.entry.parent")
@@ -558,6 +833,24 @@ def build_reviewed_source(
     if not isinstance(draft["summary"], dict):
         raise ContractError("draft.summary must be an object")
     duplicate_with_hash = {**duplicate, "sha256": sha256_value(duplicate)}
+    serializer_guard = (
+        validate_serializer_guard(
+            copy.deepcopy(entry["serializer_guard"]), "draft.entry.serializer_guard"
+        )
+        if is_v2
+        else None
+    )
+    if is_v2:
+        guard_children = serializer_guard["children"]
+        if [child["key"] for child in guard_children] != [child["key"] for child in children]:
+            raise ContractError("serializer guard child topology disagrees with reviewed children")
+        for child, guarded in zip(children, guard_children, strict=True):
+            if child["item_type"] != guarded["item_type"] or child["version"] != guarded["version"]:
+                raise ContractError("serializer guard child baseline disagrees with reviewed children")
+            if child["content_sha256"] != guarded["content_sha256"]:
+                raise ContractError("serializer guard child content disagrees with reviewed children")
+            if child["item_type"] == "attachment" and child["size_bytes"] != guarded["size_bytes"]:
+                raise ContractError("serializer guard attachment size disagrees with reviewed children")
     reviewed_repair = {
         "profile": PROFILE,
         "transition_policy": TRANSITION_POLICY,
@@ -581,9 +874,11 @@ def build_reviewed_source(
         "duplicate_preconditions": duplicate_with_hash,
         "repair": reviewed_repair,
     }
+    if is_v2:
+        reviewed_entry["serializer_guard"] = serializer_guard
     reviewed_entry["entry_sha256"] = sha256_value(reviewed_entry)
     reviewed = {
-        "schema": REVIEWED_SCHEMA,
+        "schema": REVIEWED_SCHEMA_V2 if is_v2 else REVIEWED_SCHEMA,
         "status": "reviewed_requires_bridge_compile",
         "created_at": draft["created_at"],
         "private": True,
@@ -600,6 +895,12 @@ def build_reviewed_source(
 
 
 def validate_reviewed_source(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ContractError("reviewed source must be an object")
+    source_schema = value.get("schema")
+    if source_schema not in {REVIEWED_SCHEMA, REVIEWED_SCHEMA_V2}:
+        raise ContractError("reviewed source schema mismatch")
+    is_v2 = source_schema == REVIEWED_SCHEMA_V2
     source = exact_keys(
         value,
         {
@@ -618,7 +919,7 @@ def validate_reviewed_source(value: Any) -> dict[str, Any]:
         },
         "reviewed source",
     )
-    if source["schema"] != REVIEWED_SCHEMA or source["status"] != "reviewed_requires_bridge_compile":
+    if source["status"] != "reviewed_requires_bridge_compile":
         raise ContractError("reviewed source schema or status mismatch")
     text(source["created_at"], "reviewed source.created_at", limit=64)
     if source["private"] is not True or source["executable"] is not False:
@@ -630,17 +931,20 @@ def validate_reviewed_source(value: Any) -> dict[str, Any]:
     if source["execution_contract"] != "compile-preview-apply-readback":
         raise ContractError("reviewed source execution_contract mismatch")
     validate_target(source["target"], "reviewed source.target")
+    entry_keys = {
+        "parent",
+        "children",
+        "children_sha256",
+        "evidence_pdf_key",
+        "duplicate_preconditions",
+        "repair",
+        "entry_sha256",
+    }
+    if is_v2:
+        entry_keys.add("serializer_guard")
     entry = exact_keys(
         source["entry"],
-        {
-            "parent",
-            "children",
-            "children_sha256",
-            "evidence_pdf_key",
-            "duplicate_preconditions",
-            "repair",
-            "entry_sha256",
-        },
+        entry_keys,
         "reviewed source.entry",
     )
     parent = validate_parent(entry["parent"], "reviewed source.entry.parent")
@@ -663,6 +967,21 @@ def validate_reviewed_source(value: Any) -> dict[str, Any]:
         "reviewed source.entry.duplicate_preconditions",
         require_digest=True,
     )
+    if is_v2:
+        serializer_guard = validate_serializer_guard(
+            entry["serializer_guard"], "reviewed source.entry.serializer_guard"
+        )
+        if [child["key"] for child in serializer_guard["children"]] != [
+            child["key"] for child in children
+        ]:
+            raise ContractError("reviewed serializer guard child topology mismatch")
+        for child, guarded in zip(children, serializer_guard["children"], strict=True):
+            if child["item_type"] != guarded["item_type"] or child["version"] != guarded["version"]:
+                raise ContractError("reviewed serializer guard child baseline mismatch")
+            if child["content_sha256"] != guarded["content_sha256"]:
+                raise ContractError("reviewed serializer guard child content mismatch")
+            if child["item_type"] == "attachment" and child["size_bytes"] != guarded["size_bytes"]:
+                raise ContractError("reviewed serializer guard attachment size mismatch")
     repair = exact_keys(
         entry["repair"],
         {

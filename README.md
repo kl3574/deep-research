@@ -41,9 +41,9 @@
 可选配套执行器 `$zotero-declarative-bridge` 只负责已审核 manifest 的
 existing-parent collection membership、书目 `shortTitle`、子笔记、单附件，
 以及来自 `$repair-zotero-metadata` 的独立固定 profile parent 修复
-事务。当前待发布组合为仓库 `v0.6.10` 与 bridge `0.1.9`；P3 候选 XPI 的
+事务。当前待发布组合为仓库 `v0.6.11` 与 bridge `0.1.10`；候选 XPI 的
 确定性 SHA-256 为
-`35c8fc2f7263c46ed5c1dafe45ab849a38b8a581ad04e6201205e69facc2b207`。
+`1168a4088dac8a87d4cb7cb3c5c6d356043c155263de198d0a90a2f3cfb4e2cf`。
 这个摘要只绑定候选构件，不替代真实运行回读。作为历史证据，`v0.6.1` 的
 bridge `0.1.4` 完成真实写入，`0.1.5` 在 Zotero `9.0.6` 中完成激活、受约束
 probe、正向回读和目标集合成员关系负向回读；详情见
@@ -77,7 +77,7 @@ RAG、主动筛选、研究知识图谱与完整 Zotero 读写闭环，避免把
 ## 安装
 
 ```bash
-git clone --branch v0.6.10 --depth 1 https://github.com/kl3574/deep-research.git
+git clone --branch v0.6.11 --depth 1 https://github.com/kl3574/deep-research.git
 cd deep-research
 mkdir -p ~/.codex/skills
 stamp="$(date +%Y%m%d%H%M%S)"

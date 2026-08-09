@@ -12,6 +12,7 @@ import threading
 import sys
 from pathlib import Path
 import unittest
+from unittest import mock
 import urllib.parse
 
 SCRIPT_PATH = Path(__file__).with_name("knowledge_network.py")
@@ -895,16 +896,43 @@ class KnowledgeNetworkTest(unittest.TestCase):
             ["ingest-zotero-snapshot", "--snapshot", str(snapshot_path)],
         )
         self.assertEqual(first[0], 0, first[2])
-        second = invoke(
-            self.root,
-            self.network_id,
-            ["ingest-zotero-snapshot", "--snapshot", str(snapshot_path)],
-        )
+        network_dir = self.root / "networks" / self.network_id
+        watched = [
+            network_dir / "network.json",
+            network_dir / "sources.jsonl",
+            network_dir / "events.jsonl",
+        ]
+        before = {
+            path: (
+                path.read_bytes(),
+                path.stat().st_ino,
+                path.stat().st_mtime_ns,
+            )
+            for path in watched
+        }
+        with mock.patch.object(MODULE.os, "replace", wraps=os.replace) as replace:
+            second = invoke(
+                self.root,
+                self.network_id,
+                ["ingest-zotero-snapshot", "--snapshot", str(snapshot_path)],
+            )
         self.assertEqual(second[0], 0, second[2])
+        replace.assert_not_called()
         payload = json.loads(second[1])
         self.assertEqual(payload["added"], 0)
         self.assertEqual(payload["existing"], 2)
         self.assertEqual(len(self.load_ledger(self.network_id, "sources")), 2)
+        self.assertEqual(
+            {
+                path: (
+                    path.read_bytes(),
+                    path.stat().st_ino,
+                    path.stat().st_mtime_ns,
+                )
+                for path in watched
+            },
+            before,
+        )
 
     def test_zotero_refresh_does_not_supersede_same_identity_method_source(self):
         baseline_parent = {
@@ -1110,6 +1138,26 @@ class KnowledgeNetworkTest(unittest.TestCase):
             ["ingest-zotero-snapshot", "--snapshot", str(snapshot_path)],
         )
         self.assertEqual(first[0], 0, first[2])
+        network_dir = self.root / "networks" / self.network_id
+        sources_path = network_dir / "sources.jsonl"
+        initial_source_rows = self.load_ledger(self.network_id, "sources")
+        noncanonical_source_prefix = "".join(
+            json.dumps(
+                row,
+                ensure_ascii=False,
+                sort_keys=False,
+                separators=(", ", ": "),
+            )
+            + "\n"
+            for row in initial_source_rows
+        ).encode("utf-8")
+        self.assertNotEqual(
+            noncanonical_source_prefix,
+            MODULE._jsonl_text(initial_source_rows).encode("utf-8"),
+        )
+        sources_path.write_bytes(noncanonical_source_prefix)
+        events_path = network_dir / "events.jsonl"
+        events_prefix = events_path.read_bytes()
 
         parents_v2 = [
             {
@@ -1158,6 +1206,8 @@ class KnowledgeNetworkTest(unittest.TestCase):
             ],
         )
         self.assertEqual(refresh[0], 0, refresh[2])
+        self.assertTrue(sources_path.read_bytes().startswith(noncanonical_source_prefix))
+        self.assertTrue(events_path.read_bytes().startswith(events_prefix))
         payload = json.loads(refresh[1])
         self.assertEqual(payload["added"], 1)
         self.assertEqual(payload["changed"], 1)
@@ -1704,6 +1754,100 @@ class KnowledgeNetworkTest(unittest.TestCase):
         validated = invoke(self.root, self.network_id, ["validate"])
         self.assertEqual(validated[0], 1, validated[2])
         self.assertIn("transaction journal", validated[2])
+
+    def test_transaction_preserves_noncanonical_prefix_for_every_ledger(self):
+        network_dir = self.root / "networks" / self.network_id
+        network_dir.mkdir(parents=True)
+        ledger_updates = {}
+        prefixes = {}
+        appended = {}
+        for index, name in enumerate(MODULE.LEDGER_NAMES):
+            path = network_dir / f"{name}.jsonl"
+            prior = {"z": index, "a": name}
+            new = {"z": index + 10, "a": f"new-{name}"}
+            prefix = (
+                json.dumps(
+                    prior,
+                    ensure_ascii=False,
+                    sort_keys=False,
+                    separators=(", ", ": "),
+                )
+                + "\n"
+            ).encode("utf-8")
+            path.write_bytes(prefix)
+            path.chmod(0o666)
+            prefixes[path] = prefix
+            appended[path] = new
+            ledger_updates[path] = ([prior], [prior, new])
+
+        previous_umask = os.umask(0)
+        try:
+            MODULE._replace_files_transactionally({}, ledger_updates)
+        finally:
+            os.umask(previous_umask)
+
+        for path in prefixes:
+            observed = path.read_bytes()
+            self.assertEqual(
+                observed,
+                prefixes[path] + MODULE._jsonl_text([appended[path]]).encode("utf-8"),
+            )
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertFalse((network_dir / ".transaction.json").exists())
+        self.assertFalse(list(network_dir.glob(".*.stage.*")))
+
+    def test_transaction_rejects_unterminated_or_mismatched_prior_ledger(self):
+        network_dir = self.root / "networks" / self.network_id
+        network_dir.mkdir(parents=True)
+        path = network_dir / "sources.jsonl"
+        prior = {"a": 1}
+        appended = {"a": 2}
+        unterminated = json.dumps(prior).encode("utf-8")
+        path.write_bytes(unterminated)
+        with self.assertRaisesRegex(ValueError, "must end with a newline"):
+            MODULE._replace_files_transactionally(
+                {}, {path: ([prior], [prior, appended])}
+            )
+        self.assertEqual(path.read_bytes(), unterminated)
+
+        terminated = unterminated + b"\n"
+        path.write_bytes(terminated)
+        with self.assertRaisesRegex(ValueError, "differ from expected prior records"):
+            MODULE._replace_files_transactionally(
+                {}, {path: ([{"a": 9}], [{"a": 9}, appended])}
+            )
+        self.assertEqual(path.read_bytes(), terminated)
+        self.assertFalse((network_dir / ".transaction.json").exists())
+        self.assertFalse(list(network_dir.glob(".sources.jsonl.stage.*")))
+
+    def test_transaction_replace_failure_preserves_target_and_cleans_temp(self):
+        network_dir = self.root / "networks" / self.network_id
+        network_dir.mkdir(parents=True)
+        path = network_dir / "events.jsonl"
+        prior = {"event": "prior"}
+        appended = {"event": "new"}
+        original = (json.dumps(prior) + "\n").encode("utf-8")
+        path.write_bytes(original)
+        original_replace = os.replace
+
+        def fail_live_replace(source, target):
+            if Path(target) == path:
+                raise OSError("injected ledger replace failure")
+            return original_replace(source, target)
+
+        with mock.patch.object(
+            MODULE.os,
+            "replace",
+            side_effect=fail_live_replace,
+        ):
+            with self.assertRaisesRegex(OSError, "injected ledger replace failure"):
+                MODULE._replace_files_transactionally(
+                    {}, {path: ([prior], [prior, appended])}
+                )
+        self.assertEqual(path.read_bytes(), original)
+        self.assertFalse((network_dir / ".transaction.json").exists())
+        self.assertFalse(list(network_dir.glob(".events.jsonl.stage.*")))
+        self.assertFalse(list(network_dir.glob(".events.jsonl.restore.*")))
 
     def load_ledger(self, network_id: str, name: str) -> list[dict[str, object]]:
         path = self.root / "networks" / network_id / f"{name}.jsonl"

@@ -42,9 +42,9 @@ reviewed target or manifest.
 
 For an existing-parent bibliography correction, install
 `$repair-zotero-metadata` and compile only its sealed
-`ZoteroReviewedParentMetadataRepair/v1` with
+`ZoteroReviewedParentMetadataRepair/v2` with
 `compile-reviewed-metadata-repair`. This emits the independent
-`ZoteroParentMetadataRepairTransaction/v1`; never insert metadata fields or its
+`ZoteroParentMetadataRepairTransaction/v2`; never insert metadata fields or its
 operation into the legacy transaction schema.
 The compiler copies only the reviewed source's hash-only
 `source_evidence_sidecar_ref`; a sidecar path or evidence locator in an
@@ -60,12 +60,22 @@ HTTP. It supports only:
 - `ensure_pdf_attachment`
 
 The unchanged `ZoteroDeclarativeTransaction/v1` allowlist above remains closed.
-The separate `ZoteroParentMetadataRepairTransaction/v1` accepts exactly one
+The separate `ZoteroParentMetadataRepairTransaction/v2` accepts exactly one
 top-level `journalArticle` and literal operation
 `ensure_parent_journal_metadata_v1`. Its fixed profile is `DOI`, creators,
 publication title, volume, issue, pages, and date. Title and shortTitle are
 immutable identity preconditions; metadata repair cannot mix with any legacy
 operation.
+
+Version 2 carries a reviewed hash-only serializer guard. Preview and the
+transaction repeat remain raw-exact. Only post-commit inspection/readback may
+accept parent tag/collection order changes and a same-key attachment version
+plus Zotero-managed filename/path rename when its stable record, MD5, bytes,
+size, link mode, title, URL, and content type stay exact. Notes remain
+raw-exact. The bounded result is
+`zotero_managed_attachment_rename_and_set_order_equivalent` and includes raw
+expected/observed hashes. Published v1 manifests remain exact-only. v2
+`readback_only` manifests cannot enter preview or apply.
 
 The separate authenticated `resolve_collection` action is read-only and is not
 a transaction operation. It accepts exactly one authorized internal group

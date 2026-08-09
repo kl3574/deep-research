@@ -1,6 +1,6 @@
 # Reviewed parent metadata repair contract
 
-`ZoteroReviewedParentMetadataRepair/v1` is a non-executable handoff from
+`ZoteroReviewedParentMetadataRepair/v2` is a non-executable handoff from
 bibliographic review to the constrained local bridge.
 
 ## Authority
@@ -36,6 +36,16 @@ The reviewed source binds the complete expected and desired profiles, exact
 parent version and protected identity, complete child inventory and content
 hashes, one evidence PDF hash, exact target, empty full-library duplicate
 candidate sets, and canonical JSON hashes for every nested state object.
+
+Version 2 additionally binds a hash-only `serializer_guard`. The parent guard
+keeps the full raw-data hash, a stable hash of every field except the writable
+profile, version/dateModified, tags, and collections, plus raw-order and
+set-normalized hashes for tags and collections. Each note binds its complete
+raw record and exact content hash. Each attachment binds its complete raw
+record, a stable record with only `version` and `filename` removed, its local
+file SHA-256 and size, and hashes of filename and storage path. Attachment
+title, URL, link mode, content type, MD5, bytes, key/type, note content, and tag
+or collection membership therefore remain fail-closed.
 An exact normalized title/year is a candidate when creator surnames overlap or
 either side lacks creators. A differing normalized title/year is a candidate
 only when one title is a prefix of the other for at least 20 characters and
@@ -49,8 +59,30 @@ sidecar path enters the reviewed digest or executable transaction.
 
 ## Execution boundary
 
-The compiler emits only `ZoteroParentMetadataRepairTransaction/v1`, containing
+The compiler emits `ZoteroParentMetadataRepairTransaction/v2`, containing
 one parent and literal operation `ensure_parent_journal_metadata_v1`. It cannot
 be mixed with `ZoteroDeclarativeTransaction/v1` operations. Live compilation,
 preview, apply, and readback each fail on target, version, content, child, PDF,
 membership, or duplicate drift.
+
+For v2 compilation and readback-only recovery, attachment bytes are observed
+only by requesting the exact attachment's Local API `/file` endpoint and
+following its returned local-file identity under
+`$HOME/Zotero/storage/<attachment-key>/`. The compiler opens a direct regular
+non-symlink file with no-follow semantics, hashes the bytes it actually reads,
+and compares both size and SHA-256 to the reviewed child. Expected values are
+never substituted for an unavailable observation; redirect, path, identity,
+read-time size, magic, or hash drift fails closed without exposing the path in
+the executable manifest or public error.
+
+Preview and repeated in-transaction preflight are always strict. Only
+post-commit inspection and readback may accept identical tag/collection members
+in a different order and same-key attachments whose only raw changes are an
+advanced version plus Zotero-managed filename/storage path. The result reports
+`content_match=zotero_managed_attachment_rename_and_set_order_equivalent` and
+retains expected/observed raw hashes. Version 1 remains supported with its
+published exact-only behavior. Every satisfied v2 post/readback state also
+requires the observed parent version to be at least the reviewed precondition;
+a version rollback fails even when content otherwise matches. A v2
+`execution_intent=readback_only`
+transaction is rejected by preview and apply in both client and plugin.

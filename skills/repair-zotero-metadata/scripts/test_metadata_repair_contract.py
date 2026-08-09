@@ -167,6 +167,97 @@ def synthetic_draft() -> dict:
     }
 
 
+def synthetic_v2_state(*, post_commit: bool = False) -> tuple[dict, list[dict]]:
+    note_html = '<div data-schema-version="9"><p>Synthetic note</p></div>'
+    parent = {
+        "key": "PARENT01",
+        "version": 9 if post_commit else 3,
+        "itemType": "journalArticle",
+        "title": "Synthetic sensitivity study",
+        "shortTitle": "Synthetic setting: reviewed conclusion",
+        "abstractNote": "Bound non-profile metadata",
+        "DOI": "10.0000/synthetic.new" if post_commit else "10.0000/synthetic.old",
+        "creators": (
+            [
+                {"creatorType": "author", "firstName": "Alex", "lastName": "Example"},
+                {"creatorType": "author", "firstName": "Blair", "lastName": "Sample"},
+            ]
+            if post_commit
+            else []
+        ),
+        "publicationTitle": "Synthetic Journal" if post_commit else "",
+        "volume": "7" if post_commit else "",
+        "issue": "2" if post_commit else "",
+        "pages": "10-20" if post_commit else "",
+        "date": "2026",
+        "url": "https://example.invalid/parent",
+        "tags": ([{"tag": "method"}, {"tag": "reviewed"}] if post_commit else [{"tag": "reviewed"}, {"tag": "method"}]),
+        "collections": (["OTHER001", "COLL0001"] if post_commit else ["COLL0001", "OTHER001"]),
+        "dateAdded": "2026-01-01T00:00:00Z",
+        "dateModified": "2026-01-03T00:00:00Z" if post_commit else "2026-01-01T00:00:00Z",
+        "relations": {},
+    }
+    note = {
+        "key": "NOTE0001",
+        "version": 2,
+        "itemType": "note",
+        "parentItem": "PARENT01",
+        "note": note_html,
+        "tags": [],
+        "relations": {},
+    }
+    attachment = {
+        "key": "PDF00001",
+        "version": 9 if post_commit else 5,
+        "itemType": "attachment",
+        "parentItem": "PARENT01",
+        "title": "Synthetic sensitivity study - full text",
+        "url": "https://example.invalid/paper.pdf",
+        "contentType": "application/pdf",
+        "linkMode": "imported_file",
+        "md5": "0123456789abcdef0123456789abcdef",
+        "mtime": 1_700_000_000_000,
+        "filename": (
+            "Example and Sample - 2026 - Synthetic sensitivity study.pdf"
+            if post_commit
+            else "2026 - Synthetic sensitivity study.pdf"
+        ),
+        "collections": [],
+        "tags": [],
+        "relations": {},
+        "dateAdded": "2026-01-01T00:00:00Z",
+        "dateModified": "2026-01-01T00:00:00Z",
+    }
+    storage_path = (
+        "/synthetic/storage/PDF00001/Example and Sample - 2026 - Synthetic sensitivity study.pdf"
+        if post_commit
+        else "/synthetic/storage/PDF00001/2026 - Synthetic sensitivity study.pdf"
+    )
+    return parent, [
+        {"data": note},
+        {
+            "data": attachment,
+            "storage_path": storage_path,
+            "content_sha256": SHA_C,
+            "size_bytes": 1234,
+        },
+    ]
+
+
+def synthetic_v2_draft() -> dict:
+    draft = synthetic_draft()
+    draft["schema"] = contract.DRAFT_SCHEMA_V2
+    parent_data, child_records = synthetic_v2_state()
+    note_html = child_records[0]["data"]["note"]
+    draft["entry"]["children"][0]["content_sha256"] = (
+        "sha256:" + hashlib.sha256(note_html.encode("utf-8")).hexdigest()
+    )
+    draft["entry"]["serializer_guard"] = contract.serializer_guard_from_records(
+        parent_data, child_records
+    )
+    return draft
+
+
 def build_reviewed(draft: dict | None = None, sidecar: Path | bytes | None = None) -> dict:
     return BUILD_REVIEWED_SOURCE(
         draft or synthetic_draft(),
@@ -200,6 +291,80 @@ class MetadataRepairContractTests(unittest.TestCase):
         draft["entry"]["repair"]["desired_profile"]["title"] = "Injected title"
         with self.assertRaisesRegex(contract.ContractError, "profile keys differ"):
             build_reviewed(draft)
+
+    def test_v2_binds_hash_only_zotero_serializer_guard_without_changing_v1(self) -> None:
+        reviewed_v1 = build_reviewed(synthetic_draft())
+        reviewed_v2 = build_reviewed(synthetic_v2_draft())
+        self.assertEqual(reviewed_v1["schema"], contract.REVIEWED_SCHEMA)
+        self.assertNotIn("serializer_guard", reviewed_v1["entry"])
+        self.assertEqual(reviewed_v2["schema"], contract.REVIEWED_SCHEMA_V2)
+        self.assertEqual(
+            reviewed_v2["entry"]["serializer_guard"]["profile"],
+            contract.SERIALIZER_GUARD_PROFILE,
+        )
+
+    def test_v2_allows_only_managed_attachment_rename_and_set_order_after_commit(self) -> None:
+        expected_parent, expected_children = synthetic_v2_state()
+        observed_parent, observed_children = synthetic_v2_state(post_commit=True)
+        expected = contract.serializer_guard_from_records(expected_parent, expected_children)
+        observed = contract.serializer_guard_from_records(observed_parent, observed_children)
+        self.assertEqual(
+            contract.classify_serializer_guard(
+                expected, observed, allow_equivalent=True
+            ),
+            "zotero_managed_attachment_rename_and_set_order_equivalent",
+        )
+        with self.assertRaisesRegex(contract.ContractError, "serializer content drift"):
+            contract.classify_serializer_guard(
+                expected, observed, allow_equivalent=False
+            )
+
+    def test_v2_equivalence_rejects_attachment_note_and_tag_member_drift(self) -> None:
+        expected_parent, expected_children = synthetic_v2_state()
+        expected = contract.serializer_guard_from_records(expected_parent, expected_children)
+
+        for field, value in (
+            ("title", "Changed attachment title"),
+            ("url", "https://example.invalid/other.pdf"),
+            ("linkMode", "imported_url"),
+            ("contentType", "text/html"),
+            ("md5", "f" * 32),
+        ):
+            with self.subTest(attachment_field=field):
+                parent, children = synthetic_v2_state(post_commit=True)
+                children[1]["data"][field] = value
+                observed = contract.serializer_guard_from_records(parent, children)
+                with self.assertRaisesRegex(contract.ContractError, "stable_data_sha256"):
+                    contract.classify_serializer_guard(
+                        expected, observed, allow_equivalent=True
+                    )
+
+        parent, children = synthetic_v2_state(post_commit=True)
+        children[1]["content_sha256"] = SHA_A
+        with self.assertRaisesRegex(contract.ContractError, "content_sha256"):
+            contract.classify_serializer_guard(
+                expected,
+                contract.serializer_guard_from_records(parent, children),
+                allow_equivalent=True,
+            )
+
+        parent, children = synthetic_v2_state(post_commit=True)
+        children[0]["data"]["note"] = "Changed note"
+        with self.assertRaisesRegex(contract.ContractError, "note content"):
+            contract.classify_serializer_guard(
+                expected,
+                contract.serializer_guard_from_records(parent, children),
+                allow_equivalent=True,
+            )
+
+        parent, children = synthetic_v2_state(post_commit=True)
+        parent["tags"].append({"tag": "new-member"})
+        with self.assertRaisesRegex(contract.ContractError, "tags member drift"):
+            contract.classify_serializer_guard(
+                expected,
+                contract.serializer_guard_from_records(parent, children),
+                allow_equivalent=True,
+            )
 
     def test_rejects_nonempty_creator_replacement_in_v1(self) -> None:
         draft = synthetic_draft()

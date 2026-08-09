@@ -196,13 +196,15 @@ the old proposal/plan/acceptance is stale and cannot be reused.
 
 `apply-patch --dry-run` applies typed operations to an isolated copy, records
 all accept/reject/defer decisions there, and runs full RKN validation, but
-leaves the live network unchanged. Without `--dry-run`, the same validated copy
-replaces live state and all ledgers through the existing transaction journal
-under an exclusive lock. Repeated acceptances and second terminal decisions
-fail closed. Governance events advance the network audit snapshot even when
-every decision is reject or defer. Therefore a deferred action requires a newly
-regenerated, rebased proposal/plan/acceptance bound to the next snapshot; the
-original proposal cannot be reused.
+leaves the live network unchanged. Without `--dry-run`, the validated staged
+records are compared with the locked live records. Unchanged state and ledgers
+are not replaced; changed ledgers copy the exact live bytes and append only the
+validated canonical suffix through the transaction journal. Any staged rewrite
+of prior records fails closed. Repeated acceptances and second terminal
+decisions fail closed. Governance events advance the network audit snapshot
+even when every decision is reject or defer. Therefore a deferred action
+requires a newly regenerated, rebased proposal/plan/acceptance bound to the next
+snapshot; the original proposal cannot be reused.
 
 `prepare-patch` writes only a previously nonexistent direct child of
 `<root>/patch-plans`. Existing targets, symlinks or symlink parents, aliases of

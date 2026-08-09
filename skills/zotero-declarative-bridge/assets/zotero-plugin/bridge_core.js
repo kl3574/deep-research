@@ -11,11 +11,18 @@ var ZoteroDeclarativeBridgeCore = (() => {
     ["ensure_pdf_attachment", 3],
   ]);
   const METADATA_REPAIR_SCHEMA = "ZoteroParentMetadataRepairTransaction/v1";
+  const METADATA_REPAIR_SCHEMA_V2 = "ZoteroParentMetadataRepairTransaction/v2";
   const METADATA_REPAIR_OPERATION = "ensure_parent_journal_metadata_v1";
   const METADATA_DUPLICATE_TITLE_PREFIX_MIN_CHARS = 20;
   const METADATA_PROFILE_FIELDS = [
     "DOI", "creators", "publicationTitle", "volume", "issue", "pages", "date",
   ];
+  const METADATA_SERIALIZER_GUARD_PROFILE = "zotero_managed_storage_equivalence_v1";
+  const METADATA_SERIALIZER_PARENT_EXCLUDED_FIELDS = new Set([
+    "DOI", "collections", "creators", "date", "dateModified", "issue", "pages",
+    "publicationTitle", "tags", "version", "volume",
+  ]);
+  const METADATA_SERIALIZER_ATTACHMENT_ALLOWED_FIELDS = new Set(["filename", "version"]);
   const STORAGE_BLOCK_TAGS = new Set([
     "blockquote", "div", "h1", "h2", "h3", "h4", "h5", "h6", "li",
     "ol", "p", "pre", "table", "tbody", "td", "th", "thead", "tr", "ul",
@@ -473,6 +480,152 @@ var ZoteroDeclarativeBridgeCore = (() => {
     };
   }
 
+  function metadataSerializerSortedValues(values) {
+    assertion(Array.isArray(values), "metadata serializer set input must be an array");
+    return values.map(value => JSON.parse(JSON.stringify(value))).sort((left, right) => {
+      const leftBytes = new TextEncoder().encode(stableStringify(left));
+      const rightBytes = new TextEncoder().encode(stableStringify(right));
+      const length = Math.min(leftBytes.length, rightBytes.length);
+      for (let index = 0; index < length; index++) {
+        if (leftBytes[index] !== rightBytes[index]) return leftBytes[index] - rightBytes[index];
+      }
+      return leftBytes.length - rightBytes.length;
+    });
+  }
+
+  function metadataSerializerParentStableData(data) {
+    assertion(data && typeof data === "object" && !Array.isArray(data), "metadata serializer parent data is invalid");
+    return Object.fromEntries(
+      Object.entries(data)
+        .filter(([field]) => !METADATA_SERIALIZER_PARENT_EXCLUDED_FIELDS.has(field))
+        .map(([field, value]) => [field, JSON.parse(JSON.stringify(value))]),
+    );
+  }
+
+  function metadataSerializerAttachmentStableData(data) {
+    assertion(data && typeof data === "object" && !Array.isArray(data), "metadata serializer attachment data is invalid");
+    return Object.fromEntries(
+      Object.entries(data)
+        .filter(([field]) => !METADATA_SERIALIZER_ATTACHMENT_ALLOWED_FIELDS.has(field))
+        .map(([field, value]) => [field, JSON.parse(JSON.stringify(value))]),
+    );
+  }
+
+  function validateMetadataSerializerGuard(guard, label) {
+    exactKeys(guard, ["profile", "parent", "children", "guard_sha256"], label);
+    assertion(guard.profile === METADATA_SERIALIZER_GUARD_PROFILE, `${label}.profile is unsupported`);
+    exactKeys(guard.parent, [
+      "raw_data_sha256", "stable_nonprofile_sha256", "tags_raw_sha256",
+      "tags_set_sha256", "collections_raw_sha256", "collections_set_sha256",
+    ], `${label}.parent`);
+    for (const [field, value] of Object.entries(guard.parent)) sha(value, `${label}.parent.${field}`);
+    assertion(Array.isArray(guard.children) && guard.children.length > 0 && guard.children.length <= 100, `${label}.children is invalid`);
+    const keys = [];
+    guard.children.forEach((child, index) => {
+      const childLabel = `${label}.children[${index}]`;
+      assertion(child && typeof child === "object" && !Array.isArray(child), `${childLabel} is invalid`);
+      if (child.item_type === "note") {
+        exactKeys(child, ["key", "item_type", "version", "raw_data_sha256", "content_sha256"], childLabel);
+        sha(child.content_sha256, `${childLabel}.content_sha256`);
+      }
+      else if (child.item_type === "attachment") {
+        exactKeys(child, [
+          "key", "item_type", "version", "raw_data_sha256", "stable_data_sha256",
+          "filename_sha256", "storage_path_sha256", "content_sha256", "size_bytes",
+        ], childLabel);
+        positiveInt(child.size_bytes, `${childLabel}.size_bytes`, 268435456);
+        for (const field of [
+          "stable_data_sha256", "filename_sha256", "storage_path_sha256", "content_sha256",
+        ]) sha(child[field], `${childLabel}.${field}`);
+      }
+      else assertion(false, `${childLabel}.item_type is unsupported`);
+      keys.push(key(child.key, `${childLabel}.key`));
+      positiveInt(child.version, `${childLabel}.version`);
+      sha(child.raw_data_sha256, `${childLabel}.raw_data_sha256`);
+    });
+    assertion(stableStringify(keys) === stableStringify([...keys].sort()) && new Set(keys).size === keys.length, `${label}.children is not key-sorted and unique`);
+    sha(guard.guard_sha256, `${label}.guard_sha256`);
+    return guard;
+  }
+
+  function metadataSerializerRawHashes(expected, observed) {
+    return {
+      expected_guard_sha256: expected.guard_sha256,
+      observed_guard_sha256: observed.guard_sha256,
+      parent: {
+        expected_raw_data_sha256: expected.parent.raw_data_sha256,
+        observed_raw_data_sha256: observed.parent.raw_data_sha256,
+        expected_tags_raw_sha256: expected.parent.tags_raw_sha256,
+        observed_tags_raw_sha256: observed.parent.tags_raw_sha256,
+        expected_collections_raw_sha256: expected.parent.collections_raw_sha256,
+        observed_collections_raw_sha256: observed.parent.collections_raw_sha256,
+      },
+      children: expected.children.map((baseline, index) => {
+        const current = observed.children[index];
+        const result = {
+          key: baseline.key,
+          expected_raw_data_sha256: baseline.raw_data_sha256,
+          observed_raw_data_sha256: current.raw_data_sha256,
+        };
+        if (baseline.item_type === "attachment") {
+          result.expected_filename_sha256 = baseline.filename_sha256;
+          result.observed_filename_sha256 = current.filename_sha256;
+          result.expected_storage_path_sha256 = baseline.storage_path_sha256;
+          result.observed_storage_path_sha256 = current.storage_path_sha256;
+        }
+        return result;
+      }),
+    };
+  }
+
+  function classifyMetadataSerializerGuard(expected, observed, allowEquivalent) {
+    validateMetadataSerializerGuard(expected, "expected metadata serializer guard");
+    validateMetadataSerializerGuard(observed, "observed metadata serializer guard");
+    assertion(typeof allowEquivalent === "boolean", "metadata serializer equivalence flag is invalid");
+    assertion(
+      expected.parent.stable_nonprofile_sha256 === observed.parent.stable_nonprofile_sha256,
+      "metadata parent non-profile drift",
+    );
+    let parentRawSetsExact = true;
+    for (const field of ["tags", "collections"]) {
+      assertion(
+        expected.parent[`${field}_set_sha256`] === observed.parent[`${field}_set_sha256`],
+        `metadata parent ${field} member drift`,
+      );
+      parentRawSetsExact = parentRawSetsExact
+        && expected.parent[`${field}_raw_sha256`] === observed.parent[`${field}_raw_sha256`];
+    }
+    assertion(expected.children.length === observed.children.length, "metadata child topology drift");
+    let childrenRawExact = true;
+    expected.children.forEach((baseline, index) => {
+      const current = observed.children[index];
+      assertion(
+        baseline.key === current.key && baseline.item_type === current.item_type,
+        "metadata child key or type drift",
+      );
+      if (baseline.item_type === "note") {
+        assertion(stableStringify(baseline) === stableStringify(current), "metadata note content or metadata drift");
+        return;
+      }
+      for (const field of ["stable_data_sha256", "content_sha256", "size_bytes"]) {
+        assertion(baseline[field] === current[field], `metadata attachment ${baseline.key} ${field} drift`);
+      }
+      assertion(current.version >= baseline.version, `metadata attachment ${baseline.key} version regressed`);
+      const rawExact = [
+        "version", "raw_data_sha256", "filename_sha256", "storage_path_sha256",
+      ].every(field => baseline[field] === current[field]);
+      childrenRawExact = childrenRawExact && rawExact;
+    });
+    const exact = parentRawSetsExact && childrenRawExact;
+    assertion(exact || allowEquivalent, "metadata serializer content drift");
+    return {
+      content_match: exact
+        ? "exact"
+        : "zotero_managed_attachment_rename_and_set_order_equivalent",
+      raw_hashes: metadataSerializerRawHashes(expected, observed),
+    };
+  }
+
   function validateMetadataTransition(expected, desired) {
     const changed = METADATA_PROFILE_FIELDS.filter(field => stableStringify(expected[field]) !== stableStringify(desired[field]));
     assertion(changed.length > 0, "metadata repair profiles are unchanged");
@@ -490,11 +643,14 @@ var ZoteroDeclarativeBridgeCore = (() => {
   }
 
   function validateMetadataRepairManifest(manifest) {
+    const isV2 = manifest && manifest.schema === METADATA_REPAIR_SCHEMA_V2;
     exactKeys(manifest, [
       "schema", "transaction_id", "generated_at", "reviewed_source_sha256",
       "source_evidence_sidecar_ref", "target", "entry", "manifest_sha256",
+      ...(isV2 ? ["execution_intent"] : []),
     ], "metadata repair manifest");
-    assertion(manifest.schema === METADATA_REPAIR_SCHEMA, "metadata repair manifest schema mismatch");
+    assertion([METADATA_REPAIR_SCHEMA, METADATA_REPAIR_SCHEMA_V2].includes(manifest.schema), "metadata repair manifest schema mismatch");
+    if (isV2) assertion(["repair", "readback_only"].includes(manifest.execution_intent), "metadata repair execution_intent is invalid");
     assertion(typeof manifest.transaction_id === "string" && TX_RE.test(manifest.transaction_id), "metadata repair transaction_id is invalid");
     text(manifest.generated_at, "metadata repair generated_at", false, 64);
     sha(manifest.reviewed_source_sha256, "metadata repair reviewed_source_sha256");
@@ -510,7 +666,7 @@ var ZoteroDeclarativeBridgeCore = (() => {
     validateTarget(manifest.target);
     const entry = exactKeys(manifest.entry, [
       "parent", "children", "children_sha256", "evidence_pdf_key",
-      "duplicate_preconditions", "operation",
+      "duplicate_preconditions", "operation", ...(isV2 ? ["serializer_guard"] : []),
     ], "metadata repair entry");
     const parent = exactKeys(entry.parent, [
       "key", "version", "item_type", "title", "short_title", "expected_target_membership",
@@ -522,6 +678,26 @@ var ZoteroDeclarativeBridgeCore = (() => {
     text(parent.short_title, "metadata repair parent.short_title", true, 4096);
     assertion(parent.expected_target_membership === true, "metadata repair parent membership must be true");
     const children = validateMetadataChildren(entry.children, "metadata repair children");
+    if (isV2) {
+      const guard = validateMetadataSerializerGuard(entry.serializer_guard, "metadata repair serializer_guard");
+      assertion(
+        stableStringify(guard.children.map(child => [child.key, child.item_type, child.version]))
+          === stableStringify(children.map(child => [child.key, child.item_type, child.version])),
+        "metadata repair serializer guard child baseline mismatch",
+      );
+      children.forEach((child, index) => {
+        assertion(
+          child.content_sha256 === guard.children[index].content_sha256,
+          "metadata repair serializer guard child content mismatch",
+        );
+        if (child.item_type === "attachment") {
+          assertion(
+            child.size_bytes === guard.children[index].size_bytes,
+            "metadata repair serializer guard attachment size mismatch",
+          );
+        }
+      });
+    }
     sha(entry.children_sha256, "metadata repair children_sha256");
     const evidencePDFKey = key(entry.evidence_pdf_key, "metadata repair evidence_pdf_key");
     assertion(children.filter(child => child.key === evidencePDFKey && child.item_type === "attachment" && child.content_type === "application/pdf").length === 1, "metadata repair evidence PDF binding is invalid");
@@ -559,6 +735,29 @@ var ZoteroDeclarativeBridgeCore = (() => {
     assertion(observed.parent_data_sha256 === operation.expected_parent_data_sha256, "metadata content drift");
     assertion(observed.parent_version === operation.expected_parent_version, "metadata parent-version drift");
     return {decision: "needs_write"};
+  }
+
+  function classifyMetadataRepairV2(operation, expectedGuard, observed, allowEquivalent) {
+    const desired = observed.parent_data_sha256 === operation.desired_parent_data_sha256;
+    const expected = observed.parent_data_sha256 === operation.expected_parent_data_sha256;
+    if (desired) {
+      assertion(observed.parent_version >= operation.expected_parent_version, "metadata parent-version regressed");
+      const match = classifyMetadataSerializerGuard(expectedGuard, observed.serializer_guard, allowEquivalent);
+      return {decision: "satisfied", ...match};
+    }
+    if (expected) {
+      classifyMetadataSerializerGuard(expectedGuard, observed.serializer_guard, false);
+      assertion(observed.parent_version === operation.expected_parent_version, "metadata parent-version drift");
+      return {decision: "needs_write"};
+    }
+    assertion(
+      allowEquivalent && observed.profile_sha256 === operation.desired_profile_sha256,
+      "metadata content drift",
+    );
+    assertion(observed.parent_version >= operation.expected_parent_version, "metadata parent-version regressed");
+    const match = classifyMetadataSerializerGuard(expectedGuard, observed.serializer_guard, true);
+    assertion(match.content_match !== "exact", "metadata content drift");
+    return {decision: "satisfied", ...match};
   }
 
   function normalizeMetadataDuplicateText(value) {
@@ -730,6 +929,8 @@ var ZoteroDeclarativeBridgeCore = (() => {
     commitStateAfterFailure,
     classifyMembership,
     classifyMetadataRepair,
+    classifyMetadataRepairV2,
+    classifyMetadataSerializerGuard,
     classifyNote,
     classifyShortTitle,
     normalizeDOI,
@@ -738,6 +939,9 @@ var ZoteroDeclarativeBridgeCore = (() => {
     metadataRepairCommitStateAfterFailure,
     metadataRepairParentIsClean,
     metadataRepairParentData,
+    metadataSerializerAttachmentStableData,
+    metadataSerializerParentStableData,
+    metadataSerializerSortedValues,
     noteStorageDOMFingerprint,
     noteStorageHTMLFingerprint,
     parentIdentity,

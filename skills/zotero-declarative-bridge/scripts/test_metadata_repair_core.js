@@ -100,6 +100,91 @@ function fixture() {
   return manifest;
 }
 
+function serializerState(postCommit = false) {
+  const parent = {
+    key: "PARENT01", version: postCommit ? 9 : 3, itemType: "journalArticle",
+    title: "Synthetic sensitivity study",
+    shortTitle: "Synthetic setting: reviewed conclusion",
+    abstractNote: "Bound non-profile metadata",
+    DOI: postCommit ? "10.0000/synthetic.new" : "10.0000/synthetic.old",
+    creators: postCommit
+      ? [
+        {creatorType: "author", firstName: "Alex", lastName: "Example"},
+        {creatorType: "author", firstName: "Blair", lastName: "Sample"},
+      ]
+      : [],
+    publicationTitle: postCommit ? "Synthetic Journal" : "",
+    volume: postCommit ? "7" : "", issue: postCommit ? "2" : "",
+    pages: postCommit ? "10-20" : "", date: "2026",
+    url: "https://example.invalid/parent",
+    tags: postCommit ? [{tag: "method"}, {tag: "reviewed"}] : [{tag: "reviewed"}, {tag: "method"}],
+    collections: postCommit ? ["OTHER001", "COLL0001"] : ["COLL0001", "OTHER001"],
+    dateAdded: "2026-01-01T00:00:00Z",
+    dateModified: postCommit ? "2026-01-03T00:00:00Z" : "2026-01-01T00:00:00Z",
+    relations: {},
+  };
+  const note = {
+    key: "NOTE0001", version: 2, itemType: "note", parentItem: "PARENT01",
+    note: '<div data-schema-version="9"><p>Synthetic note</p></div>', tags: [], relations: {},
+  };
+  const attachment = {
+    key: "PDF00001", version: postCommit ? 9 : 5, itemType: "attachment",
+    parentItem: "PARENT01", title: "Synthetic sensitivity study - full text",
+    url: "https://example.invalid/paper.pdf", contentType: "application/pdf",
+    linkMode: "imported_file", md5: "0123456789abcdef0123456789abcdef",
+    mtime: 1700000000000,
+    filename: postCommit
+      ? "Example and Sample - 2026 - Synthetic sensitivity study.pdf"
+      : "2026 - Synthetic sensitivity study.pdf",
+    collections: [], tags: [], relations: {}, dateAdded: "2026-01-01T00:00:00Z",
+    dateModified: "2026-01-01T00:00:00Z",
+  };
+  return {
+    parent,
+    note,
+    attachment,
+    storagePath: postCommit
+      ? "/synthetic/storage/PDF00001/Example and Sample - 2026 - Synthetic sensitivity study.pdf"
+      : "/synthetic/storage/PDF00001/2026 - Synthetic sensitivity study.pdf",
+    contentHash: childHash,
+    sizeBytes: 1234,
+  };
+}
+
+function serializerGuardFromState(state) {
+  const unsigned = {
+    profile: "zotero_managed_storage_equivalence_v1",
+    parent: {
+      raw_data_sha256: sha(state.parent),
+      stable_nonprofile_sha256: sha(core.metadataSerializerParentStableData(state.parent)),
+      tags_raw_sha256: sha(state.parent.tags),
+      tags_set_sha256: sha(core.metadataSerializerSortedValues(state.parent.tags)),
+      collections_raw_sha256: sha(state.parent.collections),
+      collections_set_sha256: sha(core.metadataSerializerSortedValues(state.parent.collections)),
+    },
+    children: [
+      {
+        key: "NOTE0001", item_type: "note", version: 2,
+        raw_data_sha256: sha(state.note),
+        content_sha256: "sha256:" + crypto.createHash("sha256").update(state.note.note).digest("hex"),
+      },
+      {
+        key: "PDF00001", item_type: "attachment", version: state.attachment.version,
+        raw_data_sha256: sha(state.attachment),
+        stable_data_sha256: sha(core.metadataSerializerAttachmentStableData(state.attachment)),
+        filename_sha256: sha(state.attachment.filename),
+        storage_path_sha256: sha(state.storagePath),
+        content_sha256: state.contentHash, size_bytes: state.sizeBytes,
+      },
+    ],
+  };
+  return {...unsigned, guard_sha256: sha(unsigned)};
+}
+
+function serializerGuard(postCommit = false) {
+  return serializerGuardFromState(serializerState(postCommit));
+}
+
 test("isolated metadata schema validates without widening the old allowlist", () => {
   const manifest = fixture();
   assert.equal(core.validateMetadataRepairManifest(manifest), true);
@@ -143,6 +228,106 @@ test("classifier admits only exact expected or exact desired parent data", () =>
   );
 });
 
+test("v2 classifier limits post-commit equivalence to Zotero-managed rename and set order", () => {
+  const operation = fixture().entry.operation;
+  const expected = serializerGuard(false);
+  const observed = serializerGuard(true);
+  const decision = core.classifyMetadataRepairV2(
+    operation,
+    expected,
+    {
+      parent_version: 9,
+      parent_data_sha256: "sha256:" + "9".repeat(64),
+      profile_sha256: operation.desired_profile_sha256,
+      serializer_guard: observed,
+    },
+    true,
+  );
+  assert.equal(decision.decision, "satisfied");
+  assert.equal(
+    decision.content_match,
+    "zotero_managed_attachment_rename_and_set_order_equivalent",
+  );
+  assert.equal(decision.raw_hashes.expected_guard_sha256, expected.guard_sha256);
+  assert.equal(decision.raw_hashes.observed_guard_sha256, observed.guard_sha256);
+  assert.throws(
+    () => core.classifyMetadataRepairV2(
+      operation,
+      expected,
+      {
+        parent_version: 9,
+        parent_data_sha256: "sha256:" + "9".repeat(64),
+        profile_sha256: operation.desired_profile_sha256,
+        serializer_guard: observed,
+      },
+      false,
+    ),
+    /metadata content drift|serializer content drift/,
+  );
+});
+
+test("v2 equivalence rejects stable attachment, note, byte, and tag-member drift", () => {
+  const expected = serializerGuard(false);
+  const operation = fixture().entry.operation;
+  const classify = observed => core.classifyMetadataRepairV2(
+    operation,
+    expected,
+    {
+      parent_version: 9,
+      parent_data_sha256: "sha256:" + "9".repeat(64),
+      profile_sha256: operation.desired_profile_sha256,
+      serializer_guard: observed,
+    },
+    true,
+  );
+
+  const changedValues = {
+    title: "Changed attachment title",
+    url: "https://example.invalid/other.pdf",
+    linkMode: "imported_url",
+    contentType: "text/html",
+    md5: "f".repeat(32),
+  };
+  for (const [field, value] of Object.entries(changedValues)) {
+    const state = serializerState(true);
+    state.attachment[field] = value;
+    const observed = serializerGuardFromState(state);
+    assert.throws(() => classify(observed), new RegExp(`stable_data_sha256 drift`), field);
+  }
+
+  const bytesState = serializerState(true);
+  bytesState.contentHash = "sha256:" + "a".repeat(64);
+  const bytes = serializerGuardFromState(bytesState);
+  assert.throws(() => classify(bytes), /content_sha256 drift/);
+
+  const noteState = serializerState(true);
+  noteState.note.note = "Changed note";
+  const note = serializerGuardFromState(noteState);
+  assert.throws(() => classify(note), /note content or metadata drift/);
+
+  const tagsState = serializerState(true);
+  tagsState.parent.tags.push({tag: "new-member"});
+  const tags = serializerGuardFromState(tagsState);
+  assert.throws(() => classify(tags), /tags member drift/);
+});
+
+test("v2 manifest is isolated while v1 remains exact and unchanged", () => {
+  const manifest = fixture();
+  manifest.schema = "ZoteroParentMetadataRepairTransaction/v2";
+  manifest.execution_intent = "repair";
+  const guard = serializerGuard(false);
+  guard.children[0].content_sha256 = manifest.entry.children[0].content_sha256;
+  guard.guard_sha256 = sha({...guard, guard_sha256: undefined});
+  manifest.entry.serializer_guard = guard;
+  manifest.manifest_sha256 = sha({...manifest, manifest_sha256: undefined});
+  assert.equal(core.validateMetadataRepairManifest(manifest), true);
+
+  const legacy = fixture();
+  assert.equal(core.validateMetadataRepairManifest(legacy), true);
+  legacy.entry.serializer_guard = guard;
+  assert.throws(() => core.validateMetadataRepairManifest(legacy), /entry keys differ/);
+});
+
 test("expected state still enforces the exact parent version", () => {
   const operation = fixture().entry.operation;
   assert.throws(
@@ -151,6 +336,39 @@ test("expected state still enforces the exact parent version", () => {
       parent_data_sha256: operation.expected_parent_data_sha256,
     }),
     /parent-version drift/,
+  );
+});
+
+test("v2 post and readback states reject a regressed parent version", () => {
+  const operation = fixture().entry.operation;
+  const expected = serializerGuard(false);
+  assert.throws(
+    () => core.classifyMetadataRepairV2(
+      operation,
+      expected,
+      {
+        parent_version: operation.expected_parent_version - 1,
+        parent_data_sha256: operation.desired_parent_data_sha256,
+        profile_sha256: operation.desired_profile_sha256,
+        serializer_guard: expected,
+      },
+      true,
+    ),
+    /parent-version regressed/,
+  );
+  assert.throws(
+    () => core.classifyMetadataRepairV2(
+      operation,
+      expected,
+      {
+        parent_version: operation.expected_parent_version - 1,
+        parent_data_sha256: "sha256:" + "9".repeat(64),
+        profile_sha256: operation.desired_profile_sha256,
+        serializer_guard: serializerGuard(true),
+      },
+      true,
+    ),
+    /parent-version regressed/,
   );
 });
 

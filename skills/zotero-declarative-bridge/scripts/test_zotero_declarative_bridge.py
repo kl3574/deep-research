@@ -147,7 +147,7 @@ class BridgeTests(unittest.TestCase):
     def test_manifest_and_bootstrap_expose_zotero_9_diagnostics(self) -> None:
         manifest = json.loads((PLUGIN_ROOT / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["manifest_version"], 2)
-        self.assertEqual(manifest["version"], "0.1.9")
+        self.assertEqual(manifest["version"], "0.1.10")
         self.assertEqual(
             manifest["applications"]["zotero"]["update_url"],
             (

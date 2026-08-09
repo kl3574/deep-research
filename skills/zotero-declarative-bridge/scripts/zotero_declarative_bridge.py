@@ -24,6 +24,7 @@ from typing import Any
 
 MANIFEST_SCHEMA = "ZoteroDeclarativeTransaction/v1"
 METADATA_REPAIR_MANIFEST_SCHEMA = "ZoteroParentMetadataRepairTransaction/v1"
+METADATA_REPAIR_MANIFEST_SCHEMA_V2 = "ZoteroParentMetadataRepairTransaction/v2"
 REVIEWED_BATCH_SCHEMA = "ZoteroReviewedMutationBatch/v1"
 REVIEWED_SOURCE_HASH_CONTRACT = "canonical-json-v1"
 DECISION_SHORT_TITLE_POLICY = "decision-oriented"
@@ -36,6 +37,8 @@ HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 SHA_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 TX_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 BASE_URL = "http://127.0.0.1:23119"
+ZOTERO_STORAGE_ROOT = (Path.home() / "Zotero" / "storage").resolve()
+MAX_METADATA_ATTACHMENT_BYTES = 268_435_456
 OP_ORDER = {
     "ensure_collection_membership": 0,
     "ensure_parent_short_title": 1,
@@ -633,6 +636,8 @@ def validate_metadata_repair_manifest(
     manifest: Any, *, require_digest: bool = True
 ) -> dict[str, Any]:
     contract = load_metadata_repair_contract()
+    schema = manifest.get("schema") if isinstance(manifest, dict) else None
+    is_v2 = schema == METADATA_REPAIR_MANIFEST_SCHEMA_V2
     expected = {
         "schema",
         "transaction_id",
@@ -642,11 +647,18 @@ def validate_metadata_repair_manifest(
         "target",
         "entry",
     }
+    if is_v2:
+        expected.add("execution_intent")
     if require_digest:
         expected.add("manifest_sha256")
     manifest = exact_keys(manifest, expected, "metadata repair manifest")
-    if manifest["schema"] != METADATA_REPAIR_MANIFEST_SCHEMA:
+    if manifest["schema"] not in {
+        METADATA_REPAIR_MANIFEST_SCHEMA,
+        METADATA_REPAIR_MANIFEST_SCHEMA_V2,
+    }:
         raise BridgeError("metadata repair manifest schema mismatch")
+    if is_v2 and manifest["execution_intent"] not in {"repair", "readback_only"}:
+        raise BridgeError("metadata repair execution_intent is invalid")
     if not isinstance(manifest["transaction_id"], str) or not TX_RE.fullmatch(
         manifest["transaction_id"]
     ):
@@ -658,16 +670,19 @@ def validate_metadata_repair_manifest(
         "metadata repair source_evidence_sidecar_ref",
     )
     validate_target(manifest["target"])
+    entry_keys = {
+        "parent",
+        "children",
+        "children_sha256",
+        "evidence_pdf_key",
+        "duplicate_preconditions",
+        "operation",
+    }
+    if is_v2:
+        entry_keys.add("serializer_guard")
     entry = exact_keys(
         manifest["entry"],
-        {
-            "parent",
-            "children",
-            "children_sha256",
-            "evidence_pdf_key",
-            "duplicate_preconditions",
-            "operation",
-        },
+        entry_keys,
         "metadata repair entry",
     )
     parent = exact_keys(
@@ -686,6 +701,26 @@ def validate_metadata_repair_manifest(
     children = contract.validate_children(
         entry["children"], "metadata repair entry.children"
     )
+    if is_v2:
+        try:
+            serializer_guard = contract.validate_serializer_guard(
+                entry["serializer_guard"], "metadata repair entry.serializer_guard"
+            )
+        except contract.ContractError as exc:
+            raise BridgeError(str(exc)) from exc
+        if [
+            (child["key"], child["item_type"], child["version"])
+            for child in serializer_guard["children"]
+        ] != [
+            (child["key"], child["item_type"], child["version"])
+            for child in children
+        ]:
+            raise BridgeError("metadata repair serializer guard child baseline mismatch")
+        for child, guarded in zip(children, serializer_guard["children"], strict=True):
+            if child["content_sha256"] != guarded["content_sha256"]:
+                raise BridgeError("metadata repair serializer guard child content mismatch")
+            if child["item_type"] == "attachment" and child["size_bytes"] != guarded["size_bytes"]:
+                raise BridgeError("metadata repair serializer guard attachment size mismatch")
     if sha256_value(children) != entry["children_sha256"]:
         raise BridgeError("metadata repair children_sha256 is inconsistent")
     evidence_pdf_key = item_key(
@@ -770,7 +805,10 @@ def seal_metadata_repair_manifest(unsigned: dict[str, Any]) -> dict[str, Any]:
 def validate_any_manifest(manifest: Any) -> dict[str, Any]:
     if (
         isinstance(manifest, dict)
-        and manifest.get("schema") == METADATA_REPAIR_MANIFEST_SCHEMA
+        and manifest.get("schema") in {
+            METADATA_REPAIR_MANIFEST_SCHEMA,
+            METADATA_REPAIR_MANIFEST_SCHEMA_V2,
+        }
     ):
         return validate_metadata_repair_manifest(manifest)
     return validate_manifest(manifest)
@@ -867,6 +905,164 @@ def api_get(path: str, base_url: str = BASE_URL) -> Any:
             return json.loads(response.read().decode("utf-8"))
     except (OSError, ValueError, json.JSONDecodeError, urllib.error.HTTPError) as exc:
         raise BridgeError(f"Local API GET failed for {path}: {exc}") from exc
+
+
+class _RejectRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        return None
+
+
+def _attachment_path_from_local_api_redirect(
+    location: Any,
+    attachment_key: str,
+) -> Path:
+    if not isinstance(location, str):
+        raise BridgeError("Local API attachment file redirect is missing")
+    parsed = urllib.parse.urlsplit(location)
+    if (
+        parsed.scheme != "file"
+        or parsed.netloc not in {"", "localhost"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise BridgeError("Local API attachment file redirect is outside managed storage")
+    candidate = Path(urllib.parse.unquote(parsed.path))
+    expected_directory = ZOTERO_STORAGE_ROOT / attachment_key
+    if not candidate.name or candidate.parent != expected_directory:
+        raise BridgeError("Local API attachment file redirect is outside managed storage")
+    try:
+        for directory in (ZOTERO_STORAGE_ROOT, expected_directory):
+            metadata = directory.lstat()
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+                raise OSError("managed storage directory is not a regular directory")
+        metadata = candidate.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise OSError("attachment is not a regular file")
+    except OSError as exc:
+        raise BridgeError("Local API attachment file is unavailable") from exc
+    return candidate
+
+
+def local_api_attachment_file_evidence(
+    group_id: int,
+    attachment_key: str,
+    *,
+    expected_size_bytes: int,
+    expected_content_sha256: str,
+    base_url: str = BASE_URL,
+) -> dict[str, Any]:
+    """Read one reviewed attachment through Zotero's Local API file redirect."""
+    group_id = positive_int(group_id, "metadata attachment group_id")
+    attachment_key = item_key(attachment_key, "metadata attachment key")
+    expected_size_bytes = positive_int(
+        expected_size_bytes,
+        "metadata attachment expected_size_bytes",
+        maximum=MAX_METADATA_ATTACHMENT_BYTES,
+    )
+    expected_content_sha256 = sha(
+        expected_content_sha256,
+        "metadata attachment expected_content_sha256",
+    )
+    parsed = urllib.parse.urlsplit(base_url)
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname != "127.0.0.1"
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise BridgeError(
+            "base URL must be a credential-free literal 127.0.0.1 HTTP origin"
+        )
+    endpoint = (
+        base_url.rstrip("/")
+        + f"/api/groups/{group_id}/items/{attachment_key}/file"
+    )
+    request = urllib.request.Request(
+        endpoint,
+        headers={
+            "Zotero-API-Version": "3",
+            "User-Agent": "deep-research-zotero-bridge/0.1",
+        },
+    )
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        _RejectRedirectHandler(),
+    )
+    location: str | None = None
+    try:
+        with opener.open(request, timeout=10.0):
+            raise BridgeError("Local API attachment endpoint did not redirect")
+    except urllib.error.HTTPError as exc:
+        if exc.code not in {301, 302, 303, 307, 308}:
+            raise BridgeError("Local API attachment file request failed") from exc
+        location = exc.headers.get("Location")
+        try:
+            exc.close()
+        except (AttributeError, OSError):
+            pass
+    except (OSError, ValueError) as exc:
+        raise BridgeError("Local API attachment file request failed") from exc
+    candidate = _attachment_path_from_local_api_redirect(location, attachment_key)
+    flags = os.O_RDONLY | os.O_CLOEXEC
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise BridgeError("platform cannot safely read Local API attachment files")
+    descriptor = -1
+    try:
+        descriptor = os.open(candidate, flags | nofollow)
+        before = os.fstat(descriptor)
+        path_metadata = candidate.lstat()
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_dev != path_metadata.st_dev
+            or before.st_ino != path_metadata.st_ino
+            or before.st_size <= 0
+            or before.st_size > MAX_METADATA_ATTACHMENT_BYTES
+        ):
+            raise BridgeError("Local API attachment file identity is invalid")
+        digest = hashlib.sha256()
+        size_bytes = 0
+        magic = b""
+        while True:
+            block = os.read(descriptor, 1024 * 1024)
+            if not block:
+                break
+            if len(magic) < 5:
+                magic = (magic + block)[:5]
+            size_bytes += len(block)
+            if size_bytes > MAX_METADATA_ATTACHMENT_BYTES:
+                raise BridgeError("Local API attachment file is too large")
+            digest.update(block)
+        after = os.fstat(descriptor)
+    except OSError as exc:
+        raise BridgeError("Local API attachment file is unreadable") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    stable_fields = (
+        "st_dev",
+        "st_ino",
+        "st_mode",
+        "st_size",
+        "st_mtime_ns",
+        "st_ctime_ns",
+    )
+    if any(getattr(before, field) != getattr(after, field) for field in stable_fields):
+        raise BridgeError("Local API attachment file changed during read")
+    if size_bytes != before.st_size or size_bytes != expected_size_bytes:
+        raise BridgeError("metadata attachment file size drift")
+    observed_content_sha256 = "sha256:" + digest.hexdigest()
+    if observed_content_sha256 != expected_content_sha256:
+        raise BridgeError("metadata attachment file content hash drift")
+    if magic != b"%PDF-":
+        raise BridgeError("metadata attachment file is not a PDF")
+    return {
+        "storage_path": str(candidate),
+        "size_bytes": size_bytes,
+        "content_sha256": observed_content_sha256,
+    }
 
 
 def collection_contract(group_id: int, collection_key: str, base_url: str = BASE_URL) -> tuple[list[dict[str, str]], dict[str, Any]]:
@@ -1018,6 +1214,119 @@ def live_all_children(
     return children
 
 
+def live_all_child_records(
+    group_id: int,
+    parent_key: str,
+    base_url: str = BASE_URL,
+) -> list[dict[str, Any]]:
+    parent_key = item_key(parent_key, "parent key")
+    records: list[dict[str, Any]] = []
+    start = 0
+    while True:
+        query = urllib.parse.urlencode({"format": "json", "limit": 100, "start": start})
+        page = api_get(
+            f"/api/groups/{group_id}/items/{parent_key}/children?{query}", base_url
+        )
+        if not isinstance(page, list) or any(not isinstance(record, dict) for record in page):
+            raise BridgeError(f"child inventory is malformed for {parent_key}")
+        records.extend(page)
+        if len(page) < 100:
+            break
+        start += 100
+        if start > 100:
+            raise BridgeError(f"child inventory exceeds bridge limits for {parent_key}")
+    records.sort(key=lambda record: str(record.get("data", {}).get("key", "")))
+    return records
+
+
+def _storage_path_from_child_record(record: dict[str, Any]) -> str:
+    links = record.get("links")
+    enclosure = links.get("enclosure") if isinstance(links, dict) else None
+    href = enclosure.get("href") if isinstance(enclosure, dict) else None
+    if not isinstance(href, str):
+        return ""
+    parsed = urllib.parse.urlsplit(href)
+    if parsed.scheme != "file" or parsed.netloc not in {"", "localhost"}:
+        return ""
+    return urllib.parse.unquote(parsed.path)
+
+
+def metadata_serializer_records_from_local_api(
+    records: list[dict[str, Any]],
+    expected_children: list[dict[str, Any]],
+    *,
+    group_id: int,
+    parent_key: str,
+    base_url: str = BASE_URL,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    expected_by_key = {child["key"]: child for child in expected_children}
+    projected: list[dict[str, Any]] = []
+    serializer_records: list[dict[str, Any]] = []
+    for index, record in enumerate(records):
+        data = record.get("data") if isinstance(record, dict) else None
+        if not isinstance(data, dict) or data.get("parentItem") != parent_key:
+            raise BridgeError(f"metadata child record {index} is malformed")
+        key_value = item_key(data.get("key"), f"metadata child record {index}.key")
+        version = positive_int(data.get("version"), f"metadata child record {index}.version")
+        expected = expected_by_key.get(key_value)
+        if not isinstance(expected, dict) or expected.get("item_type") not in {"note", "attachment"}:
+            raise BridgeError(f"metadata child {key_value} was not reviewed")
+        if data.get("itemType") == "note" and expected["item_type"] == "note":
+            note = data.get("note")
+            if not isinstance(note, str):
+                raise BridgeError(f"metadata child note {key_value} has no exact content")
+            projected.append(
+                {
+                    "key": key_value,
+                    "version": version,
+                    "item_type": "note",
+                    "content_sha256": "sha256:"
+                    + hashlib.sha256(note.encode("utf-8")).hexdigest(),
+                }
+            )
+            serializer_records.append({"data": copy.deepcopy(data)})
+            continue
+        if data.get("itemType") != "attachment" or expected["item_type"] != "attachment":
+            raise BridgeError(f"metadata child {key_value} type drift")
+        evidence = local_api_attachment_file_evidence(
+            group_id,
+            key_value,
+            expected_size_bytes=expected["size_bytes"],
+            expected_content_sha256=expected["content_sha256"],
+            base_url=base_url,
+        )
+        if (
+            evidence.get("size_bytes") != expected["size_bytes"]
+            or evidence.get("content_sha256") != expected["content_sha256"]
+        ):
+            raise BridgeError(
+                f"metadata attachment {key_value} observed file evidence drift"
+            )
+        projected.append(
+            {
+                "key": key_value,
+                "version": version,
+                "item_type": "attachment",
+                "content_type": str(data.get("contentType", "") or ""),
+                "link_mode": str(data.get("linkMode", "") or ""),
+                "size_bytes": evidence["size_bytes"],
+                "content_sha256": evidence["content_sha256"],
+                "direct_collection_count": len(data.get("collections", [])),
+            }
+        )
+        serializer_records.append(
+            {
+                "data": copy.deepcopy(data),
+                "storage_path": evidence["storage_path"],
+                "content_sha256": evidence["content_sha256"],
+                "size_bytes": evidence["size_bytes"],
+            }
+        )
+    projected.sort(key=lambda child: child["key"])
+    serializer_records.sort(key=lambda wrapper: wrapper["data"]["key"])
+    return projected, serializer_records
+
+
 def live_library_top_items(
     group_id: int, base_url: str = BASE_URL
 ) -> list[dict[str, Any]]:
@@ -1046,6 +1355,7 @@ def compile_reviewed_metadata_repair(
     local_collection_id: int,
     source_hash_contract: str,
     base_url: str,
+    readback_only: bool = False,
 ) -> dict[str, Any]:
     contract = load_metadata_repair_contract()
     if source_hash_contract != contract.HASH_CONTRACT:
@@ -1054,6 +1364,9 @@ def compile_reviewed_metadata_repair(
         reviewed = contract.validate_reviewed_source(read_json(source))
     except contract.ContractError as exc:
         raise BridgeError(f"metadata repair reviewed source is invalid: {exc}") from exc
+    is_v2 = reviewed["schema"] == contract.REVIEWED_SCHEMA_V2
+    if readback_only and not is_v2:
+        raise BridgeError("readback-only metadata compilation requires reviewed source v2")
     raw_target = reviewed["target"]
     group_id = raw_target["group_id"]
     library_id = raw_target["local_library_id"]
@@ -1092,22 +1405,28 @@ def compile_reviewed_metadata_repair(
         raise BridgeError("metadata repair live parent is malformed")
     if record.get("version") not in {None, data.get("version")}:
         raise BridgeError("metadata repair Local API parent version mismatch")
+    observed_parent_version = positive_int(
+        data.get("version"), "metadata repair live parent version"
+    )
     comparisons = {
-        "version": data.get("version"),
         "item_type": data.get("itemType"),
         "title": str(data.get("title", "")),
         "short_title": str(data.get("shortTitle", "")),
     }
     expected_values = {
-        "version": source_parent["version"],
         "item_type": source_parent["item_type"],
         "title": source_parent["title"],
         "short_title": source_parent["short_title"],
     }
+    if not readback_only:
+        comparisons["version"] = observed_parent_version
+        expected_values["version"] = source_parent["version"]
     for field, observed in comparisons.items():
         if observed != expected_values[field]:
             display = "shortTitle" if field == "short_title" else field
             raise BridgeError(f"metadata repair parent {display} drift")
+    if readback_only and observed_parent_version < source_parent["version"]:
+        raise BridgeError("metadata repair parent version regressed")
     collections = data.get("collections")
     if not isinstance(collections, list) or collection_key not in collections:
         raise BridgeError("metadata repair parent collection membership drift")
@@ -1116,13 +1435,39 @@ def compile_reviewed_metadata_repair(
     except contract.ContractError as exc:
         raise BridgeError(f"metadata repair live profile is invalid: {exc}") from exc
     repair = source_entry["repair"]
-    if live_profile != repair["expected_profile"]:
-        raise BridgeError("metadata repair expected profile content drift")
-    children = live_all_children(
-        group_id, source_parent["key"], source_entry["children"], base_url
+    expected_live_profile = (
+        repair["desired_profile"] if readback_only else repair["expected_profile"]
     )
-    if children != source_entry["children"]:
-        raise BridgeError("metadata repair child inventory or content drift")
+    if live_profile != expected_live_profile:
+        raise BridgeError("metadata repair live profile content drift")
+    if is_v2:
+        raw_child_records = live_all_child_records(
+            group_id, source_parent["key"], base_url
+        )
+        children, serializer_records = metadata_serializer_records_from_local_api(
+            raw_child_records,
+            source_entry["children"],
+            group_id=group_id,
+            parent_key=source_parent["key"],
+            base_url=base_url,
+        )
+        try:
+            observed_guard = contract.serializer_guard_from_records(data, serializer_records)
+            contract.classify_serializer_guard(
+                source_entry["serializer_guard"],
+                observed_guard,
+                allow_equivalent=readback_only,
+            )
+        except contract.ContractError as exc:
+            raise BridgeError(f"metadata repair serializer guard drift: {exc}") from exc
+        if not readback_only and children != source_entry["children"]:
+            raise BridgeError("metadata repair child inventory or content drift")
+    else:
+        children = live_all_children(
+            group_id, source_parent["key"], source_entry["children"], base_url
+        )
+        if children != source_entry["children"]:
+            raise BridgeError("metadata repair child inventory or content drift")
     library_records = live_library_top_items(group_id, base_url)
     try:
         duplicate_candidates = contract.find_duplicate_candidates(
@@ -1156,7 +1501,11 @@ def compile_reviewed_metadata_repair(
         "desired_parent_data_sha256": repair["desired_parent_data_sha256"],
     }
     unsigned = {
-        "schema": METADATA_REPAIR_MANIFEST_SCHEMA,
+        "schema": (
+            METADATA_REPAIR_MANIFEST_SCHEMA_V2
+            if is_v2
+            else METADATA_REPAIR_MANIFEST_SCHEMA
+        ),
         "transaction_id": transaction_id,
         "generated_at": now_iso(),
         "reviewed_source_sha256": reviewed["manifest_sha256"],
@@ -1166,13 +1515,18 @@ def compile_reviewed_metadata_repair(
         "target": target,
         "entry": {
             "parent": copy.deepcopy(source_parent),
-            "children": copy.deepcopy(children),
+            "children": copy.deepcopy(source_entry["children"] if is_v2 else children),
             "children_sha256": source_entry["children_sha256"],
             "evidence_pdf_key": source_entry["evidence_pdf_key"],
             "duplicate_preconditions": copy.deepcopy(duplicate),
             "operation": operation,
         },
     }
+    if is_v2:
+        unsigned["execution_intent"] = "readback_only" if readback_only else "repair"
+        unsigned["entry"]["serializer_guard"] = copy.deepcopy(
+            source_entry["serializer_guard"]
+        )
     return seal_metadata_repair_manifest(unsigned)
 
 
@@ -2150,6 +2504,11 @@ def parse_args() -> argparse.Namespace:
         required=True,
     )
     metadata_repair.add_argument("--base-url", default=BASE_URL)
+    metadata_repair.add_argument(
+        "--readback-only",
+        action="store_true",
+        help="compile v2 after a desired/equivalent state; preview and apply are forbidden",
+    )
 
     probe = sub.add_parser("probe")
     probe.add_argument("--capability-file", type=Path, required=True)
@@ -2222,6 +2581,7 @@ def main() -> int:
                 local_collection_id=args.local_collection_id,
                 source_hash_contract=args.source_hash_contract,
                 base_url=args.base_url,
+                readback_only=args.readback_only,
             )
             write_private_json(args.output, result)
             print(
@@ -2260,6 +2620,12 @@ def main() -> int:
             return 0
 
         manifest = validate_any_manifest(read_json(args.manifest))
+        if (
+            manifest.get("schema") == METADATA_REPAIR_MANIFEST_SCHEMA_V2
+            and manifest.get("execution_intent") == "readback_only"
+            and args.command != "readback"
+        ):
+            raise BridgeError("readback-only metadata transaction forbids preview and apply")
         if args.command == "preview":
             response = bridge_request(capability, "preview", {"manifest": manifest})
         elif args.command == "readback":

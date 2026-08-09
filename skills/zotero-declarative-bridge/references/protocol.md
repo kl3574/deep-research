@@ -90,8 +90,8 @@ The top level also carries the reviewed source's exact-key, hash-only
 and canonical content SHA-256. The manifest digest binds this reference; the
 private sidecar path and evidence locators never enter the transaction.
 
-Compile only a sealed `ZoteroReviewedParentMetadataRepair/v1` from
-`$repair-zotero-metadata`:
+Compile a sealed `ZoteroReviewedParentMetadataRepair/v2` for new work. Sealed
+v1 sources remain accepted only for their published exact-only behavior:
 
 ```bash
 python scripts/zotero_declarative_bridge.py compile-reviewed-metadata-repair \
@@ -107,6 +107,46 @@ full-library duplicate and complete-content preflight inside one Zotero database
 transaction. A post-commit verification failure is `committed_unverified` and
 must never be retried before fresh readback. `rolled_back` still requires an
 exact post-failure baseline digest.
+
+### Parent-metadata repair v2 serializer guard
+
+`ZoteroParentMetadataRepairTransaction/v2` preserves the v1 operation and
+write-field allowlist but adds a reviewed hash-only serializer guard. It does
+not alter the endpoint, operation enum, database-atomic write routine, or
+attachment-write count. New reviewed sources use
+`ZoteroReviewedParentMetadataRepair/v2`; v1 remains accepted with exact-only
+readback behavior.
+
+The guard binds the parent raw hash, every stable non-profile field, raw and
+set-normalized tag/collection hashes, exact note raw/content hashes, and each
+attachment raw record, stable record, file SHA-256/size, filename hash, and
+storage-path hash. The attachment stable record removes only `version` and
+`filename`; path is bound separately. Attachment key/type/title/URL, linkMode,
+contentType, MD5, bytes, size, all other attachment metadata, note
+text/metadata, and parent tag/collection members cannot change.
+
+The Python live compiler obtains each v2 attachment path only from the exact
+Local API attachment `/file` redirect. The resolved file must be a direct,
+regular, non-symlink child of
+`$HOME/Zotero/storage/<attachment-key>/`; it is opened with no-follow semantics
+and its stable identity, byte count, PDF magic, and SHA-256 are measured from
+the opened descriptor. Observed size/hash fields cannot be copied from reviewed
+expectations. Missing bytes, a non-storage redirect, read-time drift, or a
+size/hash mismatch aborts compilation without serializing the private path.
+
+Preview and repeated preflight inside apply use strict mode. Post-commit
+inspection and `readback` may use equivalence mode. It accepts only reordered
+parent tag/collection arrays with identical members and same-key attachments
+whose stable record and bytes are exact while version advances and
+filename/storage path may change. It reports
+`content_match=zotero_managed_attachment_rename_and_set_order_equivalent` plus
+expected and observed raw hashes. `execution_intent=readback_only` is a v2-only
+recovery mode compiled from sealed pre-state evidence after the desired state is
+already present. Satisfied v2 post/readback state requires
+`observed_parent_version >= expected_parent_version`; rollback is never treated
+as serializer equivalence. Both client and plugin reject preview and apply
+before any bridge request or preflight. Published v1 remains exact-only and
+receives neither serializer equivalence nor readback-only authority.
 
 ### Reviewed batch compiler
 
