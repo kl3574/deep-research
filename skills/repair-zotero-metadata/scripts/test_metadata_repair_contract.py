@@ -83,9 +83,9 @@ def synthetic_draft() -> dict:
             },
         },
         "target": {
-            "group_id": 9999999,
+            "group_id": 999999,
             "library_type": "group",
-            "library_type_id": 9999999,
+            "library_type_id": 999999,
             "local_library_id": 99,
             "library_name": "Synthetic Research Library",
             "collection_key": "COLL0001",

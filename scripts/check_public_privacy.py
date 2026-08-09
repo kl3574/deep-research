@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reject private Zotero artifacts and identifiers from the public Git tree."""
+"""Reject private Zotero artifacts and identifiers from a public Git candidate."""
 
 from __future__ import annotations
 
@@ -75,9 +75,10 @@ BANNED_BASENAME_PATTERNS = (
 BANNED_DIRECTORY_PREFIXES = ("zotero-all-notes-", "zotero-note-migration-")
 
 
-def tracked_paths(root: Path) -> list[Path]:
+def public_candidate_paths(root: Path) -> list[Path]:
+    """Return tracked plus untracked, non-ignored paths that could be published."""
     result = subprocess.run(
-        ["git", "ls-files", "-z"],
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
         cwd=root,
         check=True,
         capture_output=True,
@@ -201,7 +202,7 @@ def scan_tracked_tree(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Check the tracked public tree for private Zotero artifacts."
+        description="Check the public Git candidate for private Zotero artifacts."
     )
     parser.add_argument(
         "--root",
@@ -233,7 +234,11 @@ def main() -> int:
         if value
     )
     private_tokens = private_tokens_from_json(private_json_paths)
-    findings = scan_tracked_tree(root, tracked_paths(root), private_tokens)
+    findings = scan_tracked_tree(
+        root,
+        public_candidate_paths(root),
+        private_tokens,
+    )
     if findings:
         print("Public-tree privacy check failed:")
         for finding in findings:

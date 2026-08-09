@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,6 +16,43 @@ SPEC.loader.exec_module(module)
 
 
 class PublicPrivacyCheckTests(unittest.TestCase):
+    def test_untracked_nonignored_private_identifier_is_scanned(self) -> None:
+        private_group = "8" + "765432"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            fixture = root / "untracked.py"
+            fixture.write_text(
+                f"group_id = {private_group}\n",
+                encoding="utf-8",
+            )
+
+            paths = module.public_candidate_paths(root)
+
+            self.assertIn(Path("untracked.py"), paths)
+            self.assertTrue(
+                any(
+                    "non-synthetic Zotero group ID" in value
+                    for value in module.scan_tracked_tree(root, paths)
+                )
+            )
+
+    def test_ignored_private_identifier_is_not_scanned(self) -> None:
+        private_group = "8" + "765432"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            (root / ".gitignore").write_text("ignored.py\n", encoding="utf-8")
+            (root / "ignored.py").write_text(
+                f"group_id = {private_group}\n",
+                encoding="utf-8",
+            )
+
+            paths = module.public_candidate_paths(root)
+
+            self.assertNotIn(Path("ignored.py"), paths)
+            self.assertEqual(module.scan_tracked_tree(root, paths), [])
+
     def test_synthetic_fixture_is_allowed(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
