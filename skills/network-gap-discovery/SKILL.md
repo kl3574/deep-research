@@ -19,10 +19,20 @@ hypotheses without mutating research state.
    the substantive ranking rule. Claim-backed gaps must resolve their human
    meaning from the current claim node label; opaque claim IDs never become
    paper needs, criteria, or query text.
-4. Emit search requests only for hypotheses marked `selected` by `prioritize`.
-   Structural or semantically unenriched proposals remain unselected. Search, reading, and
-   evidence review happen in their owning skills.
-5. Consume reviewed results and emit a proposal-only network patch. A separate
+4. When review narrows the deterministic priority set, run `select` with the
+   untouched `prioritize` output and a digest-bound `ReviewedGapSelection/v1`
+   allowlist. The command preserves every unselected candidate as `proposed`,
+   rejects direct scheduling-status edits, and records the reviewed selection
+   reference without interpreting evidence.
+5. Emit search requests only from a completed `select` output. The emitter
+   reconstructs the untouched `prioritize` output and the exact
+   `ReviewedGapSelection/v1`, then rechecks both digests in
+   `reviewed_selection_ref`. It rejects direct `prioritize` output, fabricated
+   provenance, and a reviewed empty allowlist. Only `status: selected`
+   hypotheses are emitted. Proposed, structural, or semantically unenriched
+   hypotheses never become requests. Search, reading, and evidence review
+   happen in their owning skills.
+6. Consume reviewed results and emit a proposal-only network patch. A separate
    `$research-knowledge-network` step validates and applies any accepted change.
 
 Use `scripts/network_gap_discovery.py --help` for commands and schemas.

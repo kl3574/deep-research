@@ -4,11 +4,15 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import importlib.util
 import json
+import os
 import re
+import stat
 import sys
+import tempfile
 from collections import Counter, deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -507,14 +511,88 @@ def load_json(path: str | Path) -> Any:
         return json.load(handle)
 
 
+PRIVATE_FILE_MODE = 0o600
+PRIVATE_DIRECTORY_MODE = 0o700
+
+
+def _ensure_private_output_directory(directory: Path) -> None:
+    missing: list[Path] = []
+    cursor = directory
+    while not cursor.exists():
+        if cursor.is_symlink():
+            raise ContractError(f"refusing symlink output directory: {cursor}")
+        missing.append(cursor)
+        parent = cursor.parent
+        if parent == cursor:
+            raise ContractError(f"cannot resolve output directory: {directory}")
+        cursor = parent
+
+    if cursor.is_symlink() or not cursor.is_dir():
+        raise ContractError(f"output parent must be a directory: {cursor}")
+
+    for candidate in reversed(missing):
+        created = False
+        try:
+            os.mkdir(candidate, PRIVATE_DIRECTORY_MODE)
+            created = True
+        except FileExistsError:
+            pass
+        if candidate.is_symlink() or not candidate.is_dir():
+            raise ContractError(f"output parent must be a private directory: {candidate}")
+        if created:
+            os.chmod(candidate, PRIVATE_DIRECTORY_MODE, follow_symlinks=False)
+
+    if directory.is_symlink() or not directory.is_dir():
+        raise ContractError(f"output parent must be a private directory: {directory}")
+    mode = stat.S_IMODE(os.stat(directory, follow_symlinks=False).st_mode)
+    if mode & 0o077:
+        raise ContractError(
+            f"output directory must not grant group or other access: {directory}"
+        )
+
+
 def write_json(path: str | Path, value: Any) -> None:
     target = Path(path)
     if target.is_symlink():
         raise ContractError(f"refusing symlink output: {target}")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_name(f".{target.name}.tmp")
-    temporary.write_bytes(canonical_bytes(value) + b"\n")
-    temporary.replace(target)
+    if target.exists() and not target.is_file():
+        raise ContractError(f"output must be a regular file: {target}")
+    _ensure_private_output_directory(target.parent)
+
+    payload = canonical_bytes(value) + b"\n"
+    temporary: Path | None = None
+    descriptor: int | None = None
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+        )
+        temporary = Path(temporary_name)
+        os.fchmod(descriptor, PRIVATE_FILE_MODE)
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = None
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if stat.S_IMODE(os.stat(temporary, follow_symlinks=False).st_mode) != PRIVATE_FILE_MODE:
+            raise ContractError("private temporary output mode is not 0600")
+        os.replace(temporary, target)
+        temporary = None
+        os.chmod(target, PRIVATE_FILE_MODE, follow_symlinks=False)
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        directory_descriptor = os.open(target.parent, directory_flags)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    except BaseException:
+        if descriptor is not None:
+            os.close(descriptor)
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+        raise
 
 
 def require_dict(value: Any, label: str) -> dict[str, Any]:
@@ -2194,6 +2272,387 @@ def validate_scholar_discovery_request(value: Any) -> dict[str, Any]:
     return request
 
 
+REVIEWED_GAP_SELECTION_SCHEMA = "ReviewedGapSelection/v1"
+
+
+def validate_reviewed_gap_selection(
+    value: Any, prioritized: dict[str, Any]
+) -> dict[str, Any]:
+    selection = require_dict(value, "reviewed selection")
+    expected_fields = {
+        "schema",
+        "input_ref",
+        "network_ref",
+        "round_id",
+        "selected_hypothesis_ids",
+        "review_status",
+    }
+    if set(selection) != expected_fields:
+        raise ContractError(
+            "reviewed selection field set must be exactly "
+            f"{sorted(expected_fields)}"
+        )
+    if selection.get("schema") != REVIEWED_GAP_SELECTION_SCHEMA:
+        raise ContractError(
+            f"reviewed selection schema must be {REVIEWED_GAP_SELECTION_SCHEMA}"
+        )
+    if selection.get("review_status") != "approved":
+        raise ContractError("reviewed selection review_status must be approved")
+
+    input_ref = require_dict(
+        selection.get("input_ref"), "reviewed selection.input_ref"
+    )
+    if set(input_ref) != {"schema", "sha256"}:
+        raise ContractError(
+            "reviewed selection.input_ref field set must be exactly schema and sha256"
+        )
+    if input_ref.get("schema") != HYPOTHESES_SCHEMA:
+        raise ContractError(
+            f"reviewed selection input schema must be {HYPOTHESES_SCHEMA}"
+        )
+    input_sha256 = require_string(
+        input_ref.get("sha256"), "reviewed selection.input_ref.sha256"
+    )
+    expected_sha256 = sha256_json(prioritized)
+    if input_sha256 != expected_sha256:
+        raise ContractError("reviewed selection input digest mismatch")
+    if selection.get("network_ref") != prioritized.get("network_ref"):
+        raise ContractError("reviewed selection network_ref mismatch")
+    if selection.get("round_id") != prioritized.get("round_id"):
+        raise ContractError("reviewed selection round_id mismatch")
+
+    selected_ids = require_string_list(
+        selection.get("selected_hypothesis_ids"),
+        "reviewed selection.selected_hypothesis_ids",
+    )
+    if len(selected_ids) != len(set(selected_ids)):
+        raise ContractError("reviewed selection selected_hypothesis_ids must be unique")
+    return selection
+
+
+def validate_unmodified_prioritize_output(
+    document: dict[str, Any], network: dict[str, Any] | None
+) -> None:
+    if "reviewed_selection_ref" in document:
+        raise ContractError(
+            "select input must be a direct prioritize output, not a prior selection output"
+        )
+    statuses = [hypothesis.get("status") for hypothesis in document["hypotheses"]]
+    if any(status not in {"proposed", "selected"} for status in statuses):
+        raise ContractError(
+            "select input must contain only proposed or selected scheduling statuses"
+        )
+
+    unscheduled = copy.deepcopy(document)
+    unscheduled.pop("priority_order", None)
+    unscheduled.pop("selection_summary", None)
+    for hypothesis in unscheduled["hypotheses"]:
+        hypothesis["status"] = "proposed"
+    expected = prioritize(unscheduled, network)
+
+    observed_state = [
+        (hypothesis["hypothesis_id"], hypothesis["status"])
+        for hypothesis in document["hypotheses"]
+    ]
+    expected_state = [
+        (hypothesis["hypothesis_id"], hypothesis["status"])
+        for hypothesis in expected["hypotheses"]
+    ]
+    if (
+        observed_state != expected_state
+        or document.get("priority_order") != expected.get("priority_order")
+        or document.get("selection_summary") != expected.get("selection_summary")
+    ):
+        raise ContractError(
+            "select input scheduling status was manually changed; "
+            "use the unmodified prioritize output"
+        )
+
+
+def select_hypotheses(
+    value: Any,
+    reviewed_selection: Any,
+    network: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    document = validate_hypotheses(value, network)
+    validate_unmodified_prioritize_output(document, network)
+    selection = validate_reviewed_gap_selection(reviewed_selection, document)
+    selected_ids = selection["selected_hypothesis_ids"]
+    selected_set = set(selected_ids)
+
+    by_id = {
+        hypothesis["hypothesis_id"]: hypothesis
+        for hypothesis in document["hypotheses"]
+    }
+    unknown_ids = [
+        hypothesis_id
+        for hypothesis_id in selected_ids
+        if hypothesis_id not in by_id
+    ]
+    if unknown_ids:
+        raise ContractError(
+            f"reviewed selection contains unknown hypothesis IDs: {unknown_ids}"
+        )
+
+    ordered_selected_ids = [
+        hypothesis_id
+        for hypothesis_id in document["priority_order"]
+        if hypothesis_id in selected_set
+    ]
+    if selected_ids != ordered_selected_ids:
+        raise ContractError(
+            "reviewed selection IDs must preserve deterministic priority order"
+        )
+
+    for hypothesis_id in selected_ids:
+        hypothesis = by_id[hypothesis_id]
+        if hypothesis.get("structural_only"):
+            raise ContractError(
+                f"reviewed selection cannot select structural hypothesis {hypothesis_id}"
+            )
+        if hypothesis.get("needs_semantic_enrichment"):
+            raise ContractError(
+                "reviewed selection cannot select semantically unenriched hypothesis "
+                f"{hypothesis_id}"
+            )
+        if hypothesis.get("status") != "selected":
+            raise ContractError(
+                f"reviewed selection hypothesis is not search eligible: {hypothesis_id}"
+            )
+
+    reviewed_ref = {
+        "schema": REVIEWED_GAP_SELECTION_SCHEMA,
+        "sha256": sha256_json(selection),
+        "input_sha256": selection["input_ref"]["sha256"],
+        "selected_hypothesis_ids": list(selected_ids),
+        "review_status": "approved",
+    }
+    output = _apply_reviewed_selection_projection(
+        document, selected_ids, reviewed_ref
+    )
+    validate_hypotheses(output, network)
+    selected_hypotheses_for_emission(output)
+    reviewed_selection_ref_for_emission(output, selected_ids, network)
+    return output
+
+
+def _apply_reviewed_selection_projection(
+    prioritized: dict[str, Any],
+    selected_ids: list[str],
+    reviewed_ref: dict[str, Any],
+) -> dict[str, Any]:
+    selected_set = set(selected_ids)
+    output = copy.deepcopy(prioritized)
+    for hypothesis in output["hypotheses"]:
+        hypothesis_id = hypothesis["hypothesis_id"]
+        baseline_status = hypothesis.get("status")
+        if baseline_status not in {"proposed", "selected"}:
+            raise ContractError(
+                "reviewed selection baseline may contain only deterministic "
+                "proposed/selected scheduling statuses"
+            )
+        if hypothesis_id in selected_set:
+            if baseline_status != "selected":
+                raise ContractError(
+                    f"reviewed selection hypothesis is not baseline-eligible: {hypothesis_id}"
+                )
+            hypothesis["status"] = "selected"
+        elif baseline_status == "selected":
+            hypothesis["status"] = "proposed"
+    output["selection_summary"] = {
+        "selected_count": len(selected_ids),
+        "selected_hypothesis_ids": [
+            hypothesis["hypothesis_id"]
+            for hypothesis in output["hypotheses"]
+            if hypothesis["status"] == "selected"
+        ],
+        "unselected_proposed_hypothesis_ids": [
+            hypothesis["hypothesis_id"]
+            for hypothesis in output["hypotheses"]
+            if hypothesis["status"] == "proposed"
+        ],
+    }
+    output["reviewed_selection_ref"] = copy.deepcopy(reviewed_ref)
+    return output
+
+
+def _reconstruct_prioritized_selection_baseline(
+    document: dict[str, Any], network: dict[str, Any] | None
+) -> dict[str, Any]:
+    unscheduled = copy.deepcopy(document)
+    unscheduled.pop("reviewed_selection_ref", None)
+    unscheduled.pop("priority_order", None)
+    unscheduled.pop("selection_summary", None)
+    for hypothesis in unscheduled["hypotheses"]:
+        status = hypothesis.get("status")
+        if status not in {"proposed", "selected"}:
+            raise ContractError(
+                "reviewed selection projection contains a non-scheduling status; "
+                "no_signal, blocked, and other lifecycle states cannot be hidden"
+            )
+        hypothesis["status"] = "proposed"
+    return prioritize(unscheduled, network)
+
+
+def selected_hypotheses_for_emission(document: dict[str, Any]) -> list[dict[str, Any]]:
+    summary = require_dict(document.get("selection_summary"), "hypotheses.selection_summary")
+    selected_count = summary.get("selected_count")
+    if (
+        isinstance(selected_count, bool)
+        or not isinstance(selected_count, int)
+        or selected_count < 0
+    ):
+        raise ContractError(
+            "hypotheses.selection_summary.selected_count must be a non-negative integer"
+        )
+    selected_ids = require_string_list(
+        summary.get("selected_hypothesis_ids"),
+        "hypotheses.selection_summary.selected_hypothesis_ids",
+    )
+    if len(selected_ids) != len(set(selected_ids)):
+        raise ContractError(
+            "hypotheses.selection_summary.selected_hypothesis_ids must be unique"
+        )
+    actual_selected = [
+        hypothesis
+        for hypothesis in document["hypotheses"]
+        if hypothesis["status"] == "selected"
+    ]
+    actual_selected_ids = [hypothesis["hypothesis_id"] for hypothesis in actual_selected]
+    if selected_count != len(selected_ids):
+        raise ContractError(
+            "hypotheses.selection_summary.selected_count must equal the selected ID count"
+        )
+    if selected_ids != actual_selected_ids:
+        raise ContractError(
+            "hypotheses.selection_summary.selected_hypothesis_ids must exactly match "
+            "status=selected hypotheses in document order"
+        )
+
+    unselected_ids = require_string_list(
+        summary.get("unselected_proposed_hypothesis_ids"),
+        "hypotheses.selection_summary.unselected_proposed_hypothesis_ids",
+    )
+    actual_unselected_ids = [
+        hypothesis["hypothesis_id"]
+        for hypothesis in document["hypotheses"]
+        if hypothesis["status"] == "proposed"
+    ]
+    if unselected_ids != actual_unselected_ids:
+        raise ContractError(
+            "hypotheses.selection_summary.unselected_proposed_hypothesis_ids must "
+            "exactly match status=proposed hypotheses in document order"
+        )
+
+    invalid_selected = [
+        hypothesis["hypothesis_id"]
+        for hypothesis in actual_selected
+        if hypothesis.get("structural_only")
+        or hypothesis.get("needs_semantic_enrichment")
+    ]
+    if invalid_selected:
+        raise ContractError(
+            "selected hypotheses must be searchable and non-structural; invalid IDs: "
+            f"{invalid_selected}"
+        )
+    return actual_selected
+
+
+def reviewed_selection_ref_for_emission(
+    document: dict[str, Any],
+    selected_ids: list[str],
+    network: dict[str, Any] | None,
+) -> dict[str, Any]:
+    ref = require_dict(
+        document.get("reviewed_selection_ref"),
+        "hypotheses.reviewed_selection_ref",
+    )
+    expected_fields = {
+        "schema",
+        "sha256",
+        "input_sha256",
+        "selected_hypothesis_ids",
+        "review_status",
+    }
+    if set(ref) != expected_fields:
+        raise ContractError(
+            "hypotheses.reviewed_selection_ref field set must be exactly "
+            f"{sorted(expected_fields)}"
+        )
+    if ref.get("schema") != REVIEWED_GAP_SELECTION_SCHEMA:
+        raise ContractError(
+            "hypotheses.reviewed_selection_ref schema must be "
+            f"{REVIEWED_GAP_SELECTION_SCHEMA}"
+        )
+    if ref.get("review_status") != "approved":
+        raise ContractError(
+            "hypotheses.reviewed_selection_ref review_status must be approved"
+        )
+    for field in ("sha256", "input_sha256"):
+        digest = require_string(ref.get(field), f"reviewed_selection_ref.{field}")
+        if not SHA256_RE.fullmatch(digest):
+            raise ContractError(
+                f"hypotheses.reviewed_selection_ref.{field} must be 64 lowercase hex"
+            )
+    ref_ids = require_string_list(
+        ref.get("selected_hypothesis_ids"),
+        "hypotheses.reviewed_selection_ref.selected_hypothesis_ids",
+    )
+    if ref_ids != selected_ids:
+        raise ContractError(
+            "reviewed selection reference IDs must match selected hypotheses exactly"
+        )
+
+    prioritized = _reconstruct_prioritized_selection_baseline(document, network)
+    expected_input_sha256 = sha256_json(prioritized)
+    if ref["input_sha256"] != expected_input_sha256:
+        raise ContractError(
+            "reviewed selection reference input digest does not match the reconstructed "
+            "prioritize output"
+        )
+    expected_selection = {
+        "schema": REVIEWED_GAP_SELECTION_SCHEMA,
+        "input_ref": {
+            "schema": HYPOTHESES_SCHEMA,
+            "sha256": expected_input_sha256,
+        },
+        "network_ref": copy.deepcopy(prioritized["network_ref"]),
+        "round_id": prioritized["round_id"],
+        "selected_hypothesis_ids": list(selected_ids),
+        "review_status": "approved",
+    }
+    if ref["sha256"] != sha256_json(expected_selection):
+        raise ContractError(
+            "reviewed selection reference digest does not match the reconstructed "
+            "ReviewedGapSelection/v1"
+        )
+    ordered_selected_ids = [
+        hypothesis_id
+        for hypothesis_id in prioritized["priority_order"]
+        if hypothesis_id in set(selected_ids)
+    ]
+    if selected_ids != ordered_selected_ids:
+        raise ContractError(
+            "reviewed selection reference IDs do not preserve baseline priority order"
+        )
+    expected_projection = _apply_reviewed_selection_projection(
+        prioritized, selected_ids, ref
+    )
+    if document != expected_projection:
+        observed_ids = [row.get("hypothesis_id") for row in document["hypotheses"]]
+        expected_ids = [row["hypothesis_id"] for row in expected_projection["hypotheses"]]
+        if observed_ids != expected_ids:
+            raise ContractError(
+                "reviewed selection projection must preserve every baseline hypothesis "
+                "ID and deterministic order without deletion or insertion"
+            )
+        raise ContractError(
+            "reviewed selection projection must preserve every baseline field; the only "
+            "allowed unselected change is selected-to-proposed scheduling demotion"
+        )
+    return ref
+
+
 def emit_search_requests(
     value: Any,
     network: dict[str, Any] | None = None,
@@ -2204,18 +2663,22 @@ def emit_search_requests(
         raise ContractError(
             "google_scholar_policy must be disabled, manual_optional, or manual_required"
         )
-    document = prioritize(value, network)
+    document = validate_hypotheses(value, network)
+    selected_hypotheses = selected_hypotheses_for_emission(document)
+    selected_ids = [row["hypothesis_id"] for row in selected_hypotheses]
+    reviewed_selection_ref = reviewed_selection_ref_for_emission(
+        document, selected_ids, network
+    )
+    if not selected_hypotheses:
+        raise ContractError(
+            "reviewed selection contains zero selected hypotheses; no search request "
+            "set may be emitted"
+        )
     network_ref_value = document["network_ref"]
 
     requests: list[dict[str, Any]] = []
     seen_request_ids: set[str] = set()
-    for hypothesis in document["hypotheses"]:
-        if hypothesis["status"] not in ACTIVE_STATUSES:
-            continue
-        if hypothesis.get("structural_only") or hypothesis.get("needs_semantic_enrichment"):
-            hypothesis["next_action"] = "structural_only"
-            continue
-
+    for hypothesis in selected_hypotheses:
         search_test = hypothesis["search_test"]
         criteria = search_test.get("criteria", {})
         filters = search_test.get("metadata_filters", {})
@@ -2295,6 +2758,9 @@ def emit_search_requests(
         "generated_at": document["generated_at"],
         "schema": REQUEST_SET_SCHEMA,
         "network_ref": network_ref_value,
+        "reviewed_selection_ref": copy.deepcopy(reviewed_selection_ref),
+        "selected_hypothesis_ids": selected_ids,
+        "selected_hypotheses_sha256": sha256_json(document),
         "requests": requests,
     }
     set_payload["request_set_digest"] = canonical_request_set_digest(set_payload)
@@ -5326,6 +5792,14 @@ def parser() -> argparse.ArgumentParser:
     rank.add_argument("--network", help=NETWORK_INPUT_HELP)
     rank.add_argument("--output", required=True)
 
+    select = subcommands.add_parser(
+        "select", help="apply a reviewed allowlist to prioritized hypotheses"
+    )
+    select.add_argument("--input", required=True)
+    select.add_argument("--selection", required=True)
+    select.add_argument("--network", required=True, help=NETWORK_INPUT_HELP)
+    select.add_argument("--output", required=True)
+
     emit = subcommands.add_parser(
         "emit-search-requests", help="emit scholar-discovery requests"
     )
@@ -5414,6 +5888,18 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "prioritize":
             network = load_exported_knowledge_network(args.network) if args.network else None
             write_json(args.output, prioritize(load_json(args.input), network))
+
+        elif args.command == "select":
+            network = load_exported_knowledge_network(args.network)
+            validate_network(network)
+            write_json(
+                args.output,
+                select_hypotheses(
+                    load_json(args.input),
+                    load_json(args.selection),
+                    network,
+                ),
+            )
 
         elif args.command == "emit-search-requests":
             network = load_exported_knowledge_network(args.network)

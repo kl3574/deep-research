@@ -817,6 +817,120 @@ class PaperReadingDossierTests(TestCase):
         self.assertEqual(finalized_again["report_set_id"], finalized["report_set_id"])
         self.assertEqual(finalized_again["report_set_digest"], finalized["report_set_digest"])
 
+    def test_create_then_prepare_preserves_dossier_identity_across_verification_states(self) -> None:
+        tmp, manifest, source, bundle = self._make_inputs()
+        self.addCleanup(tmp.cleanup)
+        scenarios = [
+            ("pending-independent", "independent_source_check", "unresolved", False),
+            ("passed-independent", "independent_source_check", "passed", True),
+            ("passed-same-context", "same_context_diagnostic", "passed", False),
+        ]
+
+        for name, mode, verifier_status, support_candidate_eligible in scenarios:
+            with self.subTest(name=name):
+                scenario_root = Path(tmp.name) / name
+                scenario_root.mkdir()
+                draft = _base_draft(manifest, source, bundle, "proves it converges")
+                draft["claims"][0]["verification"] = _verification(mode=mode)
+                draft["claims"][0]["verifier_status"] = verifier_status
+                draft["evidence_records"][0]["verifier_status"] = verifier_status
+
+                draft_path = scenario_root / "draft.json"
+                dossier_path = scenario_root / "dossier.json"
+                report_set_path = scenario_root / "report-set.json"
+                verification_root = scenario_root / "verification"
+                draft_path.write_text(json.dumps(draft), encoding="utf-8")
+
+                self.assertEqual(
+                    module.main(
+                        [
+                            "create",
+                            "--input",
+                            str(draft_path),
+                            "--output",
+                            str(dossier_path),
+                            "--bundle",
+                            bundle,
+                            "--source",
+                            source,
+                        ]
+                    ),
+                    0,
+                )
+                self.assertEqual(dossier_path.stat().st_mode & 0o777, 0o600)
+                dossier = json.loads(dossier_path.read_text(encoding="utf-8"))
+                module.validate_dossier(dossier, bundle=bundle, source=source)
+
+                self.assertEqual(
+                    module.main(
+                        [
+                            "prepare-attestations",
+                            "--input",
+                            str(dossier_path),
+                            "--output",
+                            str(report_set_path),
+                            "--bundle",
+                            bundle,
+                            "--source",
+                            source,
+                            "--verification-root",
+                            str(verification_root),
+                            "--producer-context-id",
+                            "producer-context-001",
+                            "--generated-at",
+                            "2026-08-06T00:00:00Z",
+                        ]
+                    ),
+                    0,
+                )
+                self.assertEqual(report_set_path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(list(scenario_root.glob(".*.tmp")), [])
+
+                report_set = json.loads(report_set_path.read_text(encoding="utf-8"))
+                self.assertEqual(report_set["generated_at"], "2026-08-06T00:00:00Z")
+                self.assertEqual(report_set["dossier_id"], dossier["dossier_id"])
+                self.assertEqual(report_set["dossier_digest"], dossier["dossier_digest"])
+                report = report_set["reports"][0]
+                request_path = verification_root / report["verification"]["artifact_ref"]
+                self.assertEqual(request_path.stat().st_mode & 0o777, 0o600)
+                request = json.loads(request_path.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    request["support_candidate_eligible"],
+                    support_candidate_eligible,
+                )
+                module.validate_report_set_v2(
+                    report_set,
+                    verification_root=verification_root,
+                )
+
+    def test_failed_create_leaves_no_output_or_temporary_file(self) -> None:
+        tmp, manifest, source, bundle = self._make_inputs()
+        self.addCleanup(tmp.cleanup)
+        draft = _base_draft(manifest, source, bundle, "proves it converges")
+        draft["evidence_records"][0]["relation"] = "refutes"
+        draft_path = Path(tmp.name) / "invalid-draft.json"
+        output_path = Path(tmp.name) / "dossier.json"
+        draft_path.write_text(json.dumps(draft), encoding="utf-8")
+
+        self.assertNotEqual(
+            module.main(
+                [
+                    "create",
+                    "--input",
+                    str(draft_path),
+                    "--output",
+                    str(output_path),
+                    "--bundle",
+                    bundle,
+                    "--source",
+                    source,
+                ]
+            ),
+            0,
+        )
+        self.assertFalse(output_path.exists())
+        self.assertEqual(list(Path(tmp.name).glob(".dossier.json.*.tmp")), [])
+
     def test_self_mint_attestations_is_prevented(self) -> None:
         tmp, manifest, source, bundle = self._make_inputs()
         self.addCleanup(tmp.cleanup)

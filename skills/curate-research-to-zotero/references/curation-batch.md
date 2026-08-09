@@ -67,9 +67,11 @@ An actionable entry is golden only when:
 7. Every PDF has PDF magic and an explicit artifact role.
 8. A supplement or supporting-information file never counts as full text.
 9. `fulltext_verified` has a verified main-text artifact.
-10. A note reference is dispatched by explicit root contract: legacy full-text
-    keeps the ordered 11-section check; `PaperKnowledgeNote/v2` passes the shared
-    validator and its fixed five-section pyramid; metadata-only carries
+10. A note reference is dispatched by content contract: a forward
+    `ZoteroCleanLiteratureNote/v1` passes the sole clean-note validator including
+    canonical math and operational-content gates; legacy full-text keeps the
+    ordered 11-section check; `PaperKnowledgeNote/v2` passes the shared validator
+    and its fixed five-section pyramid; metadata-only carries
     `data-access-level="metadata_only"`, passes its shared validator, and keeps
     the 11-section retrieval skeleton. Contract, marker, section layout, and
     entry `fulltext_status` must agree.
@@ -125,6 +127,8 @@ entry decisions.
 
 ```bash
 python scripts/verify_curation_batch.py digest BATCH.json
+python scripts/verify_curation_batch.py fingerprint-from-snapshot SNAPSHOT.json \
+  --library-id 2 --library-name "Example Research Library"
 python scripts/verify_curation_batch.py verify BATCH.json \
   --observed-target OBSERVED.json \
   --execution EXECUTION.json
@@ -132,6 +136,13 @@ python scripts/verify_curation_batch.py verify BATCH.json \
 
 The verifier is stdlib-only, performs no network requests, and never executes
 anything named by a manifest.
+
+The fingerprint command first verifies the snapshot's own collection identity,
+full parent-state digest, exact collection path, collection version, and sorted
+top-level parent keys. It then emits the canonical batch target and the narrower
+mutable-state fingerprint from those observed fields plus the explicitly bound
+library ID/name. Do not copy the corpus snapshot's differently scoped
+`identity_sha256` or `state_sha256` into a batch.
 
 ## Read-only corpus snapshot
 
@@ -152,6 +163,8 @@ python scripts/snapshot_zotero_collection.py \
   --base-url http://127.0.0.1:23119 \
   --group-id 1234567 \
   --collection-key COLL0001 \
+  --library-id 2 \
+  --library-name "Example Research Library" \
   --output /private/staging/corpus-snapshot.json
 ```
 

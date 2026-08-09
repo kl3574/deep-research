@@ -147,6 +147,18 @@ initial request set. `selected` is a scheduling state, not an evidence or
 truth state; later discovery/review lifecycle states remain unchanged when
 reprioritized.
 
+`emit-search-requests` never performs implicit prioritization. Its input must be
+the output of `select`, must carry a valid content-addressed
+`reviewed_selection_ref`, and must carry
+`selection_summary.selected_count`, `selected_hypothesis_ids`, and
+`unselected_proposed_hypothesis_ids`; these values must exactly match the
+ordered `status: selected` and `status: proposed` hypotheses. A mismatch fails
+closed. Only selected, searchable, non-structural hypotheses are emitted. An
+explicit zero-selection summary is a valid selection outcome but cannot emit a
+Scholar request set; proposed, structural, and semantically unenriched
+hypotheses never emit requests. Direct `prioritize` output always fails this
+gate.
+
 `structural_only` hypotheses describe structural signals that are resolved in graph/schema
 logic rather than online search (for example, declared completion-gate failures).
 These must use `next_action: "structural_only"` and are skipped by
@@ -160,6 +172,57 @@ For a claim-backed gap, use the current `claim:<id>` node's reviewed `label`
 as the human hypothesis and query source. If that semantic label is absent, keep
 the candidate structural-only rather than exporting the claim ID or generic
 criteria such as `decisive high-impact claim`.
+
+## `ReviewedGapSelection/v1`
+
+`select` projects one reviewed allowlist onto an untouched deterministic
+`prioritize` output. It does not rank, browse, interpret evidence, edit queries,
+or mutate the network. The minimal manifest is:
+
+```json
+{
+  "schema": "ReviewedGapSelection/v1",
+  "input_ref": {
+    "schema": "KnowledgeGapHypotheses/v1",
+    "sha256": "<canonical SHA-256 of the complete prioritize output>"
+  },
+  "network_ref": {
+    "network_id": "KN-001",
+    "snapshot_id": "KN-001-S001",
+    "sha256": "<network content_sha256>"
+  },
+  "round_id": "ROUND-001",
+  "selected_hypothesis_ids": ["KGH-001"],
+  "review_status": "approved"
+}
+```
+
+The field set is closed. `input_ref.schema`, the canonical input digest,
+`network_ref`, and `round_id` must match the supplied prioritized document.
+Selected IDs must be unique, known, searchable, non-structural, semantically
+enriched, and ordered by the deterministic `priority_order`. An empty allowlist
+is valid.
+
+The input must be the unmodified producer output: `select` reconstructs the
+unscheduled hypotheses, reruns deterministic prioritization, and compares the
+ordered statuses, `priority_order`, and `selection_summary`. Direct status edits,
+even with a recomputed manifest digest and summary, fail closed. A prior `select`
+output cannot be selected again.
+
+The output remains `KnowledgeGapHypotheses/v1`, retains every hypothesis, sets
+allowlisted rows to `selected`, demotes all other scheduling candidates to
+`proposed`, recomputes the ordered selection summary, and adds only a
+content-addressed `reviewed_selection_ref`. Before request emission, the
+consumer reconstructs the untouched prioritize result and the complete
+`ReviewedGapSelection/v1`, then rechecks `input_sha256` and the selection
+digest. It then projects the allowlist back onto that exact baseline. Every
+hypothesis ID, order, and field must remain byte-for-byte equivalent; the only
+allowed unselected change is deterministic `selected -> proposed` scheduling
+demotion. Deletion, insertion, semantic mutation, lifecycle states such as
+`no_signal` or `blocked`, and silently dropping IDs from the summary all fail.
+Adding a plausible-looking reference directly to prioritize output is therefore
+insufficient. Approval is a protocol record, not authenticated reviewer
+identity or evidence acceptance.
 
 ## Canonical network reference
 
@@ -446,6 +509,18 @@ Every emitted request includes a closed epistemic task containing `question`,
 claim-bearing figures, tables, equations, appendices, and supplements;
 reconstruction is required only when the acceptance criteria demand it.
 
+## Private CLI output persistence
+
+Every CLI JSON output contains network identity, hypotheses, queries, results,
+or provenance and is therefore private. The writer creates missing output
+directories with mode `0700`, rejects an existing output directory that grants
+group or other access, and never changes the permissions of an existing private
+directory. It writes through a unique same-directory temporary file forced to
+`0600`, flushes and fsyncs the complete payload, atomically replaces the target,
+forces the published file to `0600`, and fsyncs the directory. It rejects
+symlink outputs and removes its temporary file if publication fails. These
+properties do not depend on the caller's umask.
+
 ## CLI
 
 ```bash
@@ -455,13 +530,13 @@ python scripts/network_gap_discovery.py generate-hypotheses \
 python scripts/network_gap_discovery.py prioritize --input hypotheses.json \
   --network network.json --output prioritized.json
 python scripts/network_gap_discovery.py emit-search-requests \
-  --input prioritized.json --network network.json --output scholar-requests.json \
+  --input selected-only.json --network network.json --output scholar-requests.json \
   --google-scholar-policy manual_optional
 python scripts/network_gap_discovery.py emit-search-requests \
-  --input prioritized.json --network network.json --output scholar-requests.json \
+  --input selected-only.json --network network.json --output scholar-requests.json \
   --google-scholar-policy manual_required
 python scripts/network_gap_discovery.py emit-search-requests \
-  --input prioritized.json --network network.json --output scholar-requests.json \
+  --input selected-only.json --network network.json --output scholar-requests.json \
   --google-scholar-policy disabled
 python scripts/network_gap_discovery.py consume-results \
   --hypotheses hypotheses.json --network network.json \

@@ -10,6 +10,8 @@ var ZoteroDeclarativeBridge = (() => {
   const REQUEST_SKEW_MS = 120000;
   const NONCE_TTL_MS = 300000;
   const PREVIEW_TTL_MS = 900000;
+  const METADATA_REPAIR_SCHEMA = "ZoteroParentMetadataRepairTransaction/v1";
+  const METADATA_WRITABLE_FIELDS = ["DOI", "publicationTitle", "volume", "issue", "pages", "date"];
   const STATE = {
     endpointConstructor: null,
     capabilityPath: null,
@@ -249,6 +251,95 @@ var ZoteroDeclarativeBridge = (() => {
     return result;
   }
 
+  function metadataCreator(creator) {
+    let creatorType = creator.creatorType;
+    if (!creatorType && creator.creatorTypeID) creatorType = Zotero.CreatorTypes.getName(creator.creatorTypeID);
+    return {
+      creatorType: String(creatorType || ""),
+      firstName: String(creator.firstName || ""),
+      lastName: String(creator.lastName || ""),
+    };
+  }
+
+  function metadataProfile(parent) {
+    return {
+      DOI: ZoteroDeclarativeBridgeCore.normalizeDOI(String(parent.getField("DOI") || "")),
+      creators: parent.getCreators().map(metadataCreator),
+      publicationTitle: String(parent.getField("publicationTitle") || ""),
+      volume: String(parent.getField("volume") || ""),
+      issue: String(parent.getField("issue") || ""),
+      pages: String(parent.getField("pages") || ""),
+      date: String(parent.getField("date") || ""),
+    };
+  }
+
+  async function metadataChildren(parent) {
+    let notes = parent.getNotes().length ? await Zotero.Items.getAsync(parent.getNotes()) : [];
+    if (!Array.isArray(notes)) notes = [notes];
+    let attachments = parent.getAttachments().length ? await Zotero.Items.getAsync(parent.getAttachments()) : [];
+    if (!Array.isArray(attachments)) attachments = [attachments];
+    const children = [];
+    for (const note of notes.filter(Boolean)) {
+      if (note.parentItemID !== parent.id) throw new ProtocolError("metadata note parent drift", 409, "child_drift");
+      children.push({
+        key: String(note.key),
+        version: Number(note.version),
+        item_type: "note",
+        content_sha256: await sha256Text(note.getNote()),
+      });
+    }
+    for (const attachment of attachments.filter(Boolean)) {
+      if (attachment.parentItemID !== parent.id) throw new ProtocolError("metadata attachment parent drift", 409, "child_drift");
+      const evidence = await attachmentEvidence(attachment);
+      if (!evidence.sha256 || !evidence.size_bytes) throw new ProtocolError("metadata attachment bytes are unreadable", 409, "child_drift");
+      children.push({
+        key: evidence.key,
+        version: evidence.version,
+        item_type: "attachment",
+        content_type: evidence.content_type,
+        link_mode: evidence.link_mode,
+        size_bytes: evidence.size_bytes,
+        content_sha256: evidence.sha256,
+        direct_collection_count: evidence.direct_collection_count,
+      });
+    }
+    children.sort((left, right) => left.key.localeCompare(right.key));
+    return children;
+  }
+
+  async function metadataDuplicateCandidates(manifest, desiredProfile) {
+    let items = await Zotero.Items.getAll(manifest.target.library_id, true);
+    if (!Array.isArray(items)) items = [];
+    if (items.length && typeof items[0] === "number") items = await Zotero.Items.getAsync(items);
+    const desiredDOI = ZoteroDeclarativeBridgeCore.normalizeDOI(desiredProfile.DOI);
+    const desiredFingerprint = ZoteroDeclarativeBridgeCore.metadataDuplicateFingerprint(
+      manifest.entry.parent.title,
+      desiredProfile,
+    );
+    const doiMatches = [];
+    const titleMatches = [];
+    for (const item of items.filter(Boolean)) {
+      if (
+        item.deleted || !item.isRegularItem || !item.isRegularItem()
+        || String(item.key) === manifest.entry.parent.key
+      ) continue;
+      const observedDOI = ZoteroDeclarativeBridgeCore.normalizeDOI(String(item.getField("DOI") || ""));
+      if (desiredDOI && observedDOI === desiredDOI) doiMatches.push(String(item.key));
+      const observedProfile = metadataProfile(item);
+      const observedFingerprint = ZoteroDeclarativeBridgeCore.metadataDuplicateFingerprint(
+        String(item.getField("title") || ""),
+        observedProfile,
+      );
+      if (ZoteroDeclarativeBridgeCore.metadataDuplicateTitleMatch(desiredFingerprint, observedFingerprint)) {
+        titleMatches.push(String(item.key));
+      }
+    }
+    return {
+      desired_doi_other_parent_keys: [...new Set(doiMatches)].sort(),
+      title_year_creator_other_parent_keys: [...new Set(titleMatches)].sort(),
+    };
+  }
+
   async function parentState(entry, target) {
     const parent = await Zotero.Items.getByLibraryAndKeyAsync(target.observed.library_id, entry.parent.key);
     if (!parent || parent.deleted || !parent.isRegularItem()) throw new ProtocolError(`parent unavailable: ${entry.parent.key}`, 409, "parent_drift");
@@ -431,6 +522,176 @@ var ZoteroDeclarativeBridge = (() => {
     };
   }
 
+  async function validateMetadataRepairDigest(manifest) {
+    try { ZoteroDeclarativeBridgeCore.validateMetadataRepairManifest(manifest); }
+    catch (error) { throw new ProtocolError(error.message); }
+    const unsigned = {...manifest};
+    delete unsigned.manifest_sha256;
+    if (await sha256Value(unsigned) !== manifest.manifest_sha256) throw new ProtocolError("metadata repair manifest digest mismatch");
+    const entry = manifest.entry;
+    const operation = entry.operation;
+    if (await sha256Value(entry.children) !== entry.children_sha256) throw new ProtocolError("metadata repair children digest mismatch");
+    const duplicateUnsigned = {...entry.duplicate_preconditions};
+    delete duplicateUnsigned.sha256;
+    if (await sha256Value(duplicateUnsigned) !== entry.duplicate_preconditions.sha256) throw new ProtocolError("metadata repair duplicate digest mismatch");
+    if (await sha256Value(operation.expected_profile) !== operation.expected_profile_sha256) throw new ProtocolError("metadata repair expected profile digest mismatch");
+    if (await sha256Value(operation.desired_profile) !== operation.desired_profile_sha256) throw new ProtocolError("metadata repair desired profile digest mismatch");
+    const expectedData = ZoteroDeclarativeBridgeCore.metadataRepairParentData(entry.parent, entry.children, operation.expected_profile);
+    const desiredData = ZoteroDeclarativeBridgeCore.metadataRepairParentData(entry.parent, entry.children, operation.desired_profile);
+    if (await sha256Value(expectedData) !== operation.expected_parent_data_sha256) throw new ProtocolError("metadata repair expected parent-data digest mismatch");
+    if (await sha256Value(desiredData) !== operation.desired_parent_data_sha256) throw new ProtocolError("metadata repair desired parent-data digest mismatch");
+  }
+
+  function assertMetadataRepairParentClean(parent) {
+    let hasChanged;
+    try {
+      hasChanged = typeof parent.hasChanged === "function" ? parent.hasChanged() : null;
+    }
+    catch (_error) {
+      hasChanged = null;
+    }
+    if (!ZoteroDeclarativeBridgeCore.metadataRepairParentIsClean(hasChanged)) {
+      throw new ProtocolError("metadata repair parent has unsaved changes", 409, "parent_dirty");
+    }
+  }
+
+  async function preflightMetadataRepair(manifest, suppliedParent = null) {
+    await validateMetadataRepairDigest(manifest);
+    const target = await resolveTarget(manifest.target);
+    const entry = manifest.entry;
+    const parent = suppliedParent || await Zotero.Items.getByLibraryAndKeyAsync(target.observed.library_id, entry.parent.key);
+    if (!parent || parent.deleted || !parent.isRegularItem()) throw new ProtocolError("metadata repair parent unavailable", 409, "parent_drift");
+    assertMetadataRepairParentClean(parent);
+    const observedParent = {
+      key: String(parent.key),
+      version: Number(parent.version),
+      item_type: String(parent.itemType),
+      title: String(parent.getField("title") || ""),
+      short_title: String(parent.getField("shortTitle") || ""),
+      expected_target_membership: parent.getCollections().includes(target.collection.id),
+      synced: parent.synced === true,
+    };
+    for (const field of ["key", "item_type", "title", "short_title", "expected_target_membership"]) {
+      if (observedParent[field] !== entry.parent[field]) throw new ProtocolError(`metadata repair protected ${field} drift`, 409, "parent_drift");
+    }
+    for (const field of METADATA_WRITABLE_FIELDS) {
+      const fieldID = Zotero.ItemFields.getID(field);
+      if (!fieldID || !Zotero.ItemFields.isValidForType(fieldID, parent.itemTypeID)) {
+        throw new ProtocolError(`metadata repair field is invalid for journalArticle: ${field}`, 409, "parent_drift");
+      }
+    }
+    const children = await metadataChildren(parent);
+    const evidencePDF = children.find(child => child.key === entry.evidence_pdf_key);
+    if (!evidencePDF || evidencePDF.item_type !== "attachment" || evidencePDF.content_type !== "application/pdf") {
+      throw new ProtocolError("metadata repair evidence PDF drift", 409, "child_drift");
+    }
+    const profile = metadataProfile(parent);
+    const observedData = ZoteroDeclarativeBridgeCore.metadataRepairParentData(observedParent, children, profile);
+    const parentDataSHA256 = await sha256Value(observedData);
+    const duplicateCandidates = await metadataDuplicateCandidates(manifest, entry.operation.desired_profile);
+    if (
+      duplicateCandidates.desired_doi_other_parent_keys.length
+      || duplicateCandidates.title_year_creator_other_parent_keys.length
+    ) throw new ProtocolError("metadata repair duplicate conflict", 409, "duplicate_conflict");
+    const boundDuplicate = entry.duplicate_preconditions;
+    if (
+      ZoteroDeclarativeBridgeCore.stableStringify(duplicateCandidates.desired_doi_other_parent_keys)
+        !== ZoteroDeclarativeBridgeCore.stableStringify(boundDuplicate.desired_doi_other_parent_keys)
+      || ZoteroDeclarativeBridgeCore.stableStringify(duplicateCandidates.title_year_creator_other_parent_keys)
+        !== ZoteroDeclarativeBridgeCore.stableStringify(boundDuplicate.title_year_creator_other_parent_keys)
+    ) throw new ProtocolError("metadata repair duplicate precondition drift", 409, "duplicate_conflict");
+    let decision;
+    try {
+      decision = ZoteroDeclarativeBridgeCore.classifyMetadataRepair(entry.operation, {
+        parent_version: observedParent.version,
+        parent_data_sha256: parentDataSHA256,
+      });
+    }
+    catch (error) {
+      throw new ProtocolError(error.message, 409, "metadata_drift");
+    }
+    const allSatisfied = decision.decision === "satisfied";
+    const parentVersion = ZoteroDeclarativeBridgeCore.versionEvidence(
+      observedParent.version,
+      observedParent.synced,
+      entry.parent.version,
+    );
+    const publicState = {
+      target: target.observed,
+      execution_profile: "db_atomic",
+      write_plan: {
+        mode: allSatisfied ? "none" : "db_atomic",
+        operation_count: allSatisfied ? 0 : 1,
+        attachment_operation_count: 0,
+        database_operation_count: allSatisfied ? 0 : 1,
+      },
+      entry: {
+        parent_key: entry.parent.key,
+        parent_version: parentVersion.observed_version,
+        parent_version_precondition: parentVersion.precondition_version,
+        parent_current_synced_version: parentVersion.current_synced_version,
+        parent_version_sync_status: parentVersion.sync_status,
+        target_membership: observedParent.expected_target_membership,
+        profile_sha256: await sha256Value(profile),
+        parent_data_sha256: parentDataSHA256,
+        children_sha256: await sha256Value(children),
+        duplicate_candidates: duplicateCandidates,
+        operation: {...decision, type: entry.operation.type},
+        all_satisfied: allSatisfied,
+      },
+    };
+    return {
+      target,
+      parent,
+      publicState,
+      stateSHA256: await sha256Value(publicState),
+      allSatisfied,
+    };
+  }
+
+  async function preflightForManifest(manifest, enforceReadbackMembership = false) {
+    return manifest && manifest.schema === METADATA_REPAIR_SCHEMA
+      ? preflightMetadataRepair(manifest)
+      : preflight(manifest, enforceReadbackMembership);
+  }
+
+  async function applyMetadataRepair(manifest, preflightResult) {
+    const desired = manifest.entry.operation.desired_profile;
+    assertMetadataRepairParentClean(preflightResult.parent);
+    preflightResult.parent.setCreators(desired.creators.map(creator => ({...creator})));
+    for (const field of METADATA_WRITABLE_FIELDS) preflightResult.parent.setField(field, desired[field]);
+    await preflightResult.parent.save();
+    return [];
+  }
+
+  async function freshMetadataRepairFailureInspection(
+    manifest,
+    parent,
+    inspectPreflight = preflightMetadataRepair,
+  ) {
+    if (!parent || !Number.isInteger(parent.id) || parent.id <= 0) {
+      throw new ProtocolError("metadata repair failure parent is unavailable", 500, "readback_unavailable");
+    }
+    const itemID = parent.id;
+    try {
+      await parent.reload(null, true);
+    }
+    catch (error) {
+      try { Zotero.Items.unload(itemID); }
+      catch (_unloadError) {}
+      throw error;
+    }
+    Zotero.Items.unload(itemID);
+    const fresh = await Zotero.Items.getByLibraryAndKeyAsync(
+      manifest.target.library_id,
+      manifest.entry.parent.key,
+    );
+    if (!fresh || fresh === parent || fresh.id !== itemID) {
+      throw new ProtocolError("metadata repair fresh readback failed", 500, "readback_unavailable");
+    }
+    return inspectPreflight(manifest, fresh);
+  }
+
   async function applyRows(preflightResult) {
     const createdAttachmentKeys = [];
     for (const row of preflightResult.rows) {
@@ -480,7 +741,21 @@ var ZoteroDeclarativeBridge = (() => {
     return createdAttachmentKeys;
   }
 
-  async function dispatch(envelope) {
+  async function dispatch(envelope, testHooks = null) {
+    if (testHooks && globalThis.__ZOTERO_DECLARATIVE_BRIDGE_TEST__ !== true) {
+      throw new ProtocolError("bootstrap test hooks are unavailable");
+    }
+    const runPreflightForManifest = testHooks && testHooks.preflightForManifest
+      ? testHooks.preflightForManifest
+      : preflightForManifest;
+    const runApplyMetadataRepair = testHooks && testHooks.applyMetadataRepair
+      ? testHooks.applyMetadataRepair
+      : applyMetadataRepair;
+    const runFreshMetadataRepairFailureInspection = (
+      testHooks && testHooks.freshMetadataRepairFailureInspection
+        ? testHooks.freshMetadataRepairFailureInspection
+        : freshMetadataRepairFailureInspection
+    );
     const action = envelope.action;
     if (action === "probe") {
       if (Object.keys(envelope.payload).length) throw new ProtocolError("probe payload must be empty");
@@ -491,6 +766,8 @@ var ZoteroDeclarativeBridge = (() => {
         endpoint: ENDPOINT,
         read_only_actions: ["resolve_collection"],
         operations: ["ensure_collection_membership", "ensure_parent_short_title", "ensure_child_note", "ensure_pdf_attachment"],
+        metadata_repair_schemas: [METADATA_REPAIR_SCHEMA],
+        metadata_repair_operations: ["ensure_parent_journal_metadata_v1"],
         execution_profiles: {
           db_atomic: ["ensure_collection_membership", "ensure_parent_short_title", "ensure_child_note"],
           single_attachment_import: ["ensure_pdf_attachment"],
@@ -535,7 +812,7 @@ var ZoteroDeclarativeBridge = (() => {
       throw new ProtocolError("payload keys differ");
     }
     const manifest = envelope.payload.manifest;
-    const before = await preflight(manifest, action === "readback");
+    const before = await runPreflightForManifest(manifest, action === "readback");
     if (action === "readback") {
       return {
         status: before.allSatisfied ? "verified" : "not_applied",
@@ -590,20 +867,30 @@ var ZoteroDeclarativeBridge = (() => {
     let writeAttempted = false;
     let createdAttachmentKeys = [];
     let dbCommitConfirmed = false;
+    let metadataCommitObserved = false;
+    let metadataRollbackObserved = false;
+    let metadataRepairParent = null;
     const executionProfile = before.publicState.execution_profile;
     try {
       const repeatAndApply = async () => {
-        const repeated = await preflight(manifest);
+        if (manifest.schema === METADATA_REPAIR_SCHEMA) {
+          Zotero.DB.addCurrentCallback("commit", () => { metadataCommitObserved = true; });
+          Zotero.DB.addCurrentCallback("rollback", () => { metadataRollbackObserved = true; });
+        }
+        const repeated = await runPreflightForManifest(manifest);
         if (repeated.stateSHA256 !== before.stateSHA256) throw new ProtocolError("state changed at transaction start", 409, "transaction_drift");
+        if (manifest.schema === METADATA_REPAIR_SCHEMA) metadataRepairParent = repeated.parent;
         writeAttempted = true;
-        createdAttachmentKeys = await applyRows(repeated);
+        createdAttachmentKeys = manifest.schema === METADATA_REPAIR_SCHEMA
+          ? await runApplyMetadataRepair(manifest, repeated)
+          : await applyRows(repeated);
       };
       if (executionProfile === "single_attachment_import") await repeatAndApply();
       else {
         await Zotero.DB.executeTransaction(repeatAndApply);
         dbCommitConfirmed = true;
       }
-      const after = await preflight(manifest);
+      const after = await runPreflightForManifest(manifest);
       if (!after.allSatisfied) throw new ProtocolError("committed readback mismatch", 500, "readback_mismatch");
       return {
         status: "completed",
@@ -619,20 +906,43 @@ var ZoteroDeclarativeBridge = (() => {
     catch (error) {
       let inspection = null;
       let commitState = "unknown";
-      try {
-        inspection = await preflight(manifest);
+      if (manifest.schema === METADATA_REPAIR_SCHEMA) {
+        if (writeAttempted && (metadataCommitObserved || metadataRollbackObserved)) {
+          try {
+            inspection = await runFreshMetadataRepairFailureInspection(
+              manifest,
+              metadataRepairParent,
+            );
+          }
+          catch (_inspectionError) {}
+        }
+        commitState = ZoteroDeclarativeBridgeCore.metadataRepairCommitStateAfterFailure({
+          write_attempted: writeAttempted,
+          db_commit_confirmed: dbCommitConfirmed,
+          commit_observed: metadataCommitObserved,
+          rollback_observed: metadataRollbackObserved,
+          inspection_available: inspection !== null,
+          before_state_sha256: before.stateSHA256,
+          inspection_state_sha256: inspection ? inspection.stateSHA256 : null,
+          inspection_all_satisfied: inspection ? inspection.allSatisfied : false,
+        });
       }
-      catch (_inspectionError) {}
-      commitState = ZoteroDeclarativeBridgeCore.commitStateAfterFailure({
-        write_attempted: writeAttempted,
-        execution_profile: executionProfile,
-        db_commit_confirmed: dbCommitConfirmed,
-        inspection_available: inspection !== null,
-        before_state_sha256: before.stateSHA256,
-        inspection_state_sha256: inspection ? inspection.stateSHA256 : null,
-        inspection_all_satisfied: inspection ? inspection.allSatisfied : false,
-        created_attachment_count: createdAttachmentKeys.length,
-      });
+      else {
+        try {
+          inspection = await runPreflightForManifest(manifest);
+        }
+        catch (_inspectionError) {}
+        commitState = ZoteroDeclarativeBridgeCore.commitStateAfterFailure({
+          write_attempted: writeAttempted,
+          execution_profile: executionProfile,
+          db_commit_confirmed: dbCommitConfirmed,
+          inspection_available: inspection !== null,
+          before_state_sha256: before.stateSHA256,
+          inspection_state_sha256: inspection ? inspection.stateSHA256 : null,
+          inspection_all_satisfied: inspection ? inspection.allSatisfied : false,
+          created_attachment_count: createdAttachmentKeys.length,
+        });
+      }
       const wrapped = new ProtocolError(
         `transaction failed; commit_state=${commitState}`,
         error instanceof ProtocolError ? error.status : 500,
@@ -736,7 +1046,19 @@ var ZoteroDeclarativeBridge = (() => {
     STATE.previews.clear();
   }
 
-  return {start, stop};
+  const testing = globalThis.__ZOTERO_DECLARATIVE_BRIDGE_TEST__ === true
+    ? Object.freeze({
+      applyMetadataRepair,
+      assertMetadataRepairParentClean,
+      dispatch,
+      freshMetadataRepairFailureInspection,
+      resetState() {
+        STATE.nonces.clear();
+        STATE.previews.clear();
+      },
+    })
+    : null;
+  return testing ? {start, stop, testing} : {start, stop};
 })();
 
 async function startup({version, rootURI}) {

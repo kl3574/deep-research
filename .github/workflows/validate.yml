@@ -112,7 +112,16 @@ jobs:
           -p 'test_*.py'
 
       - name: Run Zotero declarative bridge JavaScript tests
-        run: node --test skills/zotero-declarative-bridge/scripts/test_bridge_core.js
+        run: >-
+          node --test
+          skills/zotero-declarative-bridge/scripts/test_*core.js
+          skills/zotero-declarative-bridge/scripts/test_metadata_repair_bootstrap_vm.js
+
+      - name: Run Zotero metadata repair tests
+        run: >-
+          python -m unittest discover
+          -s skills/repair-zotero-metadata/scripts
+          -p 'test_*.py'
 
       - name: Run six-skill workflow routing evaluations
         run: >-
@@ -143,7 +152,8 @@ jobs:
             skills/scholarly-source-acquisition \
             skills/scholarly-document-normalization \
             skills/research-network-publish \
-            skills/zotero-declarative-bridge
+            skills/zotero-declarative-bridge \
+            skills/repair-zotero-metadata
           do
             test -s "$skill/SKILL.md"
             test -s "$skill/agents/openai.yaml"

@@ -1,0 +1,40 @@
+{
+  "schema": "MetadataDuplicateNormalizationFixtures/v1",
+  "cases": [
+    {
+      "id": "ascii-punctuation",
+      "input": "Sobol' indices: A/B",
+      "expected": "sobolindicesab"
+    },
+    {
+      "id": "cjk",
+      "input": "合成实验：温度/压力",
+      "expected": "合成实验温度压力"
+    },
+    {
+      "id": "composed-accent",
+      "input": "École",
+      "expected": "ecole"
+    },
+    {
+      "id": "decomposed-accent",
+      "input": "Café",
+      "expected": "cafe"
+    },
+    {
+      "id": "german-lower-sharp-s",
+      "input": "Straße",
+      "expected": "straße"
+    },
+    {
+      "id": "german-upper-ss",
+      "input": "STRASSE",
+      "expected": "strasse"
+    },
+    {
+      "id": "greek-tonos",
+      "input": "Αθήνα",
+      "expected": "αθηνα"
+    }
+  ]
+}

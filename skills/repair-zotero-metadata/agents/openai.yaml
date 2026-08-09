@@ -1,0 +1,4 @@
+interface:
+  display_name: "Repair Zotero Metadata"
+  short_description: "Review fixed-profile repairs for existing Zotero parents"
+  default_prompt: "Use $repair-zotero-metadata to review this verified source against one existing Zotero journalArticle, fail closed on duplicates or drift, and emit a private hash-bound repair source without writing Zotero."

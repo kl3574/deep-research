@@ -906,6 +906,175 @@ class KnowledgeNetworkTest(unittest.TestCase):
         self.assertEqual(payload["existing"], 2)
         self.assertEqual(len(self.load_ledger(self.network_id, "sources")), 2)
 
+    def test_zotero_refresh_does_not_supersede_same_identity_method_source(self):
+        baseline_parent = {
+            "key": "BASE0001",
+            "version": 1,
+            "item_type": "journalArticle",
+            "title": "Baseline corpus paper",
+            "date": "2025",
+            "DOI": "10.1000/baseline",
+            "ISBN": "",
+            "creators": [],
+        }
+        colliding_parent = {
+            "key": "SHARED01",
+            "version": 1,
+            "item_type": "journalArticle",
+            "title": "Reviewed method enters the Zotero corpus",
+            "date": "2026",
+            "DOI": "10.1000/shared",
+            "ISBN": "",
+            "creators": [],
+        }
+        snapshot_path, digest = self.make_zotero_snapshot(
+            self.network_id, [baseline_parent], collection_version=1
+        )
+        self.init_network_with_snapshot(self.network_id, snapshot_path, digest)
+        initial_ingest = invoke(
+            self.root,
+            self.network_id,
+            ["ingest-zotero-snapshot", "--snapshot", str(snapshot_path)],
+        )
+        self.assertEqual(initial_ingest[0], 0, initial_ingest[2])
+
+        method_source_id = "source-reviewed-method"
+        method_added = invoke(
+            self.root,
+            self.network_id,
+            [
+                "add-source",
+                "--source-id", method_source_id,
+                "--canonical-identity", "doi:10.1000/shared",
+                "--canonical-version", "version-of-record",
+                "--read-version", "verified-full-text",
+                "--read-depth", "full",
+                "--version-hash", f"sha256:{'a' * 64}",
+                "--role", "method",
+            ],
+        )
+        self.assertEqual(method_added[0], 0, method_added[2])
+        entity_added = invoke(
+            self.root,
+            self.network_id,
+            [
+                "add-entity",
+                "--entity-id", "method-entity",
+                "--entity-type", "method",
+                "--name", "Reviewed method",
+                "--description", "Synthetic public regression fixture.",
+            ],
+        )
+        self.assertEqual(entity_added[0], 0, entity_added[2])
+        claim_added = invoke(
+            self.root,
+            self.network_id,
+            [
+                "add-claim",
+                "--claim-id", "method-claim",
+                "--claim-text", "The reviewed method has bounded evidence.",
+                "--entity-id", "method-entity",
+                "--impact", "medium",
+            ],
+        )
+        self.assertEqual(claim_added[0], 0, claim_added[2])
+        evidence_added = invoke(
+            self.root,
+            self.network_id,
+            [
+                "add-evidence",
+                "--evidence-id", "method-evidence",
+                "--claim-id", "method-claim",
+                "--source-id", method_source_id,
+                "--polarity", "supports",
+                "--exact-locator", "PDF p. 3 | Eq. (1)",
+                "--independence-group", "reviewed-method-paper",
+                "--summary", "Synthetic evidence remains bound to full text.",
+            ],
+        )
+        self.assertEqual(evidence_added[0], 0, evidence_added[2])
+        evidence_before = self.load_ledger(self.network_id, "evidence")
+
+        snapshot_path, _ = self.make_zotero_snapshot(
+            self.network_id,
+            [baseline_parent, colliding_parent],
+            collection_version=2,
+        )
+        refreshed = invoke(
+            self.root,
+            self.network_id,
+            [
+                "ingest-zotero-snapshot",
+                "--snapshot", str(snapshot_path),
+                "--allow-refresh",
+            ],
+        )
+        self.assertEqual(refreshed[0], 0, refreshed[2])
+        refresh_payload = json.loads(refreshed[1])
+        self.assertEqual(refresh_payload["added"], 1)
+        self.assertEqual(refresh_payload["changed"], 0)
+        self.assertEqual(refresh_payload["existing"], 1)
+        self.assertEqual(refresh_payload["removed"], 0)
+        self.assertEqual(refresh_payload["total"], 2)
+
+        sources = self.load_ledger(self.network_id, "sources")
+        method_rows = [
+            row for row in sources if row.get("source_id") == method_source_id
+        ]
+        self.assertEqual(len(method_rows), 1)
+        self.assertEqual(method_rows[0]["role"], "method")
+        self.assertEqual(method_rows[0]["read_depth"], "full")
+        self.assertFalse(
+            any(row.get("supersedes") == method_source_id for row in sources)
+        )
+        corpus_rows = [
+            row
+            for row in sources
+            if row.get("role") == "zotero_corpus"
+            and row.get("canonical_identity") == "doi:10.1000/shared"
+        ]
+        self.assertEqual(len(corpus_rows), 1)
+        self.assertIsNone(corpus_rows[0].get("supersedes"))
+        state = json.loads(
+            (self.root / "networks" / self.network_id / "network.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertIn(
+            corpus_rows[0]["source_id"],
+            state["corpus_snapshot_current_source_ids"],
+        )
+        self.assertNotIn(
+            method_source_id, state["corpus_snapshot_current_source_ids"]
+        )
+        self.assertEqual(
+            self.load_ledger(self.network_id, "evidence"), evidence_before
+        )
+        validated = invoke(self.root, self.network_id, ["validate"])
+        self.assertEqual(validated[0], 0, validated[2])
+        export_path = self.root / "role-aware-source-export.json"
+        exported = invoke(
+            self.root,
+            self.network_id,
+            ["export", "--output", str(export_path)],
+        )
+        self.assertEqual(exported[0], 0, exported[2])
+        export_payload = json.loads(export_path.read_text(encoding="utf-8"))
+        exported_method = [
+            row
+            for row in export_payload["sources"]
+            if row.get("source_id") == method_source_id
+        ]
+        self.assertEqual(len(exported_method), 1)
+        self.assertEqual(exported_method[0]["corpus_membership"], "current")
+        method_node = [
+            row
+            for row in export_payload["nodes"]
+            if row.get("node_id") == f"source:{method_source_id}"
+        ]
+        self.assertEqual(len(method_node), 1)
+        self.assertEqual(method_node[0]["status"], "active")
+
     def test_ingest_zotero_snapshot_refreshes_changed_and_new_parent(self):
         parents_v1 = [
             {

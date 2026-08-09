@@ -52,6 +52,17 @@ def paper_knowledge_note() -> str:
     return rendered
 
 
+def clean_literature_note() -> str:
+    return (
+        '<div data-schema-version="9"><h1>适用：高维输出筛选｜结论：'
+        '先定义目标再解释敏感度</h1><h2>方法与公式</h2>'
+        '<p>成员度目标使用行内公式 <span class="math">$u_k(Y)$</span>。</p>'
+        '<pre class="math">$$S_j=\\frac{\\operatorname{Var}'
+        '(\\mathbb{E}[u_k\\mid X_j])}{\\operatorname{Var}(u_k)}$$</pre>'
+        '<h2>适用边界</h2><p>无稳定簇时不能使用。</p></div>'
+    )
+
+
 class CurationBatchTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -236,6 +247,83 @@ class CurationBatchTests(unittest.TestCase):
             [], verify.validate_execution(self.success_execution(batch), batch)
         )
 
+    def test_clean_literature_note_with_canonical_math_is_golden(self) -> None:
+        self.note.write_text(clean_literature_note(), encoding="utf-8")
+        batch = self.batch()
+        batch["entries"][0]["note_artifact"]["sha256"] = verify.sha256_file(
+            self.note
+        )
+        self.assertEqual([], verify.validate_batch(batch))
+
+    def test_operationally_polluted_clean_note_is_rejected(self) -> None:
+        polluted = clean_literature_note().replace(
+            "</div>", "<h2>同步状态</h2><p>写入状态：已完成</p></div>"
+        )
+        self.note.write_text(polluted, encoding="utf-8")
+        batch = self.batch()
+        batch["entries"][0]["note_artifact"]["sha256"] = verify.sha256_file(
+            self.note
+        )
+        errors = verify.validate_batch(batch)
+        self.assertTrue(any("CN-10" in value for value in errors), errors)
+
+    def test_snapshot_projects_the_canonical_batch_target_and_state(self) -> None:
+        path = [
+            {"key": "ROOT0001", "name": "Research", "version": 1},
+            {"key": "MID00001", "name": "Inverse Problems", "version": 2},
+            {"key": "COLL0001", "name": "Calibration", "version": 12},
+        ]
+        parents = [{"key": "ABCDEFGH"}]
+        snapshot_identity = verify.digest_value(
+            {
+                "group_id": 1234567,
+                "collection_key": "COLL0001",
+                "collection_path": [
+                    {"key": item["key"], "name": item["name"]} for item in path
+                ],
+            }
+        )
+        snapshot = {
+            "schema": "ZoteroCorpusSnapshot/v1",
+            "retrieved_at": "2026-08-04T00:00:00+08:00",
+            "collection": {
+                "group_id": 1234567,
+                "collection_key": "COLL0001",
+                "collection_version": 12,
+                "collection_path": path,
+            },
+            "parents": parents,
+            "identity_sha256": snapshot_identity,
+            "state_sha256": verify.digest_value(
+                {
+                    "identity_sha256": snapshot_identity,
+                    "collection_version": 12,
+                    "parents": parents,
+                }
+            ),
+        }
+        target, fingerprint = verify.target_and_fingerprint_from_snapshot(
+            snapshot,
+            library_id=2,
+            library_name="Example Research Library",
+            expected_target=self.target,
+        )
+        self.assertEqual(self.target, target)
+        self.assertEqual(self.fingerprint, fingerprint)
+        with self.assertRaisesRegex(ValueError, "expected batch target"):
+            verify.target_and_fingerprint_from_snapshot(
+                snapshot,
+                library_id=2,
+                library_name="Wrong Library",
+                expected_target=self.target,
+            )
+        snapshot["state_sha256"] = "sha256:" + "0" * 64
+        with self.assertRaisesRegex(ValueError, "state_sha256"):
+            verify.target_and_fingerprint_from_snapshot(
+                snapshot,
+                library_id=2,
+                library_name="Example Research Library",
+            )
     def test_mixed_batch_14_golden_3_blocked_readback_passes(self) -> None:
         batch = self.mixed_batch()
         frozen_batch = copy.deepcopy(batch)

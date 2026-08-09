@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import contextlib
 import hashlib
 import importlib.util
@@ -1237,6 +1238,31 @@ class NetworkPatchTest(unittest.TestCase):
         )
         hypotheses["hypotheses"][0]["backing"][0]["ref_id"] = (
             "evidence:ground-evidence"
+        )
+        selected_ids = [
+            hypothesis["hypothesis_id"]
+            for hypothesis in hypotheses["hypotheses"]
+            if hypothesis["status"] == "selected"
+        ]
+        unscheduled = copy.deepcopy(hypotheses)
+        unscheduled.pop("priority_order", None)
+        unscheduled.pop("selection_summary", None)
+        for hypothesis in unscheduled["hypotheses"]:
+            hypothesis["status"] = "proposed"
+        prioritized = real_gap.prioritize(unscheduled, live_network)
+        selection = {
+            "schema": real_gap.REVIEWED_GAP_SELECTION_SCHEMA,
+            "input_ref": {
+                "schema": "KnowledgeGapHypotheses/v1",
+                "sha256": real_gap.sha256_json(prioritized),
+            },
+            "network_ref": copy.deepcopy(prioritized["network_ref"]),
+            "round_id": prioritized["round_id"],
+            "selected_hypothesis_ids": selected_ids,
+            "review_status": "approved",
+        }
+        hypotheses = real_gap.select_hypotheses(
+            prioritized, selection, live_network
         )
         request_set = real_gap.emit_search_requests(hypotheses, live_network)
         request = request_set["requests"][0]

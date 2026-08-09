@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 from html.parser import HTMLParser
 import json
 from pathlib import Path
@@ -12,10 +11,18 @@ import re
 import sys
 from typing import Any
 
+from clean_literature_note import validate_clean_note_html
+from curation_target_fingerprint import (
+    canonical_json_bytes,
+    compute_identity_fingerprint,
+    compute_state_fingerprint,
+    digest_value,
+    normalize_digest,
+    target_and_fingerprint_from_snapshot,
+)
 from verify_note_html import validate_note
 
 
-DIGEST_RE = re.compile(r"^(?:sha256:)?([0-9a-f]{64})$")
 ITEM_KEY_RE = re.compile(r"^[A-Z0-9]{8}$")
 DECISION_HANDLER = {
     "create_parent": "import_zotero_bundle",
@@ -99,49 +106,14 @@ RESULT_STATUSES = {
 }
 
 
-def canonical_json_bytes(value: Any) -> bytes:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
-
-
-def digest_value(value: Any) -> str:
-    return "sha256:" + hashlib.sha256(canonical_json_bytes(value)).hexdigest()
-
-
-def normalize_digest(value: Any) -> str | None:
-    if not isinstance(value, str):
-        return None
-    match = DIGEST_RE.fullmatch(value)
-    return "sha256:" + match.group(1) if match else None
-
-
 def sha256_file(path: Path) -> str:
+    import hashlib
+
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return "sha256:" + digest.hexdigest()
-
-
-def compute_identity_fingerprint(target: dict[str, Any]) -> str:
-    return digest_value(target)
-
-
-def compute_state_fingerprint(
-    identity_sha256: str, collection_version: int, parent_keys: list[str]
-) -> str:
-    return digest_value(
-        {
-            "identity_sha256": normalize_digest(identity_sha256) or identity_sha256,
-            "collection_version": collection_version,
-            "top_level_parent_keys": sorted(parent_keys),
-        }
-    )
 
 
 def load_json(path: Path) -> Any:
@@ -524,16 +496,15 @@ def validate_entry(
         if note_path is not None:
             parser = _NoteParser()
             try:
-                parser.feed(note_path.read_text(encoding="utf-8"))
+                note_html = note_path.read_text(encoding="utf-8")
+                parser.feed(note_html)
             except (OSError, UnicodeError) as exc:
                 errors.append(f"{label}.note_artifact: unreadable: {exc}")
             else:
                 if parser.schema_version != "9":
                     errors.append(f"{label}.note_artifact: root is not schema 9")
                 if parser.note_contract == PAPER_KNOWLEDGE_NOTE_CONTRACT:
-                    note_errors, _, summary = validate_note(
-                        note_path.read_text(encoding="utf-8")
-                    )
+                    note_errors, _, summary = validate_note(note_html)
                     errors.extend(
                         f"{label}.note_artifact: {error}" for error in note_errors
                     )
@@ -563,9 +534,7 @@ def validate_entry(
                         f"'{parser.note_contract}'"
                     )
                 elif parser.access_level == "metadata_only":
-                    note_errors, _, summary = validate_note(
-                        note_path.read_text(encoding="utf-8")
-                    )
+                    note_errors, _, summary = validate_note(note_html)
                     errors.extend(
                         f"{label}.note_artifact: {error}" for error in note_errors
                     )
@@ -586,14 +555,36 @@ def validate_entry(
                             "metadata_only entry status"
                         )
                 elif parser.access_level in (None, "full_text"):
-                    if parser.headings != NOTE_SECTIONS:
-                        errors.append(
-                            f"{label}.note_artifact: legacy section order mismatch"
+                    if parser.headings == NOTE_SECTIONS:
+                        if fulltext == "metadata_only":
+                            errors.append(
+                                f"{label}.note_artifact: metadata_only entry requires "
+                                "the explicit metadata-only marker"
+                            )
+                    else:
+                        clean_errors, _, clean_summary = validate_clean_note_html(
+                            note_html
                         )
-                    if fulltext == "metadata_only":
+                        errors.extend(
+                            f"{label}.note_artifact: {error}"
+                            for error in clean_errors
+                        )
+                        if not isinstance(clean_summary, dict) or clean_summary.get(
+                            "contract"
+                        ) != "ZoteroCleanLiteratureNote/v1":
+                            errors.append(
+                                f"{label}.note_artifact: clean-note validator returned "
+                                "the wrong contract"
+                            )
+                        if fulltext != "fulltext_verified":
+                            errors.append(
+                                f"{label}.note_artifact: clean literature note requires "
+                                "fulltext_verified entry status"
+                            )
+                    if parser.headings != NOTE_SECTIONS and clean_errors:
                         errors.append(
-                            f"{label}.note_artifact: metadata_only entry requires "
-                            "the explicit metadata-only marker"
+                            f"{label}.note_artifact: neither clean-note nor legacy "
+                            "content contract passed"
                         )
                 else:
                     errors.append(
@@ -942,12 +933,30 @@ def parser() -> argparse.ArgumentParser:
     verify.add_argument("--observed-target", type=Path)
     digest = commands.add_parser("digest")
     digest.add_argument("manifest", type=Path)
+    fingerprint = commands.add_parser("fingerprint-from-snapshot")
+    fingerprint.add_argument("snapshot", type=Path)
+    fingerprint.add_argument("--library-id", type=int, required=True)
+    fingerprint.add_argument("--library-name", required=True)
     return root
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
+        if args.command == "fingerprint-from-snapshot":
+            target, fingerprint = target_and_fingerprint_from_snapshot(
+                load_json(args.snapshot),
+                library_id=args.library_id,
+                library_name=args.library_name,
+            )
+            print(
+                json.dumps(
+                    {"target": target, "target_fingerprint": fingerprint},
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+            return 0
         manifest = load_json(args.manifest)
         manifest_digest = digest_value(manifest)
         if args.command == "digest":

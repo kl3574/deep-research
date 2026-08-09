@@ -113,6 +113,18 @@ represented, and two auditable rounds add nothing decision-relevant. Call this
 `pragmatic saturation`, never completeness. Systematic work stops by protocol;
 budget or access exhaustion produces a partial result with open gaps.
 
+For final countercheck rounds, do not infer no-add or a stopping claim from file
+names or prose summaries. Pre-review one immutable ordered axis plan, then bind
+the selected request set, owner-validated result set, complete candidate-
+occurrence screening, Tier-A review, previous closure, and before/after
+authoritative network content with `scripts/countercheck_closure.py`, following
+[countercheck-closure.md](references/countercheck-closure.md). Each closure and
+the streak assessment must replay their artifact references. A provider-partial
+round may be an observed no-add, but never a qualifying no-add. Only the final
+two consecutive qualifying rounds in the complete plan, with disjoint
+request/query IDs and pre-reviewed orthogonal axes, can support bounded
+`pragmatic_saturation`.
+
 Lead with the bounded answer, then coverage, map/deep branches, aligned route
 comparison, evidence/conflicts, gaps, limits, and the next highest-information
 check. `$curate-research-to-zotero` alone owns approved acquisition, writes, and

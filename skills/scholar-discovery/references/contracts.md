@@ -187,6 +187,19 @@ IDs plus unique failure request IDs; a request cannot appear in both arrays.
 `request_set_id` must match `"request-set-" + request_set_digest[:16]`, and all
 `network_ref` fields must be consistent with network fields in the same object.
 
+## Private CLI output persistence
+
+Every CLI JSON output contains requests, queries, provider events, result
+metadata, or provenance and is therefore private. The writer creates missing
+output directories with mode `0700`, rejects an existing output directory that
+grants group or other access, and never changes the permissions of an existing
+private directory. It writes through a unique same-directory temporary file
+forced to `0600`, flushes and fsyncs the complete payload, atomically replaces
+the target, forces the published file to `0600`, and fsyncs the directory. It
+rejects symlink outputs and removes its temporary file if publication fails or
+is interrupted by any `BaseException`. These properties do not depend on the
+caller's umask.
+
 ## CLI
 
 ```bash

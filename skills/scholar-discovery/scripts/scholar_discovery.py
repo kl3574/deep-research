@@ -10,7 +10,9 @@ import importlib.util
 import json
 import os
 import re
+import stat
 import sys
+import tempfile
 import unicodedata
 import urllib.error
 import urllib.parse
@@ -280,14 +282,88 @@ def load_json(path: str | Path) -> Any:
         return json.load(handle)
 
 
+PRIVATE_FILE_MODE = 0o600
+PRIVATE_DIRECTORY_MODE = 0o700
+
+
+def _ensure_private_output_directory(directory: Path) -> None:
+    missing: list[Path] = []
+    cursor = directory
+    while not cursor.exists():
+        if cursor.is_symlink():
+            raise ContractError(f"refusing symlink output directory: {cursor}")
+        missing.append(cursor)
+        parent = cursor.parent
+        if parent == cursor:
+            raise ContractError(f"cannot resolve output directory: {directory}")
+        cursor = parent
+
+    if cursor.is_symlink() or not cursor.is_dir():
+        raise ContractError(f"output parent must be a directory: {cursor}")
+
+    for candidate in reversed(missing):
+        created = False
+        try:
+            os.mkdir(candidate, PRIVATE_DIRECTORY_MODE)
+            created = True
+        except FileExistsError:
+            pass
+        if candidate.is_symlink() or not candidate.is_dir():
+            raise ContractError(f"output parent must be a private directory: {candidate}")
+        if created:
+            os.chmod(candidate, PRIVATE_DIRECTORY_MODE, follow_symlinks=False)
+
+    if directory.is_symlink() or not directory.is_dir():
+        raise ContractError(f"output parent must be a private directory: {directory}")
+    mode = stat.S_IMODE(os.stat(directory, follow_symlinks=False).st_mode)
+    if mode & 0o077:
+        raise ContractError(
+            f"output directory must not grant group or other access: {directory}"
+        )
+
+
 def write_json(path: str | Path, value: Any) -> None:
     target = Path(path)
     if target.is_symlink():
         raise ContractError(f"refusing symlink output: {target}")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_name(f".{target.name}.tmp")
-    temporary.write_bytes(canonical_bytes(value) + b"\n")
-    temporary.replace(target)
+    if target.exists() and not target.is_file():
+        raise ContractError(f"output must be a regular file: {target}")
+    _ensure_private_output_directory(target.parent)
+
+    payload = canonical_bytes(value) + b"\n"
+    temporary: Path | None = None
+    descriptor: int | None = None
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+        )
+        temporary = Path(temporary_name)
+        os.fchmod(descriptor, PRIVATE_FILE_MODE)
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = None
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if stat.S_IMODE(os.stat(temporary, follow_symlinks=False).st_mode) != PRIVATE_FILE_MODE:
+            raise ContractError("private temporary output mode is not 0600")
+        os.replace(temporary, target)
+        temporary = None
+        os.chmod(target, PRIVATE_FILE_MODE, follow_symlinks=False)
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        directory_descriptor = os.open(target.parent, directory_flags)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    except BaseException:
+        if descriptor is not None:
+            os.close(descriptor)
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+        raise
 
 
 def require_dict(value: Any, label: str) -> dict[str, Any]:

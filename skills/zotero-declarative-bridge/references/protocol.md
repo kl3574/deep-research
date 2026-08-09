@@ -70,6 +70,44 @@ boundary.
   value, and non-empty reviewed new value;
 - SHA-256 of canonical JSON for the whole manifest.
 
+### Independent parent-metadata repair schema
+
+`ZoteroParentMetadataRepairTransaction/v1` does not extend the legacy
+operation enum. It contains exactly one existing top-level `journalArticle`,
+one literal `ensure_parent_journal_metadata_v1` operation, and no `operations`
+array. It cannot mix with collection, shortTitle, note, or PDF writes.
+
+The transaction binds the exact parent version, immutable title and shortTitle,
+target membership, complete expected and desired fixed profiles, complete child
+key/version/type/content hashes, one evidence-PDF hash, and empty full-library
+desired-DOI and title/year/creator duplicate candidate sets. The only writable
+profile fields are DOI, creators, publicationTitle, volume, issue, pages, and
+date. Unknown fields, clearing, non-empty creator replacement, duplicate
+candidates, or any content drift fail closed.
+
+The top level also carries the reviewed source's exact-key, hash-only
+`source_evidence_sidecar_ref`: recognized sidecar schema, exact file SHA-256,
+and canonical content SHA-256. The manifest digest binds this reference; the
+private sidecar path and evidence locators never enter the transaction.
+
+Compile only a sealed `ZoteroReviewedParentMetadataRepair/v1` from
+`$repair-zotero-metadata`:
+
+```bash
+python scripts/zotero_declarative_bridge.py compile-reviewed-metadata-repair \
+  /absolute/reviewed-parent-repair.json \
+  /absolute/zotero-parent-repair-transaction.json \
+  --transaction-id reviewed-parent-repair-20260808 \
+  --local-collection-id 40 \
+  --source-hash-contract canonical-json-v1
+```
+
+Preview, apply, and readback use the same authenticated commands. Apply repeats
+full-library duplicate and complete-content preflight inside one Zotero database
+transaction. A post-commit verification failure is `committed_unverified` and
+must never be retried before fresh readback. `rolled_back` still requires an
+exact post-failure baseline digest.
+
 ### Reviewed batch compiler
 
 `compile-reviewed-batch` is the only supported projection from

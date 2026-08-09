@@ -2735,13 +2735,10 @@ def project_report_set(
     generated_at: str | None = None,
     projection_finalized: bool = False,
 ) -> dict[str, Any]:
-    if generated_at is not None:
-        dossier = deepcopy(dossier)
-        dossier["generated_at"] = _require_timestamp(generated_at, "generated_at")
     validated = _validate_dossier(dossier, bundle=bundle, source=source, canonicalize=False)
     set_payload = _report_set_projection_binding(validated)
     if generated_at is not None:
-        set_payload["generated_at"] = validated["generated_at"]
+        set_payload["generated_at"] = _require_timestamp(generated_at, "generated_at")
 
     reports = _project_claims(validated, projection_finalized=projection_finalized)
     set_payload["reports"] = reports

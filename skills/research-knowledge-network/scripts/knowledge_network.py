@@ -2761,6 +2761,11 @@ def _latest_sources_by_identity_and_key(
     by_key: dict[str, dict[str, Any]] = {}
     ordered = sorted(source_rows, key=lambda row: int(row.get("sequence") or 0))
     for row in ordered:
+        # A Zotero refresh supersedes only earlier corpus metadata. A reviewed
+        # full-text method source may share the same DOI/title identity, but it
+        # is an independent provenance object and must remain active.
+        if row.get("role") != "zotero_corpus":
+            continue
         identity = row.get("canonical_identity")
         parent_key = row.get("zotero_parent_key")
         if isinstance(identity, str):
@@ -3441,10 +3446,15 @@ def _export_sources(
     exported: list[dict[str, Any]] = []
     for source in sorted(sources, key=lambda row: str(row.get("record_id") or "")):
         source_id = str(source.get("source_id") or "")
-        is_current = source_id in current_ids if has_current_membership else True
+        is_corpus_source = source.get("role") == "zotero_corpus"
+        is_current = (
+            source_id in current_ids
+            if has_current_membership and is_corpus_source
+            else True
+        )
         output = dict(source)
         output["corpus_membership"] = "current" if is_current else "historical"
-        if is_current and source.get("role") == "zotero_corpus":
+        if is_current and is_corpus_source:
             bibliography = zotero_metadata.get(source_id)
             if bibliography is None:
                 raise ValueError(
@@ -3547,7 +3557,12 @@ def _export_nodes(
                     or source.get("canonical_identity")
                     or source_id
                 ),
-                "status": "active" if source_id in current_ids else "deprecated",
+                "status": (
+                    "active"
+                    if source.get("role") != "zotero_corpus"
+                    or source_id in current_ids
+                    else "deprecated"
+                ),
                 "confidence": (
                     "unknown" if source.get("read_depth") == "metadata" else "high"
                 ),

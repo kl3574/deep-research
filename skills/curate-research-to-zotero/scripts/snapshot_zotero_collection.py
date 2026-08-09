@@ -7,15 +7,40 @@ import argparse
 from datetime import datetime, timezone
 import hashlib
 from html.parser import HTMLParser
+import importlib.util
 import json
 import os
 from pathlib import Path
 import re
 import sys
 from typing import Any
+
 import urllib.error
 import urllib.parse
 import urllib.request
+
+
+def _load_target_fingerprint_helper() -> Any:
+    helper_path = Path(__file__).resolve().with_name(
+        "curation_target_fingerprint.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "curation_snapshot_target_fingerprint", helper_path
+    )
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load curation fingerprint helper: {helper_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    helper = getattr(module, "target_and_fingerprint_from_snapshot", None)
+    if not callable(helper):
+        raise ImportError(
+            "curation fingerprint helper does not export "
+            "target_and_fingerprint_from_snapshot"
+        )
+    return helper
+
+
+target_and_fingerprint_from_snapshot = _load_target_fingerprint_helper()
 
 
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
@@ -348,7 +373,12 @@ def parent_record(
 
 
 def build_snapshots(
-    base_url: str, group_id: int, collection_key: str
+    base_url: str,
+    group_id: int,
+    collection_key: str,
+    *,
+    library_id: int | None = None,
+    library_name: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     base_url = validate_base_url(base_url)
     if group_id <= 0:
@@ -416,6 +446,16 @@ def build_snapshots(
             }
         ),
     }
+    if (library_id is None) != (library_name is None):
+        raise ValueError("library_id and library_name must be supplied together")
+    if library_id is not None and library_name is not None:
+        target, target_fingerprint = target_and_fingerprint_from_snapshot(
+            snapshot,
+            library_id=library_id,
+            library_name=library_name,
+        )
+        snapshot["batch_target"] = target
+        snapshot["batch_target_fingerprint"] = target_fingerprint
     semantic_snapshot = {
         "schema": "ZoteroCorpusSemanticSnapshot/v1",
         "retrieved_at": retrieved_at,
@@ -472,6 +512,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--group-id", type=int, required=True)
     parser.add_argument("--collection-key", required=True)
+    parser.add_argument("--library-id", type=int)
+    parser.add_argument("--library-name")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
         "--semantic-audit-output",
@@ -484,7 +526,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         value, semantic_value = build_snapshots(
-            args.base_url, args.group_id, args.collection_key
+            args.base_url,
+            args.group_id,
+            args.collection_key,
+            library_id=args.library_id,
+            library_name=args.library_name,
         )
         if (
             args.semantic_audit_output is not None

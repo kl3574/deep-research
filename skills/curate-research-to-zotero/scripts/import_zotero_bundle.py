@@ -31,6 +31,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
+from clean_literature_note import validate_clean_note_html
 from verify_note_html import validate_note
 
 
@@ -288,15 +289,27 @@ def load_and_validate(
         raise BundleError("note must be UTF-8") from exc
     if not note_html.strip():
         raise BundleError("note is empty")
-    note_errors, _, note_summary = validate_note(note_html)
-    if note_errors:
-        raise BundleError(f"note HTML contract failed: {note_errors}")
+    clean_errors, _, clean_summary = validate_clean_note_html(note_html)
+    note_errors, _, legacy_summary = validate_note(note_html)
+    if not clean_errors:
+        note_summary = clean_summary
+        note_contract = "clean"
+    elif not note_errors:
+        note_summary = legacy_summary
+        note_contract = "legacy"
+    else:
+        raise BundleError(
+            "note HTML contract failed: "
+            f"clean={clean_errors}; legacy={note_errors}"
+        )
     if not isinstance(note_summary, dict):
         raise BundleError("note HTML validator returned no access-level summary")
     root_access_level = note_root_access_level(note_html)
     summary_access_level = note_summary.get("access_level")
     summary_projection = note_summary.get("note_projection")
     if access_level == "metadata_only":
+        if note_contract != "legacy":
+            raise BundleError("metadata_only note must use the explicit legacy marker")
         if (
             root_access_level != "metadata_only"
             or summary_access_level != "metadata_only"

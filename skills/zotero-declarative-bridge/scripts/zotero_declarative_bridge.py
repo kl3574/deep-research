@@ -23,6 +23,7 @@ from typing import Any
 
 
 MANIFEST_SCHEMA = "ZoteroDeclarativeTransaction/v1"
+METADATA_REPAIR_MANIFEST_SCHEMA = "ZoteroParentMetadataRepairTransaction/v1"
 REVIEWED_BATCH_SCHEMA = "ZoteroReviewedMutationBatch/v1"
 REVIEWED_SOURCE_HASH_CONTRACT = "canonical-json-v1"
 DECISION_SHORT_TITLE_POLICY = "decision-oriented"
@@ -101,6 +102,27 @@ def validate_clean_literature_note(value: str, label: str) -> dict[str, object]:
             f"{label} violates clean-note contract: {errors[0]}"
         )
     return summary
+
+
+def load_metadata_repair_contract():
+    contract_path = (
+        Path(__file__).resolve().parents[2]
+        / "repair-zotero-metadata"
+        / "scripts"
+        / "metadata_repair_contract.py"
+    )
+    if not contract_path.is_file():
+        raise BridgeError(
+            "metadata repair contract cannot be loaded: install repair-zotero-metadata"
+        )
+    spec = importlib.util.spec_from_file_location(
+        "deep_research_metadata_repair_contract", contract_path
+    )
+    if spec is None or spec.loader is None:
+        raise BridgeError("metadata repair contract loader is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def canonical_bytes(value: Any) -> bytes:
@@ -607,6 +629,153 @@ def seal_manifest(unsigned: dict[str, Any]) -> dict[str, Any]:
     return validate_manifest(sealed)
 
 
+def validate_metadata_repair_manifest(
+    manifest: Any, *, require_digest: bool = True
+) -> dict[str, Any]:
+    contract = load_metadata_repair_contract()
+    expected = {
+        "schema",
+        "transaction_id",
+        "generated_at",
+        "reviewed_source_sha256",
+        "source_evidence_sidecar_ref",
+        "target",
+        "entry",
+    }
+    if require_digest:
+        expected.add("manifest_sha256")
+    manifest = exact_keys(manifest, expected, "metadata repair manifest")
+    if manifest["schema"] != METADATA_REPAIR_MANIFEST_SCHEMA:
+        raise BridgeError("metadata repair manifest schema mismatch")
+    if not isinstance(manifest["transaction_id"], str) or not TX_RE.fullmatch(
+        manifest["transaction_id"]
+    ):
+        raise BridgeError("metadata repair transaction_id is invalid")
+    text(manifest["generated_at"], "metadata repair generated_at", limit=64)
+    sha(manifest["reviewed_source_sha256"], "metadata repair reviewed_source_sha256")
+    contract.validate_source_evidence_sidecar_ref(
+        manifest["source_evidence_sidecar_ref"],
+        "metadata repair source_evidence_sidecar_ref",
+    )
+    validate_target(manifest["target"])
+    entry = exact_keys(
+        manifest["entry"],
+        {
+            "parent",
+            "children",
+            "children_sha256",
+            "evidence_pdf_key",
+            "duplicate_preconditions",
+            "operation",
+        },
+        "metadata repair entry",
+    )
+    parent = exact_keys(
+        entry["parent"],
+        {
+            "key",
+            "version",
+            "item_type",
+            "title",
+            "short_title",
+            "expected_target_membership",
+        },
+        "metadata repair entry.parent",
+    )
+    contract.validate_parent(parent, "metadata repair entry.parent")
+    children = contract.validate_children(
+        entry["children"], "metadata repair entry.children"
+    )
+    if sha256_value(children) != entry["children_sha256"]:
+        raise BridgeError("metadata repair children_sha256 is inconsistent")
+    evidence_pdf_key = item_key(
+        entry["evidence_pdf_key"], "metadata repair entry.evidence_pdf_key"
+    )
+    if len(
+        [
+            child
+            for child in children
+            if child["key"] == evidence_pdf_key
+            and child["item_type"] == "attachment"
+            and child["content_type"] == "application/pdf"
+        ]
+    ) != 1:
+        raise BridgeError("metadata repair evidence PDF binding is invalid")
+    duplicate = contract.validate_duplicate_preconditions(
+        entry["duplicate_preconditions"],
+        "metadata repair entry.duplicate_preconditions",
+        require_digest=True,
+    )
+    operation = exact_keys(
+        entry["operation"],
+        {
+            "type",
+            "expected_parent_version",
+            "expected_profile",
+            "expected_profile_sha256",
+            "desired_profile",
+            "desired_profile_sha256",
+            "expected_parent_data_sha256",
+            "desired_parent_data_sha256",
+        },
+        "metadata repair entry.operation",
+    )
+    if operation["type"] != "ensure_parent_journal_metadata_v1":
+        raise BridgeError("metadata repair operation type is invalid")
+    if positive_int(
+        operation["expected_parent_version"],
+        "metadata repair expected_parent_version",
+    ) != parent["version"]:
+        raise BridgeError("metadata repair parent-version binding is invalid")
+    expected_profile = contract.validate_profile(
+        operation["expected_profile"], "metadata repair expected profile"
+    )
+    desired_profile = contract.validate_profile(
+        operation["desired_profile"], "metadata repair desired profile"
+    )
+    contract.validate_transition(expected_profile, desired_profile)
+    if sha256_value(expected_profile) != operation["expected_profile_sha256"]:
+        raise BridgeError("metadata repair expected_profile_sha256 is inconsistent")
+    if sha256_value(desired_profile) != operation["desired_profile_sha256"]:
+        raise BridgeError("metadata repair desired_profile_sha256 is inconsistent")
+    if sha256_value(
+        contract.metadata_parent_data(parent, children, expected_profile)
+    ) != operation["expected_parent_data_sha256"]:
+        raise BridgeError("metadata repair expected_parent_data_sha256 is inconsistent")
+    if sha256_value(
+        contract.metadata_parent_data(parent, children, desired_profile)
+    ) != operation["desired_parent_data_sha256"]:
+        raise BridgeError("metadata repair desired_parent_data_sha256 is inconsistent")
+    if duplicate["desired_doi_other_parent_keys"] or duplicate[
+        "title_year_creator_other_parent_keys"
+    ]:
+        raise BridgeError("metadata repair contains duplicate candidates")
+    if require_digest:
+        sha(manifest["manifest_sha256"], "metadata repair manifest_sha256")
+        unsigned = {
+            key: value for key, value in manifest.items() if key != "manifest_sha256"
+        }
+        if sha256_value(unsigned) != manifest["manifest_sha256"]:
+            raise BridgeError("metadata repair manifest_sha256 is inconsistent")
+    return manifest
+
+
+def seal_metadata_repair_manifest(unsigned: dict[str, Any]) -> dict[str, Any]:
+    validate_metadata_repair_manifest(unsigned, require_digest=False)
+    sealed = copy.deepcopy(unsigned)
+    sealed["manifest_sha256"] = sha256_value(unsigned)
+    return validate_metadata_repair_manifest(sealed)
+
+
+def validate_any_manifest(manifest: Any) -> dict[str, Any]:
+    if (
+        isinstance(manifest, dict)
+        and manifest.get("schema") == METADATA_REPAIR_MANIFEST_SCHEMA
+    ):
+        return validate_metadata_repair_manifest(manifest)
+    return validate_manifest(manifest)
+
+
 def read_json(path: Path) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -780,6 +949,231 @@ def live_child_notes(
     if len({note["key"] for note in notes}) != len(notes):
         raise BridgeError(f"child-note inventory contains duplicate keys for {parent_key}")
     return notes
+
+
+def live_all_children(
+    group_id: int,
+    parent_key: str,
+    expected_children: list[dict[str, Any]],
+    base_url: str = BASE_URL,
+) -> list[dict[str, Any]]:
+    parent_key = item_key(parent_key, "parent key")
+    expected_by_key = {child["key"]: child for child in expected_children}
+    records: list[Any] = []
+    start = 0
+    while True:
+        query = urllib.parse.urlencode({"format": "json", "limit": 100, "start": start})
+        page = api_get(
+            f"/api/groups/{group_id}/items/{parent_key}/children?{query}", base_url
+        )
+        if not isinstance(page, list):
+            raise BridgeError(f"child inventory is malformed for {parent_key}")
+        records.extend(page)
+        if len(page) < 100:
+            break
+        start += 100
+        if start > 100:
+            raise BridgeError(f"child inventory exceeds bridge limits for {parent_key}")
+    children: list[dict[str, Any]] = []
+    for index, record in enumerate(records):
+        data = record.get("data") if isinstance(record, dict) else None
+        if not isinstance(data, dict) or data.get("parentItem") != parent_key:
+            raise BridgeError(f"child record {index} is malformed for {parent_key}")
+        key_value = item_key(data.get("key"), f"child record {index}.key")
+        version = positive_int(data.get("version"), f"child record {index}.version")
+        if data.get("itemType") == "note":
+            note = data.get("note")
+            if not isinstance(note, str):
+                raise BridgeError(f"child note {key_value} has no exact content")
+            children.append(
+                {
+                    "key": key_value,
+                    "version": version,
+                    "item_type": "note",
+                    "content_sha256": "sha256:"
+                    + hashlib.sha256(note.encode("utf-8")).hexdigest(),
+                }
+            )
+        elif data.get("itemType") == "attachment":
+            expected = expected_by_key.get(key_value)
+            if not isinstance(expected, dict) or expected.get("item_type") != "attachment":
+                raise BridgeError(f"attachment child {key_value} was not reviewed")
+            observed = {
+                "key": key_value,
+                "version": version,
+                "item_type": "attachment",
+                "content_type": str(data.get("contentType", "") or ""),
+                "link_mode": str(data.get("linkMode", "") or ""),
+                "size_bytes": expected["size_bytes"],
+                "content_sha256": expected["content_sha256"],
+                "direct_collection_count": len(data.get("collections", [])),
+            }
+            for field in ("content_type", "link_mode", "direct_collection_count"):
+                if observed[field] != expected[field]:
+                    raise BridgeError(f"attachment child {key_value} {field} drift")
+            children.append(observed)
+        else:
+            raise BridgeError(f"unsupported child type for {key_value}")
+    children.sort(key=lambda child: child["key"])
+    return children
+
+
+def live_library_top_items(
+    group_id: int, base_url: str = BASE_URL
+) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    start = 0
+    while True:
+        query = urllib.parse.urlencode({"format": "json", "limit": 100, "start": start})
+        page = api_get(f"/api/groups/{group_id}/items/top?{query}", base_url)
+        if not isinstance(page, list):
+            raise BridgeError("full-library top-level inventory is malformed")
+        if any(not isinstance(record, dict) for record in page):
+            raise BridgeError("full-library top-level record is malformed")
+        records.extend(page)
+        if len(page) < 100:
+            break
+        start += 100
+        if start > 10_000:
+            raise BridgeError("full-library duplicate scan exceeds safety limit")
+    return records
+
+
+def compile_reviewed_metadata_repair(
+    source: Path,
+    *,
+    transaction_id: str,
+    local_collection_id: int,
+    source_hash_contract: str,
+    base_url: str,
+) -> dict[str, Any]:
+    contract = load_metadata_repair_contract()
+    if source_hash_contract != contract.HASH_CONTRACT:
+        raise BridgeError("unsupported metadata repair source hash contract")
+    try:
+        reviewed = contract.validate_reviewed_source(read_json(source))
+    except contract.ContractError as exc:
+        raise BridgeError(f"metadata repair reviewed source is invalid: {exc}") from exc
+    raw_target = reviewed["target"]
+    group_id = raw_target["group_id"]
+    library_id = raw_target["local_library_id"]
+    collection_key = raw_target["collection_key"]
+    collection_path, leaf = collection_contract(group_id, collection_key, base_url)
+    if [part["name"] for part in collection_path] != raw_target["collection_path"]:
+        raise BridgeError("metadata repair collection path drift")
+    leaf_data = leaf.get("data") if isinstance(leaf, dict) else None
+    observed_collection_version = (
+        leaf.get("version")
+        if isinstance(leaf, dict) and leaf.get("version") is not None
+        else leaf_data.get("version") if isinstance(leaf_data, dict) else None
+    )
+    if observed_collection_version != raw_target["collection_version"]:
+        raise BridgeError("metadata repair collection version drift")
+    collection_id = positive_int(local_collection_id, "local_collection_id")
+    if (
+        raw_target["internal_collection_id"] is not None
+        and raw_target["internal_collection_id"] != collection_id
+    ):
+        raise BridgeError("metadata repair internal collection ID drift")
+    target = target_from_parts(
+        group_id=group_id,
+        library_id=library_id,
+        library_name=raw_target["library_name"],
+        collection_id=collection_id,
+        collection_key=collection_key,
+        collection_path=collection_path,
+        files=False,
+    )
+    source_entry = reviewed["entry"]
+    source_parent = source_entry["parent"]
+    record = live_parent(group_id, source_parent["key"], base_url)
+    data = record.get("data") if isinstance(record, dict) else None
+    if not isinstance(data, dict):
+        raise BridgeError("metadata repair live parent is malformed")
+    if record.get("version") not in {None, data.get("version")}:
+        raise BridgeError("metadata repair Local API parent version mismatch")
+    comparisons = {
+        "version": data.get("version"),
+        "item_type": data.get("itemType"),
+        "title": str(data.get("title", "")),
+        "short_title": str(data.get("shortTitle", "")),
+    }
+    expected_values = {
+        "version": source_parent["version"],
+        "item_type": source_parent["item_type"],
+        "title": source_parent["title"],
+        "short_title": source_parent["short_title"],
+    }
+    for field, observed in comparisons.items():
+        if observed != expected_values[field]:
+            display = "shortTitle" if field == "short_title" else field
+            raise BridgeError(f"metadata repair parent {display} drift")
+    collections = data.get("collections")
+    if not isinstance(collections, list) or collection_key not in collections:
+        raise BridgeError("metadata repair parent collection membership drift")
+    try:
+        live_profile = contract.profile_from_zotero_data(data)
+    except contract.ContractError as exc:
+        raise BridgeError(f"metadata repair live profile is invalid: {exc}") from exc
+    repair = source_entry["repair"]
+    if live_profile != repair["expected_profile"]:
+        raise BridgeError("metadata repair expected profile content drift")
+    children = live_all_children(
+        group_id, source_parent["key"], source_entry["children"], base_url
+    )
+    if children != source_entry["children"]:
+        raise BridgeError("metadata repair child inventory or content drift")
+    library_records = live_library_top_items(group_id, base_url)
+    try:
+        duplicate_candidates = contract.find_duplicate_candidates(
+            library_records,
+            current_key=source_parent["key"],
+            title=source_parent["title"],
+            desired_profile=repair["desired_profile"],
+        )
+    except contract.ContractError as exc:
+        raise BridgeError(f"metadata repair duplicate scan failed: {exc}") from exc
+    if any(duplicate_candidates.values()):
+        raise BridgeError("metadata repair full-library duplicate conflict")
+    duplicate = source_entry["duplicate_preconditions"]
+    if duplicate_candidates != {
+        "desired_doi_other_parent_keys": duplicate[
+            "desired_doi_other_parent_keys"
+        ],
+        "title_year_creator_other_parent_keys": duplicate[
+            "title_year_creator_other_parent_keys"
+        ],
+    }:
+        raise BridgeError("metadata repair duplicate precondition drift")
+    operation = {
+        "type": "ensure_parent_journal_metadata_v1",
+        "expected_parent_version": source_parent["version"],
+        "expected_profile": repair["expected_profile"],
+        "expected_profile_sha256": repair["expected_profile_sha256"],
+        "desired_profile": repair["desired_profile"],
+        "desired_profile_sha256": repair["desired_profile_sha256"],
+        "expected_parent_data_sha256": repair["expected_parent_data_sha256"],
+        "desired_parent_data_sha256": repair["desired_parent_data_sha256"],
+    }
+    unsigned = {
+        "schema": METADATA_REPAIR_MANIFEST_SCHEMA,
+        "transaction_id": transaction_id,
+        "generated_at": now_iso(),
+        "reviewed_source_sha256": reviewed["manifest_sha256"],
+        "source_evidence_sidecar_ref": copy.deepcopy(
+            reviewed["source_evidence_sidecar_ref"]
+        ),
+        "target": target,
+        "entry": {
+            "parent": copy.deepcopy(source_parent),
+            "children": copy.deepcopy(children),
+            "children_sha256": source_entry["children_sha256"],
+            "evidence_pdf_key": source_entry["evidence_pdf_key"],
+            "duplicate_preconditions": copy.deepcopy(duplicate),
+            "operation": operation,
+        },
+    }
+    return seal_metadata_repair_manifest(unsigned)
 
 
 def target_from_parts(
@@ -1745,6 +2139,18 @@ def parse_args() -> argparse.Namespace:
     )
     reviewed_batch.add_argument("--base-url", default=BASE_URL)
 
+    metadata_repair = sub.add_parser("compile-reviewed-metadata-repair")
+    metadata_repair.add_argument("source", type=Path)
+    metadata_repair.add_argument("output", type=Path)
+    metadata_repair.add_argument("--transaction-id", required=True)
+    metadata_repair.add_argument("--local-collection-id", type=int, required=True)
+    metadata_repair.add_argument(
+        "--source-hash-contract",
+        choices=[REVIEWED_SOURCE_HASH_CONTRACT],
+        required=True,
+    )
+    metadata_repair.add_argument("--base-url", default=BASE_URL)
+
     probe = sub.add_parser("probe")
     probe.add_argument("--capability-file", type=Path, required=True)
 
@@ -1772,7 +2178,7 @@ def main() -> int:
     args = parse_args()
     try:
         if args.command == "validate":
-            manifest = validate_manifest(read_json(args.manifest))
+            manifest = validate_any_manifest(read_json(args.manifest))
             print(json.dumps({"status": "valid", "manifest_sha256": manifest["manifest_sha256"]}))
             return 0
         if args.command == "compile-attachment-repair":
@@ -1809,6 +2215,25 @@ def main() -> int:
             write_private_json(args.output, result)
             print(json.dumps({"status": "compiled", "entries": len(result["entries"]), "manifest_sha256": result["manifest_sha256"]}))
             return 0
+        if args.command == "compile-reviewed-metadata-repair":
+            result = compile_reviewed_metadata_repair(
+                args.source,
+                transaction_id=args.transaction_id,
+                local_collection_id=args.local_collection_id,
+                source_hash_contract=args.source_hash_contract,
+                base_url=args.base_url,
+            )
+            write_private_json(args.output, result)
+            print(
+                json.dumps(
+                    {
+                        "status": "compiled",
+                        "schema": result["schema"],
+                        "manifest_sha256": result["manifest_sha256"],
+                    }
+                )
+            )
+            return 0
 
         capability = load_capability(args.capability_file)
         if args.command == "resolve-collection":
@@ -1834,7 +2259,7 @@ def main() -> int:
             print(json.dumps(public, ensure_ascii=False, indent=2))
             return 0
 
-        manifest = validate_manifest(read_json(args.manifest))
+        manifest = validate_any_manifest(read_json(args.manifest))
         if args.command == "preview":
             response = bridge_request(capability, "preview", {"manifest": manifest})
         elif args.command == "readback":

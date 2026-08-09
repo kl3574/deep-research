@@ -10,6 +10,12 @@ var ZoteroDeclarativeBridgeCore = (() => {
     ["ensure_child_note", 2],
     ["ensure_pdf_attachment", 3],
   ]);
+  const METADATA_REPAIR_SCHEMA = "ZoteroParentMetadataRepairTransaction/v1";
+  const METADATA_REPAIR_OPERATION = "ensure_parent_journal_metadata_v1";
+  const METADATA_DUPLICATE_TITLE_PREFIX_MIN_CHARS = 20;
+  const METADATA_PROFILE_FIELDS = [
+    "DOI", "creators", "publicationTitle", "volume", "issue", "pages", "date",
+  ];
   const STORAGE_BLOCK_TAGS = new Set([
     "blockquote", "div", "h1", "h2", "h3", "h4", "h5", "h6", "li",
     "ol", "p", "pre", "table", "tbody", "td", "th", "thead", "tr", "ul",
@@ -400,6 +406,217 @@ var ZoteroDeclarativeBridgeCore = (() => {
     return true;
   }
 
+  function validateMetadataProfile(profile, label) {
+    exactKeys(profile, METADATA_PROFILE_FIELDS, label);
+    text(profile.DOI, `${label}.DOI`, true, 2048);
+    assertion(
+      !profile.DOI || (
+        profile.DOI === normalizeDOI(profile.DOI)
+        && /^10\.\d{4,9}\/\S+$/.test(profile.DOI)
+      ),
+      `${label}.DOI is not canonical`,
+    );
+    assertion(Array.isArray(profile.creators) && profile.creators.length <= 64, `${label}.creators is invalid`);
+    const creatorFingerprints = [];
+    profile.creators.forEach((creator, index) => {
+      exactKeys(creator, ["creatorType", "firstName", "lastName"], `${label}.creators[${index}]`);
+      assertion(creator.creatorType === "author", `${label}.creators[${index}].creatorType must be author`);
+      text(creator.firstName, `${label}.creators[${index}].firstName`, false, 4096);
+      text(creator.lastName, `${label}.creators[${index}].lastName`, false, 4096);
+      creatorFingerprints.push(stableStringify(creator));
+    });
+    assertion(new Set(creatorFingerprints).size === creatorFingerprints.length, `${label}.creators contains duplicates`);
+    for (const field of ["publicationTitle", "volume", "issue", "pages", "date"]) {
+      text(profile[field], `${label}.${field}`, true, 4096);
+      assertion(!profile[field] || profile[field] === profile[field].trim(), `${label}.${field} must be trimmed`);
+    }
+    return profile;
+  }
+
+  function validateMetadataChildren(children, label) {
+    assertion(Array.isArray(children) && children.length > 0 && children.length <= 100, `${label} is invalid`);
+    const keys = [];
+    children.forEach((child, index) => {
+      const childLabel = `${label}[${index}]`;
+      assertion(child && typeof child === "object", `${childLabel} is invalid`);
+      if (child.item_type === "note") {
+        exactKeys(child, ["key", "version", "item_type", "content_sha256"], childLabel);
+      }
+      else if (child.item_type === "attachment") {
+        exactKeys(child, [
+          "key", "version", "item_type", "content_type", "link_mode", "size_bytes",
+          "content_sha256", "direct_collection_count",
+        ], childLabel);
+        text(child.content_type, `${childLabel}.content_type`, false, 256);
+        assertion(["imported_file", "imported_url", "linked_file"].includes(child.link_mode), `${childLabel}.link_mode is unsupported`);
+        positiveInt(child.size_bytes, `${childLabel}.size_bytes`, 268435456);
+        assertion(Number.isInteger(child.direct_collection_count) && child.direct_collection_count >= 0, `${childLabel}.direct_collection_count is invalid`);
+      }
+      else assertion(false, `${childLabel}.item_type is unsupported`);
+      keys.push(key(child.key, `${childLabel}.key`));
+      positiveInt(child.version, `${childLabel}.version`);
+      sha(child.content_sha256, `${childLabel}.content_sha256`);
+    });
+    assertion(stableStringify(keys) === stableStringify([...keys].sort()) && new Set(keys).size === keys.length, `${label} is not key-sorted and unique`);
+    return children;
+  }
+
+  function metadataRepairParentData(parent, children, profile) {
+    return {
+      key: parent.key,
+      item_type: parent.item_type,
+      title: parent.title,
+      short_title: parent.short_title,
+      target_membership: parent.expected_target_membership,
+      profile,
+      children,
+    };
+  }
+
+  function validateMetadataTransition(expected, desired) {
+    const changed = METADATA_PROFILE_FIELDS.filter(field => stableStringify(expected[field]) !== stableStringify(desired[field]));
+    assertion(changed.length > 0, "metadata repair profiles are unchanged");
+    for (const field of changed) {
+      if (field === "creators") {
+        assertion(expected.creators.length === 0 && desired.creators.length > 0, "creators may only be filled from empty in v1");
+      }
+      else {
+        assertion(Boolean(desired[field]), `${field} cannot be cleared`);
+        if (["publicationTitle", "volume", "issue", "pages"].includes(field)) {
+          assertion(!expected[field], `${field} may only be filled from empty in v1`);
+        }
+      }
+    }
+  }
+
+  function validateMetadataRepairManifest(manifest) {
+    exactKeys(manifest, [
+      "schema", "transaction_id", "generated_at", "reviewed_source_sha256",
+      "source_evidence_sidecar_ref", "target", "entry", "manifest_sha256",
+    ], "metadata repair manifest");
+    assertion(manifest.schema === METADATA_REPAIR_SCHEMA, "metadata repair manifest schema mismatch");
+    assertion(typeof manifest.transaction_id === "string" && TX_RE.test(manifest.transaction_id), "metadata repair transaction_id is invalid");
+    text(manifest.generated_at, "metadata repair generated_at", false, 64);
+    sha(manifest.reviewed_source_sha256, "metadata repair reviewed_source_sha256");
+    const sidecarRef = exactKeys(manifest.source_evidence_sidecar_ref, [
+      "schema", "file_sha256", "content_sha256",
+    ], "metadata repair source_evidence_sidecar_ref");
+    assertion(
+      sidecarRef.schema === "ZoteroParentMetadataRepairLiveSidecar/v1",
+      "metadata repair source evidence sidecar schema is unsupported",
+    );
+    sha(sidecarRef.file_sha256, "metadata repair source evidence sidecar file_sha256");
+    sha(sidecarRef.content_sha256, "metadata repair source evidence sidecar content_sha256");
+    validateTarget(manifest.target);
+    const entry = exactKeys(manifest.entry, [
+      "parent", "children", "children_sha256", "evidence_pdf_key",
+      "duplicate_preconditions", "operation",
+    ], "metadata repair entry");
+    const parent = exactKeys(entry.parent, [
+      "key", "version", "item_type", "title", "short_title", "expected_target_membership",
+    ], "metadata repair parent");
+    key(parent.key, "metadata repair parent.key");
+    positiveInt(parent.version, "metadata repair parent.version");
+    assertion(parent.item_type === "journalArticle", "metadata repair parent must be journalArticle");
+    text(parent.title, "metadata repair parent.title", false, 16384);
+    text(parent.short_title, "metadata repair parent.short_title", true, 4096);
+    assertion(parent.expected_target_membership === true, "metadata repair parent membership must be true");
+    const children = validateMetadataChildren(entry.children, "metadata repair children");
+    sha(entry.children_sha256, "metadata repair children_sha256");
+    const evidencePDFKey = key(entry.evidence_pdf_key, "metadata repair evidence_pdf_key");
+    assertion(children.filter(child => child.key === evidencePDFKey && child.item_type === "attachment" && child.content_type === "application/pdf").length === 1, "metadata repair evidence PDF binding is invalid");
+    const duplicate = exactKeys(entry.duplicate_preconditions, [
+      "scope", "desired_doi_other_parent_keys", "title_year_creator_other_parent_keys", "sha256",
+    ], "metadata repair duplicate_preconditions");
+    assertion(duplicate.scope === "full_library", "metadata repair duplicate scope is invalid");
+    for (const field of ["desired_doi_other_parent_keys", "title_year_creator_other_parent_keys"]) {
+      assertion(Array.isArray(duplicate[field]), `metadata repair ${field} is invalid`);
+      duplicate[field].forEach((value, index) => key(value, `metadata repair ${field}[${index}]`));
+      assertion(duplicate[field].length === 0, "metadata repair contains duplicate candidates");
+    }
+    sha(duplicate.sha256, "metadata repair duplicate_preconditions.sha256");
+    const operation = exactKeys(entry.operation, [
+      "type", "expected_parent_version", "expected_profile", "expected_profile_sha256",
+      "desired_profile", "desired_profile_sha256", "expected_parent_data_sha256",
+      "desired_parent_data_sha256",
+    ], "metadata repair operation");
+    assertion(operation.type === METADATA_REPAIR_OPERATION, "metadata repair operation type is invalid");
+    positiveInt(operation.expected_parent_version, "metadata repair expected_parent_version");
+    assertion(operation.expected_parent_version === parent.version, "metadata repair parent-version binding is invalid");
+    validateMetadataProfile(operation.expected_profile, "metadata repair expected profile");
+    validateMetadataProfile(operation.desired_profile, "metadata repair desired profile");
+    validateMetadataTransition(operation.expected_profile, operation.desired_profile);
+    for (const field of [
+      "expected_profile_sha256", "desired_profile_sha256", "expected_parent_data_sha256",
+      "desired_parent_data_sha256",
+    ]) sha(operation[field], `metadata repair operation.${field}`);
+    sha(manifest.manifest_sha256, "metadata repair manifest_sha256");
+    return true;
+  }
+
+  function classifyMetadataRepair(operation, observed) {
+    if (observed.parent_data_sha256 === operation.desired_parent_data_sha256) return {decision: "satisfied"};
+    assertion(observed.parent_data_sha256 === operation.expected_parent_data_sha256, "metadata content drift");
+    assertion(observed.parent_version === operation.expected_parent_version, "metadata parent-version drift");
+    return {decision: "needs_write"};
+  }
+
+  function normalizeMetadataDuplicateText(value) {
+    return String(value || "").normalize("NFKD").toLowerCase()
+      .replace(/\p{M}/gu, "").replace(/[^\p{L}\p{N}]+/gu, "");
+  }
+
+  function metadataDuplicateFingerprint(title, profile) {
+    const yearMatch = String(profile.date || "").match(/(?:^|\D)(\d{4})(?:\D|$)/);
+    return {
+      title: normalizeMetadataDuplicateText(title),
+      year: yearMatch ? yearMatch[1] : "",
+      creators: profile.creators.map(creator => normalizeMetadataDuplicateText(creator.lastName)).sort(),
+    };
+  }
+
+  function metadataDuplicateTitleMatch(desired, observed) {
+    const desiredCreators = new Set(desired.creators.filter(Boolean));
+    const observedCreators = new Set(observed.creators.filter(Boolean));
+    const creatorOverlap = desiredCreators.size > 0 && observedCreators.size > 0
+      && [...desiredCreators].some(creator => observedCreators.has(creator));
+    const titleExact = Boolean(desired.title) && desired.title === observed.title;
+    const shorterTitleLength = Math.min(
+      Array.from(desired.title || "").length,
+      Array.from(observed.title || "").length,
+    );
+    const titlePrefixRelated = Boolean(desired.title) && Boolean(observed.title)
+      && !titleExact
+      && shorterTitleLength >= METADATA_DUPLICATE_TITLE_PREFIX_MIN_CHARS
+      && (desired.title.startsWith(observed.title) || observed.title.startsWith(desired.title));
+    const titleCreatorRelated = (
+      titleExact && (desiredCreators.size === 0 || observedCreators.size === 0 || creatorOverlap)
+    ) || (titlePrefixRelated && creatorOverlap);
+    return titleCreatorRelated && Boolean(desired.year) && desired.year === observed.year;
+  }
+
+  function metadataRepairParentIsClean(hasChanged) {
+    assertion(typeof hasChanged === "boolean", "metadata repair dirty state is unavailable");
+    return hasChanged === false;
+  }
+
+  function metadataRepairCommitStateAfterFailure(context) {
+    assertion(context && typeof context === "object", "metadata repair commit-state context is invalid");
+    if (context.write_attempted !== true) return "not_started";
+    if (context.commit_observed === true || context.db_commit_confirmed === true) {
+      return context.inspection_available === true && context.inspection_all_satisfied === true
+        ? "committed"
+        : "committed_unverified";
+    }
+    if (context.rollback_observed === true) {
+      return context.inspection_available === true
+        && context.inspection_state_sha256 === context.before_state_sha256
+        ? "rolled_back"
+        : "unknown";
+    }
+    return "unknown";
+  }
+
   function planWrites(rows) {
     const pendingTypes = [];
     for (const row of rows) {
@@ -512,9 +729,15 @@ var ZoteroDeclarativeBridgeCore = (() => {
     classifyAttachment,
     commitStateAfterFailure,
     classifyMembership,
+    classifyMetadataRepair,
     classifyNote,
     classifyShortTitle,
     normalizeDOI,
+    metadataDuplicateFingerprint,
+    metadataDuplicateTitleMatch,
+    metadataRepairCommitStateAfterFailure,
+    metadataRepairParentIsClean,
+    metadataRepairParentData,
     noteStorageDOMFingerprint,
     noteStorageHTMLFingerprint,
     parentIdentity,
@@ -524,6 +747,7 @@ var ZoteroDeclarativeBridgeCore = (() => {
     stableStringify,
     validateCollectionResolutionRequest,
     validateManifest,
+    validateMetadataRepairManifest,
     versionEvidence,
   };
 })();

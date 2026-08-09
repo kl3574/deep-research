@@ -9,17 +9,20 @@ from network_gap_discovery import (
     ACTION_FOR_TARGET_KIND,
     ContractError,
     PAPER_UNDERSTANDING_GAP_TO_PROJECTION,
+    REVIEWED_GAP_SELECTION_SCHEMA,
     TARGET_KINDS,
     canonical_paper_understanding_gap_digest,
     consume_reviewed_evidence,
     consume_results,
-    emit_search_requests,
+    emit_search_requests as _emit_search_requests,
     generate_hypotheses_from_probe,
     sha256_json,
     network_ref,
     prioritize,
     propose_patch,
     scan_network,
+    select_hypotheses,
+    selected_hypotheses_for_emission,
     validate_hypotheses,
     validate_paper_reading_report_set,
     validate_paper_reading_report_set_v2,
@@ -45,6 +48,41 @@ def _load_learn_module(name):
 
 SOURCE_BUNDLE_MODULE = _load_learn_module("paper_source_bundle")
 READING_DOSSIER_MODULE = _load_learn_module("paper_reading_dossier")
+
+
+def emit_search_requests(value, network=None, **kwargs):
+    """Migrate legacy producer fixtures through the reviewed selection gate."""
+    if value.get("reviewed_selection_ref") is not None:
+        return _emit_search_requests(value, network, **kwargs)
+    try:
+        selected = selected_hypotheses_for_emission(value)
+    except ContractError:
+        return _emit_search_requests(value, network, **kwargs)
+
+    unscheduled = copy.deepcopy(value)
+    unscheduled.pop("priority_order", None)
+    unscheduled.pop("selection_summary", None)
+    for hypothesis in unscheduled["hypotheses"]:
+        hypothesis["status"] = "proposed"
+    prioritized = prioritize(unscheduled, network)
+    selected_ids = [hypothesis["hypothesis_id"] for hypothesis in selected]
+    selection = {
+        "schema": REVIEWED_GAP_SELECTION_SCHEMA,
+        "input_ref": {
+            "schema": "KnowledgeGapHypotheses/v1",
+            "sha256": sha256_json(prioritized),
+        },
+        "network_ref": copy.deepcopy(prioritized["network_ref"]),
+        "round_id": prioritized["round_id"],
+        "selected_hypothesis_ids": selected_ids,
+        "review_status": "approved",
+    }
+    selected_document = select_hypotheses(
+        prioritized, selection, network
+    )
+    value.clear()
+    value.update(selected_document)
+    return _emit_search_requests(value, network, **kwargs)
 
 
 def attach_network_content_sha256(network):
@@ -257,6 +295,11 @@ def hypotheses_fixture(network=None):
         "round_id": "ROUND-1",
         "generated_at": "2026-08-05T00:00:00Z",
         "method_families": ["abc_bridge", "counterevidence_boundary"],
+        "selection_summary": {
+            "selected_count": 1,
+            "selected_hypothesis_ids": ["KGH-1"],
+            "unselected_proposed_hypothesis_ids": [],
+        },
         "hypotheses": [
             {
                 "hypothesis_id": "KGH-1",
@@ -293,7 +336,7 @@ def hypotheses_fixture(network=None):
                 "searchability": "medium",
                 "cross_branch_blocking": True,
                 "dependencies": [],
-                "status": "proposed",
+                "status": "selected",
                 "status_basis": [],
                 "novelty_claimed": False,
                 "next_action": "scholar_discovery",
@@ -1449,13 +1492,19 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
     def test_needs_semantic_enrichment_hypothesis_is_not_subject_to_semantic_content_requirements(self):
         document = hypotheses_fixture()
         hypothesis = document["hypotheses"][0]
+        hypothesis["status"] = "proposed"
         hypothesis["needs_semantic_enrichment"] = True
         hypothesis["search_test"]["queries"][0]["query"] = (
             "completion gate remains structurally unmet"
         )
+        document["selection_summary"] = {
+            "selected_count": 0,
+            "selected_hypothesis_ids": [],
+            "unselected_proposed_hypothesis_ids": [hypothesis["hypothesis_id"]],
+        }
         validate_hypotheses(document)
-        request_set = emit_search_requests(document, network_fixture())
-        self.assertEqual(request_set["requests"], [])
+        with self.assertRaisesRegex(ContractError, "zero selected hypotheses"):
+            emit_search_requests(document, network_fixture())
 
     def test_rejects_unknown_reference(self):
         document = hypotheses_fixture(network_fixture())
@@ -1524,6 +1573,7 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
         document = hypotheses_fixture(network)
         structural = copy.deepcopy(document["hypotheses"][0])
         structural["hypothesis_id"] = "KGH-STRUCTURAL"
+        structural["status"] = "proposed"
         structural["structural_only"] = True
         structural["next_action"] = "structural_only"
         document["hypotheses"].append(structural)
@@ -1552,9 +1602,84 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
             "proposed",
         )
 
+    def test_emit_search_requests_emits_only_four_selected_from_twenty(self):
+        network = network_fixture()
+        document = hypotheses_fixture(network)
+        template = document["hypotheses"][0]
+        hypotheses = []
+        selected_ids = []
+        proposed_ids = []
+        for index in range(20):
+            hypothesis = copy.deepcopy(template)
+            hypothesis_id = f"KGH-{index + 1:02d}"
+            hypothesis["hypothesis_id"] = hypothesis_id
+            hypothesis["status"] = "selected" if index < 4 else "proposed"
+            if index == 19:
+                hypothesis["structural_only"] = True
+                hypothesis["next_action"] = "structural_only"
+            hypotheses.append(hypothesis)
+            (selected_ids if index < 4 else proposed_ids).append(hypothesis_id)
+        document["hypotheses"] = hypotheses
+        document["selection_summary"] = {
+            "selected_count": 4,
+            "selected_hypothesis_ids": selected_ids,
+            "unselected_proposed_hypothesis_ids": proposed_ids,
+        }
+
+        request_set = emit_search_requests(document, network)
+
+        self.assertEqual(
+            [request["gap_hypothesis_id"] for request in request_set["requests"]],
+            selected_ids,
+        )
+
+    def test_emit_search_requests_all_proposed_emits_empty_set(self):
+        network = network_fixture()
+        document = hypotheses_fixture(network)
+        hypothesis = document["hypotheses"][0]
+        hypothesis["status"] = "proposed"
+        document["selection_summary"] = {
+            "selected_count": 0,
+            "selected_hypothesis_ids": [],
+            "unselected_proposed_hypothesis_ids": [hypothesis["hypothesis_id"]],
+        }
+
+        with self.assertRaisesRegex(ContractError, "zero selected hypotheses"):
+            emit_search_requests(document, network)
+
+    def test_emit_search_requests_rejects_selection_summary_mismatch(self):
+        network = network_fixture()
+        for field, value, message in (
+            ("selected_count", 0, "selected_count"),
+            ("selected_hypothesis_ids", ["KGH-MISSING"], "selected_hypothesis_ids"),
+            (
+                "unselected_proposed_hypothesis_ids",
+                ["KGH-1"],
+                "unselected_proposed_hypothesis_ids",
+            ),
+        ):
+            with self.subTest(field=field):
+                document = hypotheses_fixture(network)
+                document["selection_summary"][field] = value
+                with self.assertRaisesRegex(ContractError, message):
+                    emit_search_requests(document, network)
+
+        missing = hypotheses_fixture(network)
+        missing.pop("selection_summary")
+        with self.assertRaisesRegex(ContractError, "selection_summary"):
+            emit_search_requests(missing, network)
+
+    def test_emit_search_requests_rejects_selected_structural_hypothesis(self):
+        network = network_fixture()
+        document = hypotheses_fixture(network)
+        document["hypotheses"][0]["structural_only"] = True
+        document["hypotheses"][0]["next_action"] = "structural_only"
+        with self.assertRaisesRegex(ContractError, "non-structural"):
+            emit_search_requests(document, network)
+
     def test_emit_search_requests_is_bounded_to_network_snapshot(self):
         network = network_fixture()
-        hypotheses = generate_hypotheses_from_probe(scan_network(network), network)
+        hypotheses = hypotheses_fixture(network)
         request_set = emit_search_requests(hypotheses, network)
         self.assertEqual(request_set["schema"], "ScholarDiscoveryRequestSet/v1")
         self.assertEqual(request_set["schema_version"], "v1")
@@ -1657,19 +1782,21 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
             "round_id": document["round_id"],
             "generated_at": document["generated_at"],
             "method_families": document["method_families"],
+            "selection_summary": {
+                "selected_count": 0,
+                "selected_hypothesis_ids": [],
+                "unselected_proposed_hypothesis_ids": [
+                    hypothesis["hypothesis_id"] for hypothesis in structural_only
+                ],
+            },
             "hypotheses": structural_only,
         }
-        request_set = emit_search_requests(structural_doc, network)
-        self.assertEqual(request_set["requests"], [])
-
-        output = consume_results(
-            structural_doc,
-            network,
-            request_set,
-            [],
+        with self.assertRaisesRegex(ContractError, "zero selected hypotheses"):
+            emit_search_requests(structural_doc, network)
+        self.assertEqual(
+            structural_doc["hypotheses"][0]["next_action"], "structural_only"
         )
-        self.assertEqual(output["hypotheses"][0]["next_action"], "structural_only")
-        self.assertEqual(output["hypotheses"][0]["status"], "no_signal")
+        self.assertEqual(structural_doc["hypotheses"][0]["status"], "proposed")
 
     def test_derived_missing_dimension_is_not_compiled_as_scholar_query(self):
         network = network_fixture()
@@ -1701,15 +1828,23 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
             "round_id": document["round_id"],
             "generated_at": document["generated_at"],
             "method_families": document["method_families"],
+            "selection_summary": {
+                "selected_count": 0,
+                "selected_hypothesis_ids": [],
+                "unselected_proposed_hypothesis_ids": [
+                    hypothesis["hypothesis_id"] for hypothesis in matching
+                ],
+            },
             "hypotheses": matching,
         }
-        request_set = emit_search_requests(structural_doc, network)
-        self.assertEqual(request_set["requests"], [])
-        self.assertNotIn("network dimension", json.dumps(request_set).lower())
+        with self.assertRaisesRegex(ContractError, "zero selected hypotheses"):
+            emit_search_requests(structural_doc, network)
 
     def test_generated_semantic_queries_are_id_free_and_topic_grounded(self):
         network = semantic_gap_network_fixture()
-        hypotheses = generate_hypotheses_from_probe(scan_network(network), network)
+        hypotheses = prioritize(
+            generate_hypotheses_from_probe(scan_network(network), network), network
+        )
         non_wendy_scope = [
             hypothesis
             for hypothesis in hypotheses["hypotheses"]
@@ -2961,7 +3096,9 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
         )
         attach_network_content_sha256(network)
 
-        hypotheses = generate_hypotheses_from_probe(scan_network(network), network)
+        hypotheses = prioritize(
+            generate_hypotheses_from_probe(scan_network(network), network), network
+        )
         hypothesis = next(
             row
             for row in hypotheses["hypotheses"]

@@ -1,6 +1,6 @@
 ---
 name: zotero-declarative-bridge
-description: Resolve an exact collection key read-only or execute reviewed, hash-bound mutations on existing Zotero Desktop parents through a constrained local plugin. Use when a compiler needs Zotero's internal numeric collection ID, or curation must add exact collection membership, update only a reviewed parent shortTitle, create or update one child note, or attach a verified local PDF without SQLite edits, cloud credentials, arbitrary JavaScript, or blind UI automation.
+description: Resolve an exact collection key read-only or execute reviewed, hash-bound mutations on existing Zotero Desktop parents through a constrained local plugin. Use for exact collection membership, reviewed shortTitle, one child note, one verified PDF, or a separately reviewed fixed-profile journalArticle metadata repair without SQLite, credentials, arbitrary JavaScript, or blind UI automation.
 ---
 
 # Zotero Declarative Bridge
@@ -40,6 +40,16 @@ reviewed target or manifest.
    drift, or formula mismatch as failure. Never retry an apply reported as
    `committed_unverified`; quiesce editors and perform a fresh readback.
 
+For an existing-parent bibliography correction, install
+`$repair-zotero-metadata` and compile only its sealed
+`ZoteroReviewedParentMetadataRepair/v1` with
+`compile-reviewed-metadata-repair`. This emits the independent
+`ZoteroParentMetadataRepairTransaction/v1`; never insert metadata fields or its
+operation into the legacy transaction schema.
+The compiler copies only the reviewed source's hash-only
+`source_evidence_sidecar_ref`; a sidecar path or evidence locator in an
+executable transaction is invalid.
+
 The bridge is loopback-only and accepts `application/octet-stream` envelopes
 authenticated with a nonce and HMAC. The random capability token never crosses
 HTTP. It supports only:
@@ -48,6 +58,14 @@ HTTP. It supports only:
 - `ensure_parent_short_title`
 - `ensure_child_note`
 - `ensure_pdf_attachment`
+
+The unchanged `ZoteroDeclarativeTransaction/v1` allowlist above remains closed.
+The separate `ZoteroParentMetadataRepairTransaction/v1` accepts exactly one
+top-level `journalArticle` and literal operation
+`ensure_parent_journal_metadata_v1`. Its fixed profile is `DOI`, creators,
+publication title, volume, issue, pages, and date. Title and shortTitle are
+immutable identity preconditions; metadata repair cannot mix with any legacy
+operation.
 
 The separate authenticated `resolve_collection` action is read-only and is not
 a transaction operation. It accepts exactly one authorized internal group

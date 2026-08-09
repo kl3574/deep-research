@@ -92,11 +92,14 @@ Do not commit downloaded research documents unless their redistribution license 
   [zotero-note-html.md](zotero-note-html.md); structure validation does not
   replace scientific evidence review.
 - `source.access_level`, the native importer bundle `access_level`, and the
-  validated note projection must agree. `metadata_only` requires root
+  validated note projection must agree. Forward full-text literature notes use
+  `ZoteroCleanLiteratureNote/v1`; operational hashes remain in the private
+  manifest rather than the synchronized HTML. `metadata_only` requires root
   `data-access-level="metadata_only"`, visible `全文状态：未获取全文`, metadata
   provenance, no PDF object, no 64-hex/full-text/PDF hash, and no claim-table
-  data rows. `full_text` retains the strict verified PDF and 64-hex full-text
-  hash requirements; old full-text notes may omit the root access marker.
+  data rows. `full_text` retains a strict verified-PDF hash in the private
+  bundle; old legacy full-text notes may retain their visible hash field and may
+  omit the root access marker.
 - A Zotero `add` decision requires an exact approved library and collection key before write time.
 - Readback starts as `not_attempted`; it changes only from observed Zotero state.
 

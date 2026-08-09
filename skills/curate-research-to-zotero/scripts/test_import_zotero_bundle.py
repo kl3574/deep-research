@@ -30,7 +30,16 @@ def metadata_note() -> str:
 <h2>知识图谱关系</h2><p>仅登记候选来源，不建立证据支持关系。</p>
 <h2>复用</h2><p>取得全文后必须重新深读和核验。</p>
 <h2>溯源</h2><p>元数据来源：https://doi.org/10.1000/test；元数据核验时间：2026-08-05；Agent推断：未形成全文主张。</p>
-</div>"""
+    </div>"""
+
+
+def clean_note() -> str:
+    return (
+        '<div data-schema-version="9"><h1>适用：参数筛选｜结论：'
+        '局部敏感不等于可辨识</h1><p>定义</p>'
+        '<pre class="math">$$S_{i,j}=\\frac{\\partial r_i}{\\partial '
+        '\\theta_j}$$</pre><p>只在名义点邻域解释。</p></div>'
+    )
 
 
 class MetadataOnlyImportTests(unittest.TestCase):
@@ -149,6 +158,51 @@ class MetadataOnlyImportTests(unittest.TestCase):
             self.assertEqual(result["access_level"], "metadata_only")
             self.assertIsNone(result["attachment_key"])
             self.assertIsNone(result["source_pdf_sha256"])
+
+    def test_full_text_clean_note_uses_the_clean_validator(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            bundle_path, note_path = self.make_bundle(root, note_html=clean_note())
+            pdf = root / "paper.pdf"
+            pdf.write_bytes(b"%PDF-1.4\n%%EOF\n")
+            bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+            bundle["access_level"] = "full_text"
+            bundle.pop("metadata_only_reason")
+            bundle["pdf"] = {
+                "local_path": str(pdf),
+                "sha256": hashlib.sha256(pdf.read_bytes()).hexdigest(),
+            }
+            bundle["note"]["sha256"] = hashlib.sha256(
+                note_path.read_bytes()
+            ).hexdigest()
+            bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
+            loaded, actual_pdf, actual_note, _ = module.load_and_validate(bundle_path)
+            self.assertEqual("full_text", loaded["access_level"])
+            self.assertEqual(pdf, actual_pdf)
+            self.assertEqual(note_path, actual_note)
+
+    def test_operationally_polluted_clean_note_fails_both_routes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            polluted = clean_note().replace(
+                "</div>", "<h2>同步状态</h2><p>写入状态：已完成</p></div>"
+            )
+            bundle_path, note_path = self.make_bundle(root, note_html=polluted)
+            pdf = root / "paper.pdf"
+            pdf.write_bytes(b"%PDF-1.4\n%%EOF\n")
+            bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+            bundle["access_level"] = "full_text"
+            bundle.pop("metadata_only_reason")
+            bundle["pdf"] = {
+                "local_path": str(pdf),
+                "sha256": hashlib.sha256(pdf.read_bytes()).hexdigest(),
+            }
+            bundle["note"]["sha256"] = hashlib.sha256(
+                note_path.read_bytes()
+            ).hexdigest()
+            bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
+            with self.assertRaisesRegex(module.BundleError, "CN-10"):
+                module.load_and_validate(bundle_path)
 
 
 if __name__ == "__main__":

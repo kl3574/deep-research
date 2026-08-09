@@ -1,6 +1,6 @@
 # deep-research
 
-一套面向 Codex agent 的可审计深度调研技能，覆盖九个核心能力和一个
+一套面向 Codex agent 的可审计深度调研技能，覆盖十个核心能力和一个
 可选的受约束 Zotero 执行能力：
 
 ```text
@@ -13,12 +13,13 @@
   → $scholarly-document-normalization：本地PDF文本质量分类、OCR衍生与谱系验证
   → $learn-from-papers：对关键单篇论文进行证据级深读与重建
   → $curate-research-to-zotero：快照、下载、导入、读回，持续同步目标库
+  → $repair-zotero-metadata：证据约束的 existing-parent 书目纠错审查
   → $research-network-publish：验证网络的隐私安全自包含 HTML 发布
 ```
 
 “深度”不是堆积来源，而是把时间和模型开销放在真正控制结论的瓶颈上；“可信”不是固定来源排行榜，而是版本、范围、局部适配和失败边界都能被持续验收。
 
-## 九个核心技能与一个受约束执行器
+## 十个核心技能与一个受约束执行器
 
 | 技能 | 职责 | 典型输入 | 核心产物 |
 | --- | --- | --- | --- |
@@ -30,18 +31,24 @@
 | `$scholarly-source-acquisition` | 将已接受候选合法获取为可复验全文资产 | DOI、开放URL、候选身份 | acquisition plan、PDF magic/大小/哈希、失败状态 |
 | `$scholarly-document-normalization` | 分类本地PDF文本质量并生成可追溯OCR衍生物 | 已获取PDF、可选source bundle | 逐页质量、显式skip或searchable PDF谱系、review gate |
 | `$curate-research-to-zotero` | 保存经审核的研究资产 | 来源清单、本地文件、Zotero 目标 | 文件哈希、ingestion manifest、PDF/元数据/笔记同步与 readback |
+| `$repair-zotero-metadata` | 审查已有 parent 的固定字段书目纠错 | 已验证身份、existing-parent 快照、字段证据 | 私有 reviewed repair source、重复冲突或 bridge handoff |
 | `$research-network-publish` | 将验证网络投影为可分享视图 | `KnowledgeNetwork/v1`、可选研究地图 | 自包含 HTML、coverage/gap/conflict 视图、隐私审计 |
 
-九个技能可独立调用，或由 `$deep-research` 统筹。Google Scholar 仅支持用户
+十个技能可独立调用，或由 `$deep-research` 统筹。Google Scholar 仅支持用户
 手工检索与导出导入；自主检索使用有正式接口的学术数据源，不能抓取 Scholar
 结果页或绕过 CAPTCHA。
 
 可选配套执行器 `$zotero-declarative-bridge` 只负责已审核 manifest 的
-existing-parent collection membership、书目 `shortTitle`、子笔记与单附件
-事务。`0.1.5` 已在 Zotero `9.0.6` 中完成真实激活、受约束 probe、正向回读和
-目标集合成员关系负向回读；真实写入由 `0.1.4` 完成后再由 `0.1.5` 回验，未为
-证明版本号而重复导入 PDF。它仍是显式 opt-in，不扩大研究、选源、全文理解或
-Zotero 内容决策职责。详情见 [v0.6.1 release notes](docs/releases/v0.6.1.md)。
+existing-parent collection membership、书目 `shortTitle`、子笔记、单附件，
+以及来自 `$repair-zotero-metadata` 的独立固定 profile parent 修复
+事务。当前待发布组合为仓库 `v0.6.10` 与 bridge `0.1.9`；P3 候选 XPI 的
+确定性 SHA-256 为
+`35c8fc2f7263c46ed5c1dafe45ab849a38b8a581ad04e6201205e69facc2b207`。
+这个摘要只绑定候选构件，不替代真实运行回读。作为历史证据，`v0.6.1` 的
+bridge `0.1.4` 完成真实写入，`0.1.5` 在 Zotero `9.0.6` 中完成激活、受约束
+probe、正向回读和目标集合成员关系负向回读；详情见
+[historical v0.6.1 release notes](docs/releases/v0.6.1.md)。bridge 仍是显式
+opt-in，不扩大研究、选源、全文理解或 Zotero 内容决策职责。
 
 设计取舍与高质量外部方案的一手证据对照见
 [外部同类系统审计](docs/analogous-systems-review.md)。审计区分报告生成、科学
@@ -70,11 +77,11 @@ RAG、主动筛选、研究知识图谱与完整 Zotero 读写闭环，避免把
 ## 安装
 
 ```bash
-git clone --branch v0.6.1 --depth 1 https://github.com/kl3574/deep-research.git
+git clone --branch v0.6.10 --depth 1 https://github.com/kl3574/deep-research.git
 cd deep-research
 mkdir -p ~/.codex/skills
 stamp="$(date +%Y%m%d%H%M%S)"
-for skill in deep-research learn-from-papers research-knowledge-network network-gap-discovery scholar-discovery scholarly-source-acquisition scholarly-document-normalization curate-research-to-zotero research-network-publish; do
+for skill in deep-research learn-from-papers research-knowledge-network network-gap-discovery scholar-discovery scholarly-source-acquisition scholarly-document-normalization curate-research-to-zotero repair-zotero-metadata research-network-publish; do
   if [ -e "$HOME/.codex/skills/$skill" ] || [ -L "$HOME/.codex/skills/$skill" ]; then
     mv "$HOME/.codex/skills/$skill" "$HOME/.codex/skills/${skill}.backup-${stamp}"
   fi
@@ -182,6 +189,11 @@ skills/
 │   ├── agents/openai.yaml
 │   ├── references/
 │   └── scripts/
+├── repair-zotero-metadata/
+│   ├── SKILL.md
+│   ├── agents/openai.yaml
+│   ├── references/
+│   └── scripts/
 └── curate-research-to-zotero/
     ├── SKILL.md
     ├── agents/openai.yaml
@@ -214,7 +226,10 @@ python -m unittest discover -s skills/scholarly-source-acquisition/scripts -p 't
 python -m unittest discover -s skills/scholarly-document-normalization/scripts -p 'test_*.py'
 python -m unittest discover -s skills/research-network-publish/scripts -p 'test_*.py'
 python -m unittest discover -s skills/zotero-declarative-bridge/scripts -p 'test_*.py'
-node --test skills/zotero-declarative-bridge/scripts/test_bridge_core.js
+node --test \
+  skills/zotero-declarative-bridge/scripts/test_*core.js \
+  skills/zotero-declarative-bridge/scripts/test_metadata_repair_bootstrap_vm.js
+python -m unittest discover -s skills/repair-zotero-metadata/scripts -p 'test_*.py'
 python -m unittest discover -s skills/curate-research-to-zotero/scripts -p 'test_*.py'
 python -m unittest discover -s evals/real-world -p 'test_*.py'
 python -m unittest discover -s evals/learn-from-papers -p 'test_*.py'

@@ -41,6 +41,10 @@ This skill models a local, auditable graph with explicit provenance boundaries:
 - Refreshes append a superseding source row only when parent metadata changed.
   Removed or superseded rows remain in the ledger, while
   `corpus_snapshot_current_source_ids` defines current membership.
+- Refresh prior matching is role-scoped: only an earlier `zotero_corpus` row
+  can be superseded by refreshed corpus metadata. A reviewed `method` source
+  with the same DOI or title identity remains an independent full-text
+  provenance object and is never a corpus-refresh predecessor.
 
 ## Source binding
 

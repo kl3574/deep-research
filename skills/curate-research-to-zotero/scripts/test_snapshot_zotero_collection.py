@@ -6,6 +6,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -122,6 +124,86 @@ class SnapshotTests(unittest.TestCase):
         self.server.server_close()
         self.thread.join(timeout=2)
 
+    def test_file_location_import_is_isolated_and_exports_fingerprint_helper(
+        self,
+    ) -> None:
+        script = Path(snapshotter.__file__).resolve()
+        isolated_probe = r"""
+import importlib.util
+import json
+from pathlib import Path
+import sys
+
+script = Path(sys.argv[1]).resolve()
+before = list(sys.path)
+spec = importlib.util.spec_from_file_location("isolated_zotero_snapshot", script)
+assert spec is not None and spec.loader is not None
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+assert sys.path == before
+
+collection = {
+    "group_id": 1234567,
+    "collection_key": "COLL0001",
+    "collection_version": 7,
+    "collection_path": [
+        {"key": "COLL0001", "name": "Target", "version": 7}
+    ],
+}
+identity = module.digest_value(
+    {
+        "group_id": 1234567,
+        "collection_key": "COLL0001",
+        "collection_path": [{"key": "COLL0001", "name": "Target"}],
+    }
+)
+snapshot = {
+    "schema": "ZoteroCorpusSnapshot/v1",
+    "retrieved_at": "2026-08-09T00:00:00+00:00",
+    "collection": collection,
+    "parents": [],
+    "identity_sha256": identity,
+}
+snapshot["state_sha256"] = module.digest_value(
+    {
+        "identity_sha256": identity,
+        "collection_version": 7,
+        "parents": [],
+    }
+)
+target, fingerprint = module.target_and_fingerprint_from_snapshot(
+    snapshot,
+    library_id=2,
+    library_name="Example Research Library",
+)
+print(json.dumps({"target": target, "fingerprint": fingerprint}, sort_keys=True))
+"""
+        environment = os.environ.copy()
+        environment.pop("PYTHONPATH", None)
+        with tempfile.TemporaryDirectory() as temporary:
+            imported = subprocess.run(
+                [sys.executable, "-I", "-c", isolated_probe, str(script)],
+                cwd=temporary,
+                env=environment,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(0, imported.returncode, imported.stderr)
+            result = json.loads(imported.stdout)
+            self.assertEqual("COLL0001", result["target"]["collection_key"])
+            self.assertEqual(7, result["fingerprint"]["collection_version"])
+
+            cli = subprocess.run(
+                [sys.executable, str(script), "--help"],
+                cwd=temporary,
+                env=environment,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(0, cli.returncode, cli.stderr)
+
     def test_snapshot_omits_private_content_and_hashes_state(self) -> None:
         value = snapshotter.build_snapshot(
             self.base_url, 1234567, "COLL0001"
@@ -196,6 +278,40 @@ class SnapshotTests(unittest.TestCase):
         self.assertNotIn("</div>", serialized)
         self.assertEqual(inventory["identity_sha256"], semantic["corpus_identity_sha256"])
         self.assertEqual(inventory["state_sha256"], semantic["corpus_state_sha256"])
+
+    def test_snapshot_emits_canonical_batch_projection_when_library_is_bound(self) -> None:
+        inventory, _ = snapshotter.build_snapshots(
+            self.base_url,
+            1234567,
+            "COLL0001",
+            library_id=2,
+            library_name="Example Research Library",
+        )
+        self.assertEqual(
+            {
+                "group_id": 1234567,
+                "library_id": 2,
+                "library_name": "Example Research Library",
+                "collection_key": "COLL0001",
+                "collection_path": ["Root", "Target"],
+            },
+            inventory["batch_target"],
+        )
+        fingerprint = inventory["batch_target_fingerprint"]
+        self.assertEqual(inventory["retrieved_at"], fingerprint["captured_at"])
+        self.assertEqual(
+            [parent["key"] for parent in inventory["parents"]],
+            fingerprint["top_level_parent_keys"],
+        )
+
+    def test_snapshot_requires_library_id_and_name_together(self) -> None:
+        with self.assertRaisesRegex(ValueError, "supplied together"):
+            snapshotter.build_snapshots(
+                self.base_url,
+                1234567,
+                "COLL0001",
+                library_id=2,
+            )
 
     def test_semantic_hash_ignores_markup_only_change(self) -> None:
         def child(note: str) -> dict[str, object]:
