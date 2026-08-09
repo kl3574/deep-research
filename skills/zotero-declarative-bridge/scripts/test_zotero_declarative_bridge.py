@@ -147,7 +147,7 @@ class BridgeTests(unittest.TestCase):
     def test_manifest_and_bootstrap_expose_zotero_9_diagnostics(self) -> None:
         manifest = json.loads((PLUGIN_ROOT / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["manifest_version"], 2)
-        self.assertEqual(manifest["version"], "0.1.10")
+        self.assertEqual(manifest["version"], "0.1.11")
         self.assertEqual(
             manifest["applications"]["zotero"]["update_url"],
             (
@@ -170,6 +170,9 @@ class BridgeTests(unittest.TestCase):
         self.assertIn("commitStateAfterFailure", bootstrap)
         self.assertIn('new ProtocolError(error.message, 409, "child_drift")', bootstrap)
         self.assertIn("noteStorageHTMLFingerprint", bootstrap)
+        self.assertIn('Components.classes["@mozilla.org/security/hash;1"]', bootstrap)
+        self.assertIn("Components.interfaces.nsICryptoHash", bootstrap)
+        self.assertNotIn("item.attachmentHash", bootstrap)
 
     def test_xpi_build_rejects_missing_zotero_update_url(self) -> None:
         builder = load_builder()
@@ -679,16 +682,33 @@ class BridgeTests(unittest.TestCase):
 
     def test_deterministic_xpi_has_only_fixed_files_and_no_dynamic_code(self) -> None:
         builder = load_builder()
+        tracked_dist = HERE.parents[2] / "dist" / builder.XPI_FILENAME
         with tempfile.TemporaryDirectory() as directory:
             first = Path(directory) / "first.xpi"
             second = Path(directory) / "second.xpi"
             digest1 = builder.build(first, PLUGIN_ROOT)
             digest2 = builder.build(second, PLUGIN_ROOT)
             self.assertEqual(digest1, digest2)
+            self.assertTrue(tracked_dist.is_file())
+            self.assertFalse(tracked_dist.is_symlink())
+            tracked_mode = stat.S_IMODE(tracked_dist.stat().st_mode)
+            self.assertTrue(tracked_mode & stat.S_IRUSR)
+            self.assertEqual(tracked_mode & 0o111, 0)
+            self.assertEqual(stat.S_IMODE(first.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(second.stat().st_mode), 0o600)
+            self.assertEqual(tracked_dist.read_bytes(), first.read_bytes())
+            self.assertEqual(
+                hashlib.sha256(tracked_dist.read_bytes()).hexdigest(),
+                builder.XPI_SHA256,
+            )
             with zipfile.ZipFile(first) as archive:
                 self.assertEqual(tuple(archive.namelist()), builder.FILES)
                 packed_manifest = json.loads(archive.read("manifest.json"))
                 source = archive.read("bootstrap.js").decode() + archive.read("bridge_core.js").decode()
+            with zipfile.ZipFile(tracked_dist) as archive:
+                self.assertEqual(tuple(archive.namelist()), builder.FILES)
+                for name in builder.FILES:
+                    self.assertEqual(archive.read(name), (PLUGIN_ROOT / name).read_bytes())
             updates = json.loads((PLUGIN_ROOT / "updates.json").read_text(encoding="utf-8"))
             update = updates["addons"][builder.PLUGIN_ID]["updates"][0]
         self.assertEqual(packed_manifest["applications"]["zotero"]["update_url"], builder.PLUGIN_UPDATE_URL)

@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import copy
+import contextlib
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -27,6 +29,8 @@ RESULT_SCHEMA = "ScholarDiscoveryResultSet/v1"
 SCREENING_SCHEMA = "CountercheckScreeningSet/v1"
 REVIEW_SCHEMA = "CountercheckTierAReviewSet/v1"
 NETWORK_SCHEMA = "KnowledgeNetwork/v1"
+AUTHORITY_REBIND_INPUT_SCHEMA = "CountercheckAuthorityRebindInput/v1"
+AUTHORITY_BINDING_SCHEMA = "CountercheckAuthorityBinding/v1"
 PRIVATE_DIRECTORY_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
 HEX_RE = re.compile(r"[0-9a-f]{64}")
@@ -96,6 +100,123 @@ ROUND_INPUT_FIELDS = {
     "network_before_ref",
     "network_after_ref",
 }
+LEDGER_NAMES = (
+    "sources",
+    "entities",
+    "claims",
+    "evidence",
+    "relations",
+    "gaps",
+    "events",
+)
+SCIENTIFIC_LEDGER_NAMES = (
+    "entities",
+    "claims",
+    "evidence",
+    "relations",
+    "gaps",
+)
+AUTHORITY_REBIND_INPUT_FIELDS = {
+    "schema",
+    "bound_at",
+    "historical_closure_ref",
+    "historical_network_ref",
+    "current_authoritative_network_ref",
+    "historical_ledger_authority",
+    "current_ledger_authority",
+}
+SOURCE_REVISION_MUTABLE_FIELDS = {
+    "record_id",
+    "recorded_at",
+    "sequence",
+    "snapshot_state",
+    "source",
+    "source_id",
+    "supersedes",
+    "version_hash",
+    "zotero_source_occurrence_sha256",
+    "zotero_source_revision",
+}
+SOURCE_BASE_FIELDS = {
+    "canonical_identity",
+    "canonical_version",
+    "network_id",
+    "notes",
+    "read_depth",
+    "read_version",
+    "record_id",
+    "recorded_at",
+    "role",
+    "schema_version",
+    "sequence",
+    "snapshot_state",
+    "source",
+    "source_id",
+    "supersedes",
+    "version_hash",
+    "zotero_item_type",
+    "zotero_parent_key",
+}
+SOURCE_BOUND_FIELDS = SOURCE_BASE_FIELDS | {
+    "zotero_source_occurrence_sha256",
+    "zotero_source_revision",
+}
+STATE_STABLE_FIELDS = {
+    "schema_version",
+    "network_id",
+    "created_at",
+    "question",
+    "scope",
+    "required_dimensions",
+    "required_benchmark_profiles",
+    "corpus_snapshot_identity_sha256",
+}
+STATE_CORPUS_LIFECYCLE_FIELDS = {
+    "corpus_snapshot_path",
+    "corpus_snapshot_digest",
+    "corpus_snapshot_file_sha256",
+    "corpus_snapshot_state_sha256",
+    "corpus_snapshot_current_source_ids",
+    "corpus_snapshot_current_source_revision_guards",
+    "corpus_semantic_snapshot_path",
+    "corpus_semantic_snapshot_file_sha256",
+    "corpus_semantic_snapshot_state_sha256",
+}
+STATE_SEMANTIC_ADDITION_FIELDS = {
+    "corpus_snapshot_current_source_revision_guards",
+    "corpus_semantic_snapshot_path",
+    "corpus_semantic_snapshot_file_sha256",
+    "corpus_semantic_snapshot_state_sha256",
+}
+SNAPSHOT_REFRESH_EVENT_FIELDS = {
+    "added",
+    "changed",
+    "current",
+    "event_type",
+    "existing",
+    "network_id",
+    "previous_semantic_snapshot_file_sha256",
+    "previous_semantic_snapshot_path",
+    "previous_semantic_snapshot_state_sha256",
+    "previous_snapshot_file_sha256",
+    "previous_snapshot_path",
+    "previous_snapshot_state_sha256",
+    "record_id",
+    "recorded_at",
+    "removed",
+    "schema_version",
+    "semantic_snapshot_file_sha256",
+    "semantic_snapshot_path",
+    "semantic_snapshot_state_sha256",
+    "sequence",
+    "snapshot_digest",
+    "snapshot_file_sha256",
+    "snapshot_identity_sha256",
+    "snapshot_path",
+    "snapshot_state_sha256",
+    "source_revision_guards",
+    "status",
+}
 _SCHOLAR_OWNER: Any | None = None
 _RKN_OWNER: Any | None = None
 _NETWORK_EXPORT_VALIDATOR: Any | None = None
@@ -120,6 +241,111 @@ def sha256_bytes(value: bytes) -> str:
 
 def sha256_json(value: Any) -> str:
     return sha256_bytes(canonical_bytes(value))
+
+
+def _file_fingerprint(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _read_stable_regular_bytes(path: Path, label: str) -> bytes:
+    if not path.is_absolute():
+        raise ContractError(f"{label}.path must be absolute")
+    try:
+        path_before = path.lstat()
+    except OSError as exc:
+        raise ContractError(f"{label}.path is unavailable") from exc
+    if not stat.S_ISREG(path_before.st_mode):
+        raise ContractError(f"{label}.path must be a regular non-symlink file")
+    flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NONBLOCK", 0)
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise ContractError("platform lacks O_NOFOLLOW for stable artifact reads")
+    try:
+        descriptor = os.open(path, flags | nofollow)
+    except OSError as exc:
+        raise ContractError(f"{label}.path open-no-follow failed") from exc
+    try:
+        descriptor_before = os.fstat(descriptor)
+        if not stat.S_ISREG(descriptor_before.st_mode):
+            raise ContractError(f"{label}.path descriptor is not a regular file")
+        if _file_fingerprint(descriptor_before) != _file_fingerprint(path_before):
+            raise ContractError(f"{label}.path changed before read")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        descriptor_after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
+        path_after = path.lstat()
+    except OSError as exc:
+        raise ContractError(f"{label}.path disappeared during read") from exc
+    expected = _file_fingerprint(path_before)
+    if any(
+        _file_fingerprint(observed) != expected
+        for observed in (descriptor_before, descriptor_after, path_after)
+    ):
+        raise ContractError(f"{label}.path changed during read")
+    return b"".join(chunks)
+
+
+def _read_stable_regular_bytes_at(
+    directory_descriptor: int,
+    directory_path: Path,
+    filename: str,
+    label: str,
+) -> bytes:
+    path = directory_path / filename
+    try:
+        path_before = path.lstat()
+    except OSError as exc:
+        raise ContractError(f"{label}.path is unavailable") from exc
+    if not stat.S_ISREG(path_before.st_mode):
+        raise ContractError(f"{label}.path must be a regular non-symlink file")
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise ContractError("platform lacks O_NOFOLLOW for stable artifact reads")
+    flags = os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NONBLOCK", 0) | nofollow
+    try:
+        descriptor = os.open(filename, flags, dir_fd=directory_descriptor)
+    except OSError as exc:
+        raise ContractError(f"{label}.path openat-no-follow failed") from exc
+    try:
+        descriptor_before = os.fstat(descriptor)
+        if not stat.S_ISREG(descriptor_before.st_mode):
+            raise ContractError(f"{label}.path descriptor is not a regular file")
+        if _file_fingerprint(descriptor_before) != _file_fingerprint(path_before):
+            raise ContractError(f"{label}.path changed before read")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        descriptor_after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
+        path_after = path.lstat()
+    except OSError as exc:
+        raise ContractError(f"{label}.path disappeared during read") from exc
+    expected = _file_fingerprint(path_before)
+    if any(
+        _file_fingerprint(observed) != expected
+        for observed in (descriptor_before, descriptor_after, path_after)
+    ):
+        raise ContractError(f"{label}.path changed during read")
+    return b"".join(chunks)
 
 
 def require_dict(value: Any, label: str) -> dict[str, Any]:
@@ -188,11 +414,7 @@ def _require_substantive_text(value: Any, label: str) -> str:
 
 
 def read_json_file(path: Path, label: str) -> tuple[dict[str, Any], str]:
-    if not path.is_absolute():
-        raise ContractError(f"{label}.path must be absolute")
-    if path.is_symlink() or not path.is_file():
-        raise ContractError(f"{label}.path must be a regular non-symlink file")
-    raw = path.read_bytes()
+    raw = _read_stable_regular_bytes(path, label)
     try:
         value = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -208,6 +430,35 @@ def load_artifact_ref(value: Any, label: str) -> tuple[dict[str, Any], dict[str,
     if observed != expected:
         raise ContractError(f"{label} sha256 mismatch")
     return ref, artifact
+
+
+def _require_exact_fields(value: dict[str, Any], fields: set[str], label: str) -> None:
+    if set(value) != fields:
+        raise ContractError(f"{label} fields must be exactly {sorted(fields)}")
+
+
+def _load_bound_bytes_ref(
+    value: Any,
+    label: str,
+    *,
+    directory_descriptor: int | None = None,
+    directory_path: Path | None = None,
+) -> tuple[dict[str, str], Path, bytes]:
+    ref = require_dict(value, label)
+    _require_exact_fields(ref, {"path", "sha256"}, label)
+    expected = require_hex(ref.get("sha256"), f"{label}.sha256")
+    path = Path(require_string(ref.get("path"), f"{label}.path"))
+    if directory_descriptor is None:
+        raw = _read_stable_regular_bytes(path, label)
+    else:
+        if directory_path is None or path.parent.absolute() != directory_path.absolute():
+            raise ContractError(f"{label}.path does not match its locked directory")
+        raw = _read_stable_regular_bytes_at(
+            directory_descriptor, directory_path, path.name, label
+        )
+    if sha256_bytes(raw) != expected:
+        raise ContractError(f"{label} sha256 mismatch")
+    return {"path": str(path), "sha256": expected}, path, raw
 
 
 def _ensure_private_output_directory(directory: Path) -> None:
@@ -490,7 +741,9 @@ def validate_axis_plan(value: Any) -> dict[str, Any]:
     return plan
 
 
-def _validate_network_ref(value: Any, label: str) -> dict[str, str]:
+def _load_validated_network_ref(
+    value: Any, label: str
+) -> tuple[dict[str, str], dict[str, Any]]:
     ref, network = load_artifact_ref(value, label)
     if ref.get("authoritative") is not True:
         raise ContractError(f"{label}.authoritative must be true")
@@ -515,12 +768,18 @@ def _validate_network_ref(value: Any, label: str) -> dict[str, str]:
         raise ContractError(
             f"{label} content_sha256 does not match the RKN canonical export payload"
         )
-    return {
+    binding = {
         "path": require_string(ref.get("path"), f"{label}.path"),
         "file_sha256": ref["sha256"],
         "snapshot_id": snapshot_id,
         "content_sha256": content_sha256,
     }
+    return binding, network
+
+
+def _validate_network_ref(value: Any, label: str) -> dict[str, str]:
+    binding, _ = _load_validated_network_ref(value, label)
+    return binding
 
 
 def _network_request_binding_matches(
@@ -1166,6 +1425,1069 @@ def replay_streak_assessment(value: Any) -> dict[str, Any]:
     return expected
 
 
+def _network_triple(value: dict[str, Any]) -> dict[str, str]:
+    return {
+        "file_sha256": require_hex(value.get("file_sha256"), "network file_sha256"),
+        "snapshot_id": require_string(value.get("snapshot_id"), "network snapshot_id"),
+        "content_sha256": require_hex(
+            value.get("content_sha256"), "network content_sha256"
+        ),
+    }
+
+
+def _ledger_path_from_ref(value: Any, label: str) -> Path:
+    ref = require_dict(value, label)
+    _require_exact_fields(ref, {"path", "sha256"}, label)
+    return Path(require_string(ref.get("path"), f"{label}.path"))
+
+
+def _validate_ledger_authority(
+    value: Any,
+    label: str,
+    network_binding: dict[str, str],
+    network_document: dict[str, Any],
+    locked_directories: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    authority = require_dict(value, label)
+    _require_exact_fields(
+        authority, {"network_id", "network_state_ref", "ledger_refs"}, label
+    )
+    network_id = require_string(authority.get("network_id"), f"{label}.network_id")
+    state_path = _ledger_path_from_ref(
+        authority.get("network_state_ref"), f"{label}.network_state_ref"
+    )
+    if state_path.name != "network.json":
+        raise ContractError(f"{label}.network_state_ref must name network.json")
+    network_dir = state_path.parent
+    if network_dir.name != network_id or network_dir.parent.name != "networks":
+        raise ContractError(f"{label} network state path does not match network_id")
+    locked = locked_directories.get(str(network_dir.absolute()))
+    if locked is None:
+        raise ContractError(f"{label} is not covered by an authority directory lock")
+    directory_descriptor = int(locked["directory_descriptor"])
+    state_binding, _, state_raw = _load_bound_bytes_ref(
+        authority.get("network_state_ref"),
+        f"{label}.network_state_ref",
+        directory_descriptor=directory_descriptor,
+        directory_path=network_dir,
+    )
+
+    ledger_refs = require_dict(authority.get("ledger_refs"), f"{label}.ledger_refs")
+    if set(ledger_refs) != set(LEDGER_NAMES):
+        raise ContractError(
+            f"{label}.ledger_refs keys must be exactly {sorted(LEDGER_NAMES)}"
+        )
+
+    owner = _load_rkn_owner()
+    try:
+        paths = owner._safe_paths(str(network_dir.parent.parent), network_id)
+    except Exception as exc:
+        raise ContractError(f"{label} owner path validation failed: {exc}") from exc
+    if paths.state.absolute() != state_path.absolute():
+        raise ContractError(f"{label}.network_state_ref does not follow the owner path")
+
+    raw_ledgers: dict[str, bytes] = {}
+    bindings: dict[str, dict[str, str]] = {}
+    for name in LEDGER_NAMES:
+        ref_label = f"{label}.ledger_refs.{name}"
+        declared_path = _ledger_path_from_ref(ledger_refs.get(name), ref_label)
+        expected_path = paths.ledger(name).absolute()
+        if declared_path.absolute() != expected_path:
+            raise ContractError(f"{ref_label} does not follow the owner path")
+        binding, _, raw = _load_bound_bytes_ref(
+            ledger_refs.get(name),
+            ref_label,
+            directory_descriptor=directory_descriptor,
+            directory_path=network_dir,
+        )
+        bindings[name] = binding
+        raw_ledgers[name] = raw
+
+    try:
+        state, records = owner._load_state(paths)
+        try:
+            bound_state = require_dict(
+                json.loads(state_raw), f"{label}.network_state_ref"
+            )
+            bound_records = {
+                name: [
+                    require_dict(
+                        json.loads(line), f"{label}.ledger_refs.{name} record"
+                    )
+                    for line in raw_ledgers[name].splitlines()
+                    if line.strip()
+                ]
+                for name in LEDGER_NAMES
+            }
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ContractError(f"{label} bound ledger bytes are not valid JSON") from exc
+        if state != bound_state or records != bound_records:
+            raise ContractError(
+                f"{label} owner parsed a different view than the bound ledger bytes"
+            )
+        errors = owner._validate_record_shapes(paths, state, records)
+        if errors:
+            raise ContractError(
+                f"{label} failed research-knowledge-network owner validation: "
+                + "; ".join(str(error) for error in errors)
+            )
+        regenerated = owner._knowledge_network_export(paths, state, records)
+    except ContractError:
+        raise
+    except Exception as exc:
+        raise ContractError(
+            f"{label} failed research-knowledge-network owner validation: {exc}"
+        ) from exc
+    if regenerated != network_document:
+        raise ContractError(
+            f"{label} ledger authority does not regenerate its bound KnowledgeNetwork"
+        )
+    if state.get("network_id") != network_id:
+        raise ContractError(f"{label} state network_id mismatch")
+    if network_document.get("network_id") != network_id:
+        raise ContractError(f"{label} export network_id mismatch")
+    if network_document.get("content_sha256") != network_binding["content_sha256"]:
+        raise ContractError(f"{label} export content binding mismatch")
+    if _read_stable_regular_bytes_at(
+        directory_descriptor, network_dir, "network.json", f"{label}.network_state_ref"
+    ) != state_raw:
+        raise ContractError(f"{label} network state changed during owner validation")
+    for name in LEDGER_NAMES:
+        if _read_stable_regular_bytes_at(
+            directory_descriptor,
+            network_dir,
+            f"{name}.jsonl",
+            f"{label}.ledger_refs.{name}",
+        ) != raw_ledgers[name]:
+            raise ContractError(f"{label} {name}.jsonl changed during owner validation")
+    return {
+        "network_id": network_id,
+        "network_state_binding": state_binding,
+        "ledger_bindings": bindings,
+        "state": state,
+        "records": records,
+        "raw_ledgers": raw_ledgers,
+    }
+
+
+def _without_fields(value: dict[str, Any], fields: set[str]) -> dict[str, Any]:
+    return {key: item for key, item in value.items() if key not in fields}
+
+
+def _source_parent_metadata_sha256(value: dict[str, Any]) -> str:
+    revision = value.get("zotero_source_revision")
+    if isinstance(revision, dict):
+        digest = revision.get("parent_metadata_sha256")
+        if isinstance(digest, str):
+            return digest
+    return require_string(value.get("version_hash"), "source version_hash")
+
+
+def _corpus_source_ids(authority: dict[str, Any]) -> set[str]:
+    return {
+        require_string(row.get("source_id"), "Zotero corpus source_id")
+        for row in authority["records"]["sources"]
+        if row.get("role") == "zotero_corpus"
+    }
+
+
+def _scientific_export_projection(
+    network: dict[str, Any], corpus_source_ids: set[str]
+) -> dict[str, Any]:
+    projected = copy.deepcopy(network)
+    for field in ("content_sha256", "snapshot_id", "ledger_digest", "corpus_snapshot"):
+        projected.pop(field, None)
+    corpus_node_ids = {f"source:{source_id}" for source_id in corpus_source_ids}
+    projected["sources"] = [
+        row for row in projected.get("sources", []) if row.get("role") != "zotero_corpus"
+    ]
+    projected["nodes"] = [
+        row for row in projected.get("nodes", []) if row.get("node_id") not in corpus_node_ids
+    ]
+    filtered_relations: list[dict[str, Any]] = []
+    for row in projected.get("relations", []):
+        relation_id = row.get("relation_id")
+        is_membership = (
+            isinstance(relation_id, str)
+            and relation_id.startswith("corpus-membership:")
+            and row.get("predicate") == "contains"
+            and row.get("to_id") in corpus_node_ids
+        )
+        if is_membership:
+            continue
+        filtered_relations.append(row)
+    projected["relations"] = filtered_relations
+    projected["events"] = [
+        row
+        for row in projected.get("events", [])
+        if row.get("event_type") != "snapshot_refreshed"
+    ]
+    projected["change_history"] = [
+        row
+        for row in projected.get("change_history", [])
+        if row.get("action") != "snapshot_refreshed"
+    ]
+    return projected
+
+
+def _require_event_state_binding(
+    event: dict[str, Any],
+    state: dict[str, Any],
+    event_prefix: str,
+    state_prefix: str,
+    label: str,
+) -> None:
+    pairs = (
+        (f"{event_prefix}snapshot_path", f"{state_prefix}snapshot_path"),
+        (
+            f"{event_prefix}snapshot_file_sha256",
+            f"{state_prefix}snapshot_file_sha256",
+        ),
+        (
+            f"{event_prefix}snapshot_state_sha256",
+            f"{state_prefix}snapshot_state_sha256",
+        ),
+    )
+    for event_field, state_field in pairs:
+        if event.get(event_field) != state.get(state_field):
+            raise ContractError(f"{label} {event_field} does not bind {state_field}")
+
+
+def _load_owner_inventory(
+    state: dict[str, Any], label: str
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    owner = _load_rkn_owner()
+    path = Path(require_string(state.get("corpus_snapshot_path"), f"{label} path"))
+    try:
+        inventory, file_sha256 = owner._read_zotero_snapshot_with_digest(path)
+    except Exception as exc:
+        raise ContractError(f"{label} failed RKN owner validation: {exc}") from exc
+    if file_sha256 != state.get("corpus_snapshot_file_sha256"):
+        raise ContractError(f"{label} file SHA-256 mismatch")
+    if inventory.get("state_sha256") != state.get("corpus_snapshot_state_sha256"):
+        raise ContractError(f"{label} state SHA-256 mismatch")
+    if inventory.get("state_sha256") != state.get("corpus_snapshot_digest"):
+        raise ContractError(f"{label} digest mismatch")
+    if inventory.get("identity_sha256") != state.get(
+        "corpus_snapshot_identity_sha256"
+    ):
+        raise ContractError(f"{label} identity mismatch")
+    parents = require_list(inventory.get("parents"), f"{label}.parents")
+    parent_by_key = {
+        require_string(parent.get("key"), f"{label} parent key"): parent
+        for parent in parents
+        if isinstance(parent, dict)
+    }
+    if len(parent_by_key) != len(parents):
+        raise ContractError(f"{label} parent keys are not unique")
+    return inventory, parent_by_key
+
+
+def _load_owner_semantics(
+    path_value: Any,
+    file_sha256_value: Any,
+    state_sha256_value: Any,
+    inventory: dict[str, Any],
+    label: str,
+) -> dict[str, dict[str, Any]]:
+    owner = _load_rkn_owner()
+    path = Path(require_string(path_value, f"{label} path"))
+    try:
+        semantic, file_sha256, note_states = (
+            owner._read_zotero_semantic_snapshot_with_digest(path, inventory)
+        )
+    except Exception as exc:
+        raise ContractError(f"{label} failed RKN owner validation: {exc}") from exc
+    if file_sha256 != file_sha256_value:
+        raise ContractError(f"{label} file SHA-256 mismatch")
+    if semantic.get("state_sha256") != state_sha256_value:
+        raise ContractError(f"{label} state SHA-256 mismatch")
+    return note_states
+
+
+def _source_node_map(network: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        str(row.get("node_id"))[len("source:") :]: row
+        for row in require_list(network.get("nodes"), "network nodes")
+        if isinstance(row, dict)
+        and isinstance(row.get("node_id"), str)
+        and row["node_id"].startswith("source:")
+    }
+
+
+def _membership_relation_map(network: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for row in require_list(network.get("relations"), "network relations"):
+        if not isinstance(row, dict):
+            continue
+        relation_id = row.get("relation_id")
+        if not (
+            isinstance(relation_id, str)
+            and relation_id.startswith("corpus-membership:")
+            and row.get("predicate") == "contains"
+        ):
+            continue
+        source_id = relation_id[len("corpus-membership:") :]
+        if source_id in result:
+            raise ContractError("duplicate corpus-membership relation")
+        if row.get("to_id") != f"source:{source_id}":
+            raise ContractError("corpus-membership relation target mismatch")
+        result[source_id] = row
+    return result
+
+
+def _validate_export_lifecycle_delta(
+    historical_network: dict[str, Any],
+    current_network: dict[str, Any],
+    old_current_ids: list[str],
+    new_current_ids: list[str],
+    replacements: dict[str, str],
+    historical_corpus_ids: set[str],
+    current_corpus_ids: set[str],
+) -> None:
+    old_nodes = _source_node_map(historical_network)
+    new_nodes = _source_node_map(current_network)
+    added_node_ids = current_corpus_ids - historical_corpus_ids
+    if added_node_ids != set(replacements.values()):
+        raise ContractError("corpus source-node additions do not match source revisions")
+    for source_id in historical_corpus_ids - set(replacements):
+        if old_nodes.get(source_id) != new_nodes.get(source_id):
+            raise ContractError("unchanged corpus source node drifted")
+    for predecessor_id, successor_id in replacements.items():
+        predecessor_before = require_dict(
+            old_nodes.get(predecessor_id), "historical predecessor source node"
+        )
+        predecessor_after = require_dict(
+            new_nodes.get(predecessor_id), "current predecessor source node"
+        )
+        successor = require_dict(
+            new_nodes.get(successor_id), "current successor source node"
+        )
+        if predecessor_before.get("status") != "active":
+            raise ContractError("historical predecessor source node was not active")
+        if predecessor_after.get("status") != "deprecated":
+            raise ContractError("superseded source node was not deprecated")
+        if successor.get("status") != "active" or successor.get("kind") != "source":
+            raise ContractError("successor source node is not active")
+        if successor.get("label") != predecessor_before.get("label"):
+            raise ContractError("successor source label changed")
+    old_membership = _membership_relation_map(historical_network)
+    new_membership = _membership_relation_map(current_network)
+    if set(old_membership) != set(old_current_ids):
+        raise ContractError("historical membership relations do not match old guard")
+    if set(new_membership) != set(new_current_ids):
+        raise ContractError("current membership relations do not match new guard")
+    for predecessor_id, successor_id in replacements.items():
+        old_relation = old_membership[predecessor_id]
+        new_relation = new_membership[successor_id]
+        for field in ("from_id", "predicate", "status", "confidence"):
+            if old_relation.get(field) != new_relation.get(field):
+                raise ContractError("corpus membership relation changed scientific fields")
+    for source_id in set(old_current_ids) - set(replacements):
+        if old_membership[source_id] != new_membership.get(source_id):
+            raise ContractError("unchanged corpus membership relation drifted")
+
+
+def _audit_authority_delta(
+    historical: dict[str, Any],
+    current: dict[str, Any],
+    historical_network: dict[str, Any],
+    current_network: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    scientific_ledgers: dict[str, dict[str, Any]] = {}
+    for name in SCIENTIFIC_LEDGER_NAMES:
+        old_raw = historical["raw_ledgers"][name]
+        new_raw = current["raw_ledgers"][name]
+        if old_raw != new_raw:
+            raise ContractError(f"scientific ledger changed: {name}.jsonl")
+        scientific_ledgers[f"{name}.jsonl"] = {
+            "sha256": sha256_bytes(old_raw),
+            "size_bytes": len(old_raw),
+        }
+
+    old_state = historical["state"]
+    new_state = current["state"]
+    required_lifecycle_fields = {
+        "corpus_snapshot_path",
+        "corpus_snapshot_digest",
+        "corpus_snapshot_file_sha256",
+        "corpus_snapshot_state_sha256",
+        "corpus_snapshot_current_source_ids",
+    }
+    for state, label in ((old_state, "historical state"), (new_state, "current state")):
+        missing = (STATE_STABLE_FIELDS | required_lifecycle_fields) - set(state)
+        if missing:
+            raise ContractError(f"{label} misses required fields: {sorted(missing)}")
+        unknown = set(state) - (STATE_STABLE_FIELDS | STATE_CORPUS_LIFECYCLE_FIELDS)
+        if unknown:
+            raise ContractError(f"{label} has unsupported fields: {sorted(unknown)}")
+    if set(old_state) - set(new_state):
+        raise ContractError("current network state deleted historical fields")
+    if not (set(new_state) - set(old_state)).issubset(STATE_SEMANTIC_ADDITION_FIELDS):
+        raise ContractError("current network state added non-semantic lifecycle fields")
+    old_identity = require_string(
+        old_state.get("corpus_snapshot_identity_sha256"),
+        "historical corpus identity",
+    )
+    if new_state.get("corpus_snapshot_identity_sha256") != old_identity:
+        raise ContractError("corpus identity changed across authority rebind")
+    if _without_fields(old_state, STATE_CORPUS_LIFECYCLE_FIELDS) != _without_fields(
+        new_state, STATE_CORPUS_LIFECYCLE_FIELDS
+    ):
+        raise ContractError("network state changed outside corpus lifecycle fields")
+    changed_state_fields = sorted(
+        key for key in set(old_state) | set(new_state) if old_state.get(key) != new_state.get(key)
+    )
+    if not set(changed_state_fields).issubset(STATE_CORPUS_LIFECYCLE_FIELDS):
+        raise ContractError("network state contains an unauthorized field delta")
+
+    old_source_raw = historical["raw_ledgers"]["sources"]
+    new_source_raw = current["raw_ledgers"]["sources"]
+    if not new_source_raw.startswith(old_source_raw):
+        raise ContractError("sources ledger is not an exact append-only byte prefix")
+    old_sources = historical["records"]["sources"]
+    new_sources = current["records"]["sources"]
+    if new_sources[: len(old_sources)] != old_sources:
+        raise ContractError("sources ledger reordered or rewrote historical records")
+    source_suffix = new_sources[len(old_sources) :]
+    if not source_suffix:
+        raise ContractError("authority rebind requires a non-empty source revision delta")
+
+    owner = _load_rkn_owner()
+    old_current_ids = owner._corpus_snapshot_current_source_ids(old_state)
+    new_current_ids = owner._corpus_snapshot_current_source_ids(new_state)
+    if not old_current_ids or len(new_current_ids) != len(old_current_ids):
+        raise ContractError("corpus membership cardinality changed")
+    old_by_id = {
+        str(row.get("source_id")): row
+        for row in old_sources
+        if isinstance(row.get("source_id"), str)
+    }
+    replacements: dict[str, str] = {}
+    for index, row in enumerate(source_suffix):
+        if row.get("role") != "zotero_corpus":
+            raise ContractError(f"source suffix[{index}] is not a Zotero corpus revision")
+        predecessor_id = require_string(
+            row.get("supersedes"), f"source suffix[{index}].supersedes"
+        )
+        if predecessor_id not in old_current_ids:
+            raise ContractError(
+                f"source suffix[{index}] does not supersede old current membership"
+            )
+        if predecessor_id in replacements:
+            raise ContractError("multiple source revisions supersede one current source")
+        predecessor = old_by_id.get(predecessor_id)
+        if predecessor is None:
+            raise ContractError("source revision predecessor is absent from old authority")
+        if _without_fields(row, SOURCE_REVISION_MUTABLE_FIELDS) != _without_fields(
+            predecessor, SOURCE_REVISION_MUTABLE_FIELDS
+        ):
+            raise ContractError("source revision changed scientific or bibliographic fields")
+        if _source_parent_metadata_sha256(row) != _source_parent_metadata_sha256(
+            predecessor
+        ):
+            raise ContractError("source revision changed parent bibliographic metadata")
+        source_id = require_string(row.get("source_id"), "source revision source_id")
+        if source_id == predecessor_id:
+            raise ContractError("source revision did not rotate its occurrence identity")
+        replacements[predecessor_id] = source_id
+    expected_current_ids = [replacements.get(source_id, source_id) for source_id in old_current_ids]
+    if new_current_ids != expected_current_ids:
+        raise ContractError("current corpus membership guard does not match source revisions")
+    if set(replacements.values()) != {
+        require_string(row.get("source_id"), "source suffix source_id")
+        for row in source_suffix
+    }:
+        raise ContractError("source revisions do not exactly explain membership rotation")
+
+    old_event_raw = historical["raw_ledgers"]["events"]
+    new_event_raw = current["raw_ledgers"]["events"]
+    if not new_event_raw.startswith(old_event_raw):
+        raise ContractError("events ledger is not an exact append-only byte prefix")
+    old_events = historical["records"]["events"]
+    new_events = current["records"]["events"]
+    if new_events[: len(old_events)] != old_events:
+        raise ContractError("events ledger reordered or rewrote historical records")
+    event_suffix = new_events[len(old_events) :]
+    if len(event_suffix) != 1:
+        raise ContractError("authority rebind requires exactly one lifecycle event")
+    event = event_suffix[0]
+    if set(event) != SNAPSHOT_REFRESH_EVENT_FIELDS:
+        raise ContractError("snapshot_refreshed event fields are not closed")
+    if event.get("event_type") != "snapshot_refreshed":
+        raise ContractError("authority rebind event must be snapshot_refreshed")
+    if event.get("status") != "ok":
+        raise ContractError("snapshot_refreshed status must be ok")
+    if event.get("network_id") != historical["network_id"]:
+        raise ContractError("snapshot_refreshed network_id mismatch")
+    expected_counts = {
+        "added": 0,
+        "changed": len(source_suffix),
+        "existing": len(old_current_ids) - len(source_suffix),
+        "removed": 0,
+        "current": len(new_current_ids),
+    }
+    for field, expected in expected_counts.items():
+        if event.get(field) != expected:
+            raise ContractError(f"snapshot_refreshed {field} count mismatch")
+    _require_event_state_binding(
+        event, old_state, "previous_", "corpus_", "snapshot_refreshed"
+    )
+    _require_event_state_binding(event, new_state, "", "corpus_", "snapshot_refreshed")
+    if event.get("snapshot_identity_sha256") != old_identity:
+        raise ContractError("snapshot_refreshed identity mismatch")
+    if event.get("snapshot_digest") != new_state.get("corpus_snapshot_digest"):
+        raise ContractError("snapshot_refreshed snapshot_digest mismatch")
+    new_guards = new_state.get("corpus_snapshot_current_source_revision_guards")
+    if event.get("source_revision_guards") != new_guards:
+        raise ContractError("snapshot_refreshed revision guards mismatch")
+
+    historical_inventory, historical_parents = _load_owner_inventory(
+        old_state, "historical corpus snapshot"
+    )
+    current_inventory, current_parents = _load_owner_inventory(
+        new_state, "current corpus snapshot"
+    )
+    historical_semantic_fields = {
+        "corpus_semantic_snapshot_path",
+        "corpus_semantic_snapshot_file_sha256",
+        "corpus_semantic_snapshot_state_sha256",
+    }
+    historical_notes: dict[str, dict[str, Any]] | None = None
+    if historical_semantic_fields.issubset(old_state):
+        for event_field, state_field in (
+            ("previous_semantic_snapshot_path", "corpus_semantic_snapshot_path"),
+            (
+                "previous_semantic_snapshot_file_sha256",
+                "corpus_semantic_snapshot_file_sha256",
+            ),
+            (
+                "previous_semantic_snapshot_state_sha256",
+                "corpus_semantic_snapshot_state_sha256",
+            ),
+        ):
+            if event.get(event_field) != old_state.get(state_field):
+                raise ContractError(f"snapshot_refreshed {event_field} mismatch")
+        historical_notes = _load_owner_semantics(
+            old_state.get("corpus_semantic_snapshot_path"),
+            old_state.get("corpus_semantic_snapshot_file_sha256"),
+            old_state.get("corpus_semantic_snapshot_state_sha256"),
+            historical_inventory,
+            "historical semantic snapshot",
+        )
+    else:
+        for field in (
+            "previous_semantic_snapshot_path",
+            "previous_semantic_snapshot_file_sha256",
+            "previous_semantic_snapshot_state_sha256",
+        ):
+            require_string(event.get(field), f"snapshot_refreshed {field}")
+    current_notes = _load_owner_semantics(
+        new_state.get("corpus_semantic_snapshot_path"),
+        new_state.get("corpus_semantic_snapshot_file_sha256"),
+        new_state.get("corpus_semantic_snapshot_state_sha256"),
+        current_inventory,
+        "current semantic snapshot",
+    )
+    for event_field, state_field in (
+        ("semantic_snapshot_path", "corpus_semantic_snapshot_path"),
+        ("semantic_snapshot_file_sha256", "corpus_semantic_snapshot_file_sha256"),
+        ("semantic_snapshot_state_sha256", "corpus_semantic_snapshot_state_sha256"),
+    ):
+        if event.get(event_field) != new_state.get(state_field):
+            raise ContractError(f"snapshot_refreshed {event_field} mismatch")
+
+    stable_guard_fields = {
+        "parent_metadata_sha256",
+        "parent_short_title_sha256",
+        "note_child_count",
+        "note_key",
+        "note_schema_version",
+        "note_availability",
+        "note_semantic_status",
+    }
+    semantic_change_count = 0
+    content_change_count = 0
+    note_version_change_count = 0
+    legacy_unbound_predecessor_count = 0
+    guards_by_source = {
+        str(guard.get("source_id")): guard
+        for guard in require_list(new_guards, "current source revision guards")
+        if isinstance(guard, dict)
+    }
+    for row in source_suffix:
+        predecessor = old_by_id[str(row["supersedes"])]
+        predecessor_fields = set(predecessor)
+        if (
+            predecessor_fields != SOURCE_BASE_FIELDS
+            and predecessor_fields != SOURCE_BOUND_FIELDS
+        ):
+            raise ContractError("source revision predecessor fields are not closed")
+        if set(row) != SOURCE_BOUND_FIELDS:
+            raise ContractError("source revision fields are not closed")
+        if row.get("source") != row.get("source_id"):
+            raise ContractError("source revision source must equal source_id")
+        if row.get("snapshot_state") != {
+            "identity_sha256": old_identity,
+            "state_sha256": new_state.get("corpus_snapshot_state_sha256"),
+        }:
+            raise ContractError("source revision snapshot_state mismatch")
+        parent_key = require_string(row.get("zotero_parent_key"), "source parent key")
+        old_parent = historical_parents.get(parent_key)
+        new_parent = current_parents.get(parent_key)
+        old_note = historical_notes.get(parent_key) if historical_notes else None
+        new_note = current_notes.get(parent_key)
+        if not all(isinstance(value, dict) for value in (old_parent, new_parent, new_note)):
+            raise ContractError("source revision is absent from bound snapshot semantics")
+        owner = _load_rkn_owner()
+        new_revision = owner._source_revision_core(new_parent, new_note)
+        if row.get("zotero_source_revision") != new_revision:
+            raise ContractError("source revision does not match current snapshot semantics")
+        if row.get("version_hash") != new_revision.get("revision_sha256"):
+            raise ContractError("source revision version_hash mismatch")
+        predecessor_revision = predecessor.get("zotero_source_revision")
+        old_revision = (
+            predecessor_revision
+            if isinstance(predecessor_revision, dict)
+            else (
+                owner._source_revision_core(old_parent, old_note)
+                if isinstance(old_note, dict)
+                else None
+            )
+        )
+        if old_revision is None:
+            legacy_unbound_predecessor_count += 1
+        else:
+            for field in stable_guard_fields:
+                if old_revision.get(field) != new_revision.get(field):
+                    raise ContractError(
+                        f"source revision changed stable note guard: {field}"
+                    )
+            if new_revision["note_version"] < old_revision["note_version"]:
+                raise ContractError("source revision regressed note_version")
+            semantic_change_count += int(
+                new_revision["note_semantic_sha256"]
+                != old_revision["note_semantic_sha256"]
+            )
+            content_change_count += int(
+                new_revision["note_content_sha256"]
+                != old_revision["note_content_sha256"]
+            )
+            note_version_change_count += int(
+                new_revision["note_version"] != old_revision["note_version"]
+            )
+        guard = guards_by_source.get(str(row["source_id"]))
+        if not isinstance(guard, dict):
+            raise ContractError("source revision lacks a current membership guard")
+        if owner._revision_guard_core(guard) != new_revision:
+            raise ContractError("source revision and current membership guard disagree")
+
+    historical_corpus_ids = _corpus_source_ids(historical)
+    current_corpus_ids = _corpus_source_ids(current)
+    _validate_export_lifecycle_delta(
+        historical_network,
+        current_network,
+        old_current_ids,
+        new_current_ids,
+        replacements,
+        historical_corpus_ids,
+        current_corpus_ids,
+    )
+
+    corpus_ids = historical_corpus_ids | current_corpus_ids
+    old_projection = _scientific_export_projection(historical_network, corpus_ids)
+    new_projection = _scientific_export_projection(current_network, corpus_ids)
+    if old_projection != new_projection:
+        raise ContractError(
+            "KnowledgeNetwork changed outside Zotero corpus lifecycle projection"
+        )
+    projection_sha256 = sha256_json(old_projection)
+    core_descriptor = {
+        "scientific_ledgers": scientific_ledgers,
+        "network_projection_sha256": projection_sha256,
+    }
+    scientific_core = {
+        **core_descriptor,
+        "scientific_core_sha256": sha256_json(core_descriptor),
+        "method_and_full_source_projection_unchanged": True,
+        "claims_and_evidence_unchanged": True,
+        "conflicts_and_gaps_unchanged": True,
+    }
+    delta_audit = {
+        "allowed_only": True,
+        "scientific_ledgers_byte_exact": True,
+        "network_scientific_projection_exact": True,
+        "state_changed_fields": changed_state_fields,
+        "corpus_identity_sha256": old_identity,
+        "corpus_cardinality": len(new_current_ids),
+        "equivalence_scope": "countercheck_status_preservation_only",
+        "full_network_content_unchanged": False,
+        "note_semantics_unchanged": (
+            None
+            if legacy_unbound_predecessor_count
+            else semantic_change_count == 0
+        ),
+        "note_semantics_status": (
+            "unproven_historical_legacy_guard"
+            if legacy_unbound_predecessor_count
+            else "compared_from_bound_guards"
+        ),
+        "note_semantics_equivalence_claimed": False,
+        "sources": {
+            "old_sha256": sha256_bytes(old_source_raw),
+            "new_sha256": sha256_bytes(new_source_raw),
+            "old_bytes_are_exact_prefix": True,
+            "suffix_rows": len(source_suffix),
+            "changed": len(source_suffix),
+            "existing": len(old_current_ids) - len(source_suffix),
+            "added": 0,
+            "removed": 0,
+            "current": len(new_current_ids),
+            "note_semantic_changes": semantic_change_count,
+            "note_content_changes": content_change_count,
+            "note_version_changes": note_version_change_count,
+            "legacy_unbound_predecessors": legacy_unbound_predecessor_count,
+        },
+        "events": {
+            "old_sha256": sha256_bytes(old_event_raw),
+            "new_sha256": sha256_bytes(new_event_raw),
+            "old_bytes_are_exact_prefix": True,
+            "suffix_rows": 1,
+            "event_type": "snapshot_refreshed",
+        },
+    }
+    return scientific_core, delta_audit
+
+
+def _seal_authority_binding(payload: dict[str, Any]) -> dict[str, Any]:
+    sealed = dict(payload)
+    digest = sha256_json(sealed)
+    sealed["binding_digest"] = digest
+    sealed["binding_id"] = f"countercheck-authority-binding-{digest[:16]}"
+    return sealed
+
+
+def _validate_authority_binding_seal(value: dict[str, Any]) -> None:
+    if value.get("schema") != AUTHORITY_BINDING_SCHEMA:
+        raise ContractError(f"schema must be {AUTHORITY_BINDING_SCHEMA}")
+    digest = require_hex(value.get("binding_digest"), "binding_digest")
+    payload = dict(value)
+    payload.pop("binding_digest", None)
+    payload.pop("binding_id", None)
+    if sha256_json(payload) != digest:
+        raise ContractError("binding_digest mismatch")
+    if value.get("binding_id") != f"countercheck-authority-binding-{digest[:16]}":
+        raise ContractError("binding_id mismatch")
+
+
+def _authority_lock_path(value: Any, label: str) -> Path:
+    authority = require_dict(value, label)
+    _require_exact_fields(
+        authority, {"network_id", "network_state_ref", "ledger_refs"}, label
+    )
+    network_id = require_string(authority.get("network_id"), f"{label}.network_id")
+    state_path = _ledger_path_from_ref(
+        authority.get("network_state_ref"), f"{label}.network_state_ref"
+    )
+    if not state_path.is_absolute():
+        raise ContractError(f"{label}.network_state_ref.path must be absolute")
+    if (
+        state_path.name != "network.json"
+        or state_path.parent.name != network_id
+        or state_path.parent.parent.name != "networks"
+    ):
+        raise ContractError(f"{label} network state path does not match network_id")
+    return state_path.parent / ".lock"
+
+
+@contextlib.contextmanager
+def _locked_authority_directories(manifest: dict[str, Any]):
+    directory_paths = sorted(
+        {
+            _authority_lock_path(
+                manifest.get("historical_ledger_authority"),
+                "historical_ledger_authority",
+            ),
+            _authority_lock_path(
+                manifest.get("current_ledger_authority"),
+                "current_ledger_authority",
+            ),
+        },
+        key=str,
+    )
+    owned_entries: list[dict[str, Any]] = []
+    try:
+        locked: dict[str, dict[str, Any]] = {}
+        inode_entries: dict[tuple[int, int], dict[str, Any]] = {}
+        for lock_path in directory_paths:
+            path = lock_path.parent
+            if not path.is_absolute():
+                raise ContractError("authority directory path must be absolute")
+            lock_descriptor: int | None = None
+            try:
+                metadata = path.lstat()
+            except OSError as exc:
+                raise ContractError(f"authority directory is unavailable: {path}") from exc
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise ContractError(f"authority directory must not be a symlink: {path}")
+            nofollow = getattr(os, "O_NOFOLLOW", None)
+            if nofollow is None:
+                raise ContractError("platform lacks O_NOFOLLOW for authority directories")
+            directory_descriptor = os.open(
+                path,
+                os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_DIRECTORY", 0) | nofollow,
+            )
+            try:
+                opened = os.fstat(directory_descriptor)
+                if _file_fingerprint(opened) != _file_fingerprint(metadata):
+                    raise ContractError(
+                        f"authority directory changed before lock acquisition: {path}"
+                    )
+                inode_key = (opened.st_dev, opened.st_ino)
+                if inode_key in inode_entries:
+                    os.close(directory_descriptor)
+                    locked[str(path.absolute())] = inode_entries[inode_key]
+                    continue
+                lock_metadata = os.stat(
+                    ".lock", dir_fd=directory_descriptor, follow_symlinks=False
+                )
+                if not stat.S_ISREG(lock_metadata.st_mode):
+                    raise ContractError(
+                        f"authority lock must be a regular file: {path / '.lock'}"
+                    )
+                lock_descriptor = os.open(
+                    ".lock",
+                    os.O_RDONLY | os.O_CLOEXEC | nofollow,
+                    dir_fd=directory_descriptor,
+                )
+                lock_opened = os.fstat(lock_descriptor)
+                if _file_fingerprint(lock_opened) != _file_fingerprint(lock_metadata):
+                    raise ContractError(
+                        f"authority lock changed before acquisition: {path / '.lock'}"
+                    )
+                fcntl.flock(lock_descriptor, fcntl.LOCK_SH)
+            except BaseException:
+                if lock_descriptor is not None:
+                    os.close(lock_descriptor)
+                os.close(directory_descriptor)
+                raise
+            entry = {
+                "directory_descriptor": directory_descriptor,
+                "lock_descriptor": lock_descriptor,
+                "directory_fingerprint": _file_fingerprint(opened),
+                "directory_path": path,
+            }
+            owned_entries.append(entry)
+            inode_entries[inode_key] = entry
+            locked[str(path.absolute())] = entry
+        yield locked
+        for path_text, entry in locked.items():
+            path = Path(path_text)
+            descriptor = int(entry["directory_descriptor"])
+            expected = entry["directory_fingerprint"]
+            try:
+                path_after = path.lstat()
+            except OSError as exc:
+                raise ContractError(
+                    f"authority directory disappeared during validation: {path}"
+                ) from exc
+            if (
+                _file_fingerprint(os.fstat(descriptor)) != expected
+                or _file_fingerprint(path_after) != expected
+            ):
+                raise ContractError(
+                    f"authority directory changed during validation: {path}"
+                )
+    finally:
+        for entry in reversed(owned_entries):
+            lock_descriptor = int(entry["lock_descriptor"])
+            directory_descriptor = int(entry["directory_descriptor"])
+            try:
+                fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(lock_descriptor)
+                os.close(directory_descriptor)
+
+
+def rebind_authority(
+    manifest: dict[str, Any], manifest_sha256: str, manifest_path: Path
+) -> dict[str, Any]:
+    _require_exact_fields(manifest, AUTHORITY_REBIND_INPUT_FIELDS, "authority input")
+    if manifest.get("schema") != AUTHORITY_REBIND_INPUT_SCHEMA:
+        raise ContractError(f"input schema must be {AUTHORITY_REBIND_INPUT_SCHEMA}")
+    with _locked_authority_directories(manifest) as locked_directories:
+        return _rebind_authority_locked(
+            manifest, manifest_sha256, manifest_path, locked_directories
+        )
+
+
+def _rebind_authority_locked(
+    manifest: dict[str, Any],
+    manifest_sha256: str,
+    manifest_path: Path,
+    locked_directories: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    _require_exact_fields(manifest, AUTHORITY_REBIND_INPUT_FIELDS, "authority input")
+    if manifest.get("schema") != AUTHORITY_REBIND_INPUT_SCHEMA:
+        raise ContractError(f"input schema must be {AUTHORITY_REBIND_INPUT_SCHEMA}")
+    bound_at = require_string(manifest.get("bound_at"), "bound_at")
+
+    closure_ref = require_dict(
+        manifest.get("historical_closure_ref"), "historical_closure_ref"
+    )
+    _require_exact_fields(closure_ref, {"path", "sha256"}, "historical_closure_ref")
+    closure_ref, raw_closure = load_artifact_ref(
+        closure_ref, "historical_closure_ref"
+    )
+    closure = replay_round_closure(raw_closure)
+
+    historical_network_ref = require_dict(
+        manifest.get("historical_network_ref"), "historical_network_ref"
+    )
+    current_network_ref = require_dict(
+        manifest.get("current_authoritative_network_ref"),
+        "current_authoritative_network_ref",
+    )
+    exact_network_fields = {
+        "path",
+        "sha256",
+        "authoritative",
+        "snapshot_id",
+        "content_sha256",
+    }
+    _require_exact_fields(
+        historical_network_ref, exact_network_fields, "historical_network_ref"
+    )
+    _require_exact_fields(
+        current_network_ref,
+        exact_network_fields,
+        "current_authoritative_network_ref",
+    )
+    historical_network_binding, historical_network = _load_validated_network_ref(
+        historical_network_ref, "historical_network_ref"
+    )
+    current_network_binding, current_network = _load_validated_network_ref(
+        current_network_ref, "current_authoritative_network_ref"
+    )
+
+    if _network_triple(closure.get("network_before", {})) != _network_triple(
+        closure.get("network_after", {})
+    ):
+        raise ContractError("historical closure before/after network triple differs")
+    if closure.get("network_before") != historical_network_binding:
+        raise ContractError("historical closure does not bind historical network authority")
+    if closure.get("closure_status") == "evidence_added":
+        raise ContractError("evidence-added closure cannot be authority-rebound")
+    if closure.get("closure_status") != "partial_provider":
+        raise ContractError("authority rebind requires closure_status=partial_provider")
+    if closure.get("round_status") != "partial":
+        raise ContractError("authority rebind requires round_status=partial")
+    if closure.get("observed_no_add") is not True:
+        raise ContractError("authority rebind requires historical observed_no_add=true")
+    if closure.get("qualifying_no_add") is not False:
+        raise ContractError("authority rebind cannot upgrade qualifying_no_add")
+    if closure.get("decision_relevant_add_count") != 0:
+        raise ContractError("authority rebind cannot carry decision-relevant evidence")
+    if historical_network_binding["content_sha256"] == current_network_binding[
+        "content_sha256"
+    ]:
+        raise ContractError("authority rebind requires a changed full network authority")
+
+    historical_authority = _validate_ledger_authority(
+        manifest.get("historical_ledger_authority"),
+        "historical_ledger_authority",
+        historical_network_binding,
+        historical_network,
+        locked_directories,
+    )
+    current_authority = _validate_ledger_authority(
+        manifest.get("current_ledger_authority"),
+        "current_ledger_authority",
+        current_network_binding,
+        current_network,
+        locked_directories,
+    )
+    if historical_authority["network_id"] != current_authority["network_id"]:
+        raise ContractError("old and current ledger authorities have different network IDs")
+    scientific_core, delta_audit = _audit_authority_delta(
+        historical_authority,
+        current_authority,
+        historical_network,
+        current_network,
+    )
+    input_ref = {
+        "path": str(manifest_path.absolute()),
+        "sha256": require_hex(manifest_sha256, "authority input sha256"),
+    }
+    payload = {
+        "schema": AUTHORITY_BINDING_SCHEMA,
+        "bound_at": bound_at,
+        "authority_rebind_input_ref": input_ref,
+        "input_manifest_sha256": manifest_sha256,
+        "historical_closure_binding": {
+            **_artifact_binding(closure_ref),
+            "closure_id": closure["closure_id"],
+            "closure_digest": closure["closure_digest"],
+        },
+        "historical_artifact_bindings": copy.deepcopy(closure["artifact_bindings"]),
+        "historical_network": historical_network_binding,
+        "current_authoritative_network": current_network_binding,
+        "historical_ledger_authority": {
+            "network_id": historical_authority["network_id"],
+            "network_state": historical_authority["network_state_binding"],
+            "ledgers": historical_authority["ledger_bindings"],
+        },
+        "current_ledger_authority": {
+            "network_id": current_authority["network_id"],
+            "network_state": current_authority["network_state_binding"],
+            "ledgers": current_authority["ledger_bindings"],
+        },
+        "scientific_core": scientific_core,
+        "authority_delta_audit": delta_audit,
+        "round_id": closure["round_id"],
+        "round_status": closure["round_status"],
+        "closure_status": closure["closure_status"],
+        "observed_no_add": closure["observed_no_add"],
+        "qualifying_no_add": closure["qualifying_no_add"],
+        "provider_coverage_complete": closure["provider_coverage_complete"],
+        "historical_search_reused": True,
+        "rebind_operation_performed_search": False,
+        "round07_status": "not_started_by_this_binding",
+        "streak_advanced": False,
+        "this_binding_does_not_advance_streak": True,
+        "saturation_eligible": False,
+        "pragmatic_saturation": False,
+        "bounded_pragmatic_saturation": False,
+        "completeness": False,
+        "systematic_review_completeness": closure[
+            "systematic_review_completeness"
+        ],
+        "domain_completeness": closure["domain_completeness"],
+        "claim_scope": "authority_rebind_only",
+        "equivalence_scope": "countercheck_status_preservation_only",
+        "full_network_content_unchanged": False,
+        "note_semantics_unchanged": delta_audit["note_semantics_unchanged"],
+    }
+    return _seal_authority_binding(payload)
+
+
+def replay_authority_binding(value: Any) -> dict[str, Any]:
+    binding = require_dict(value, "authority binding")
+    _validate_authority_binding_seal(binding)
+    input_ref, manifest = load_artifact_ref(
+        binding.get("authority_rebind_input_ref"),
+        "authority binding.authority_rebind_input_ref",
+    )
+    expected = rebind_authority(
+        manifest,
+        input_ref["sha256"],
+        Path(require_string(input_ref.get("path"), "authority input path")),
+    )
+    if expected != binding:
+        raise ContractError("authority binding does not match replayed artifact references")
+    return expected
+
+
 def load_input(path: Path, label: str) -> tuple[dict[str, Any], str]:
     return read_json_file(path.absolute(), label)
 
@@ -1173,7 +2495,7 @@ def load_input(path: Path, label: str) -> tuple[dict[str, Any], str]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for name in ("close-round", "assess-streak"):
+    for name in ("close-round", "assess-streak", "rebind-authority"):
         command = subparsers.add_parser(name)
         command.add_argument("--input", required=True)
         command.add_argument("--output", required=True)
@@ -1193,6 +2515,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "assess-streak":
             output = assess_streak(value, digest, input_path)
             write_json(Path(args.output), output)
+        elif args.command == "rebind-authority":
+            output = rebind_authority(value, digest, input_path)
+            write_json(Path(args.output), output)
         else:
             schema = value.get("schema")
             if schema == ROUND_OUTPUT_SCHEMA:
@@ -1201,6 +2526,8 @@ def main(argv: list[str] | None = None) -> int:
                 replay_streak_assessment(value)
             elif schema == AXIS_PLAN_SCHEMA:
                 validate_axis_plan(value)
+            elif schema == AUTHORITY_BINDING_SCHEMA:
+                replay_authority_binding(value)
             else:
                 raise ContractError("unsupported validation schema")
     except (ContractError, OSError) as exc:

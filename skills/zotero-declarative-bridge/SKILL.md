@@ -67,12 +67,23 @@ publication title, volume, issue, pages, and date. Title and shortTitle are
 immutable identity preconditions; metadata repair cannot mix with any legacy
 operation.
 
-Version 2 carries a reviewed hash-only serializer guard. Preview and the
-transaction repeat remain raw-exact. Only post-commit inspection/readback may
+Version 2 carries a reviewed hash-only serializer guard over the explicit
+`ZoteroMetadataCanonicalProjection/v1` parent, note, and attachment field
+contract. Local API data and `item.toJSON()` are normalized to the same
+defaults, creator/tag/relation shapes, and set semantics before hashing; raw
+serializer objects are never hashed. Attachment SHA-256 and MD5 are computed
+from the same live byte stream: Python updates both digests in one descriptor
+read loop, while the plugin feeds the single `IOUtils.read()` result to
+WebCrypto and Gecko `nsICryptoHash`. The plugin never trusts
+`item.attachmentHash` as the canonical MD5 or as a fallback, and any digest
+failure closes the evidence gate. This is required because default
+`item.toJSON()` omits `md5` and `mtime` while the Local API includes synchronized
+storage properties. Preview and the transaction repeat remain exact. Only
+post-commit inspection/readback may
 accept parent tag/collection order changes and a same-key attachment version
-plus Zotero-managed filename/path rename when its stable record, MD5, bytes,
-size, link mode, title, URL, and content type stay exact. Notes remain
-raw-exact. The bounded result is
+plus Zotero-managed filename/path rename when its stable projection, MD5,
+bytes, size, link mode, title, URL, and content type stay exact. Notes remain
+exact. The bounded result is
 `zotero_managed_attachment_rename_and_set_order_equivalent` and includes raw
 expected/observed hashes. Published v1 manifests remain exact-only. v2
 `readback_only` manifests cannot enter preview or apply.

@@ -19,6 +19,20 @@ Zotero structure, not workflow state. Preserve `data-citation-items` only when
 surviving Zotero citation or annotation nodes require it. Add no custom state
 attributes.
 
+Collection routing is workflow state too. Reject structured fields or headings
+such as `collection:`, `library:`, `target:`, `path:`, `collection_path:`,
+`目标集合：`, `目标文库：`, and `集合路径：`, plus equivalent `data-*`
+attributes. Store them in the private curation sidecar. This is a structural
+rule, not a prose keyword ban: sentences about a specimen collection, a
+software library, a scientific target, or a path-sampling method remain valid
+publication content.
+
+Fail closed on every custom `data-*` attribute anywhere in the note except the
+root `<div>` attributes `data-schema-version` and `data-citation-items`. The
+latter is preserved only for Zotero citation or annotation nodes as stated
+above. The same two names on descendants are invalid. Ordinary non-`data-*`
+HTML attributes do not carry workflow state and are not rejected by this rule.
+
 ## Canonical math projection
 
 Use exactly:

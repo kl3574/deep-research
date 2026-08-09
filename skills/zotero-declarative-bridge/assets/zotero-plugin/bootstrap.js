@@ -208,6 +208,30 @@ var ZoteroDeclarativeBridge = (() => {
     return modes[value] || `unsupported_${value}`;
   }
 
+  function md5Bytes(bytes) {
+    try {
+      const hasher = Components.classes["@mozilla.org/security/hash;1"]
+        .createInstance(Components.interfaces.nsICryptoHash);
+      hasher.init(hasher.MD5);
+      hasher.update(bytes, bytes.byteLength);
+      const binaryDigest = hasher.finish(false);
+      if (typeof binaryDigest !== "string" || binaryDigest.length !== 16) {
+        throw new Error("invalid MD5 digest length");
+      }
+      return Array.from(
+        binaryDigest,
+        character => character.charCodeAt(0).toString(16).padStart(2, "0"),
+      ).join("");
+    }
+    catch (_error) {
+      throw new ProtocolError(
+        "bound PDF MD5 could not be computed from live bytes",
+        409,
+        "source_drift",
+      );
+    }
+  }
+
   async function fileEvidence(path) {
     const file = Zotero.File.pathToFile(path);
     let isSymlink = false;
@@ -221,6 +245,7 @@ var ZoteroDeclarativeBridge = (() => {
     return {
       size_bytes: bytes.byteLength,
       sha256: await sha256Bytes(bytes),
+      content_md5: md5Bytes(bytes),
       magic: String.fromCharCode(...bytes.slice(0, 5)),
     };
   }
@@ -236,6 +261,7 @@ var ZoteroDeclarativeBridge = (() => {
       size_bytes: null,
       direct_collection_count: item.getCollections().length,
     };
+    if (includeStoragePath) result.content_md5 = null;
     let path = null;
     try { path = await item.getFilePathAsync(); }
     catch (_error) { path = null; }
@@ -245,6 +271,9 @@ var ZoteroDeclarativeBridge = (() => {
         result.sha256 = evidence.sha256;
         result.size_bytes = evidence.size_bytes;
         result.readable_pdf = result.content_type === "application/pdf" && evidence.magic === "%PDF-";
+        if (includeStoragePath) {
+          result.content_md5 = evidence.content_md5;
+        }
       }
       catch (_error) {
         result.readable_pdf = false;
@@ -328,6 +357,7 @@ var ZoteroDeclarativeBridge = (() => {
           storage_path: evidence.storage_path,
           content_sha256: evidence.sha256,
           size_bytes: evidence.size_bytes,
+          content_md5: evidence.content_md5,
         });
       }
     }
@@ -338,14 +368,9 @@ var ZoteroDeclarativeBridge = (() => {
 
   async function metadataSerializerGuard(parent, childState) {
     const parentData = metadataRawData(parent, "metadata parent");
-    if (String(parentData.itemType || "") !== "journalArticle") {
-      throw new ProtocolError("metadata serializer parent type drift", 409, "metadata_drift");
-    }
-    const tags = Array.isArray(parentData.tags) ? parentData.tags : null;
-    const collections = Array.isArray(parentData.collections) ? parentData.collections : null;
-    if (!tags || !collections) {
-      throw new ProtocolError("metadata serializer parent sets are unavailable", 409, "metadata_drift");
-    }
+    const parentProjection = ZoteroDeclarativeBridgeCore.metadataSerializerParentProjection(parentData);
+    const tags = parentProjection.tags;
+    const collections = parentProjection.collections;
     const guardChildren = [];
     for (const wrapper of childState.serializerRecords) {
       const data = wrapper.data;
@@ -354,18 +379,30 @@ var ZoteroDeclarativeBridge = (() => {
         key: String(data.key || ""),
         item_type: itemType,
         version: Number(data.version),
-        raw_data_sha256: await sha256Value(data),
       };
       if (itemType === "note") {
-        guardChildren.push({...common, content_sha256: wrapper.content_sha256});
-      }
-      else if (itemType === "attachment") {
+        const projection = ZoteroDeclarativeBridgeCore.metadataSerializerNoteProjection(data);
         guardChildren.push({
           ...common,
+          raw_data_sha256: await sha256Value(projection),
+          content_sha256: wrapper.content_sha256,
+        });
+      }
+      else if (itemType === "attachment") {
+        const projection = ZoteroDeclarativeBridgeCore.metadataSerializerAttachmentProjection(
+          data,
+          wrapper.content_md5,
+        );
+        guardChildren.push({
+          ...common,
+          raw_data_sha256: await sha256Value(projection),
           stable_data_sha256: await sha256Value(
-            ZoteroDeclarativeBridgeCore.metadataSerializerAttachmentStableData(data),
+            ZoteroDeclarativeBridgeCore.metadataSerializerAttachmentStableData(
+              data,
+              wrapper.content_md5,
+            ),
           ),
-          filename_sha256: await sha256Value(String(data.filename || "")),
+          filename_sha256: await sha256Value(projection.filename),
           storage_path_sha256: await sha256Value(String(wrapper.storage_path || "")),
           content_sha256: wrapper.content_sha256,
           size_bytes: wrapper.size_bytes,
@@ -375,9 +412,10 @@ var ZoteroDeclarativeBridge = (() => {
     }
     guardChildren.sort((left, right) => left.key.localeCompare(right.key));
     const unsigned = {
-      profile: "zotero_managed_storage_equivalence_v1",
+      profile: "zotero_managed_storage_equivalence_v2",
+      projection_contract: "ZoteroMetadataCanonicalProjection/v1",
       parent: {
-        raw_data_sha256: await sha256Value(parentData),
+        raw_data_sha256: await sha256Value(parentProjection),
         stable_nonprofile_sha256: await sha256Value(
           ZoteroDeclarativeBridgeCore.metadataSerializerParentStableData(parentData),
         ),
@@ -1175,6 +1213,7 @@ var ZoteroDeclarativeBridge = (() => {
       applyMetadataRepair,
       assertMetadataRepairParentClean,
       dispatch,
+      fileEvidence,
       freshMetadataRepairFailureInspection,
       metadataSerializerGuard,
       preflightMetadataRepair,

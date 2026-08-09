@@ -7,6 +7,10 @@ const path = require("node:path");
 const test = require("node:test");
 
 const core = require("../assets/zotero-plugin/bridge_core.js");
+const crossSerializerFixture = JSON.parse(fs.readFileSync(
+  path.resolve(__dirname, "fixtures/metadata_cross_serializer_attachment_v1.json"),
+  "utf8",
+));
 
 const sha = value => "sha256:" + crypto.createHash("sha256").update(core.stableStringify(value)).digest("hex");
 const childHash = "sha256:" + "c".repeat(64);
@@ -152,27 +156,37 @@ function serializerState(postCommit = false) {
 }
 
 function serializerGuardFromState(state) {
+  const parentProjection = core.metadataSerializerParentProjection(state.parent);
+  const noteProjection = core.metadataSerializerNoteProjection(state.note);
+  const attachmentProjection = core.metadataSerializerAttachmentProjection(
+    state.attachment,
+    state.attachment.md5,
+  );
   const unsigned = {
-    profile: "zotero_managed_storage_equivalence_v1",
+    profile: "zotero_managed_storage_equivalence_v2",
+    projection_contract: "ZoteroMetadataCanonicalProjection/v1",
     parent: {
-      raw_data_sha256: sha(state.parent),
+      raw_data_sha256: sha(parentProjection),
       stable_nonprofile_sha256: sha(core.metadataSerializerParentStableData(state.parent)),
-      tags_raw_sha256: sha(state.parent.tags),
-      tags_set_sha256: sha(core.metadataSerializerSortedValues(state.parent.tags)),
-      collections_raw_sha256: sha(state.parent.collections),
-      collections_set_sha256: sha(core.metadataSerializerSortedValues(state.parent.collections)),
+      tags_raw_sha256: sha(parentProjection.tags),
+      tags_set_sha256: sha(core.metadataSerializerSortedValues(parentProjection.tags)),
+      collections_raw_sha256: sha(parentProjection.collections),
+      collections_set_sha256: sha(core.metadataSerializerSortedValues(parentProjection.collections)),
     },
     children: [
       {
         key: "NOTE0001", item_type: "note", version: 2,
-        raw_data_sha256: sha(state.note),
+        raw_data_sha256: sha(noteProjection),
         content_sha256: "sha256:" + crypto.createHash("sha256").update(state.note.note).digest("hex"),
       },
       {
         key: "PDF00001", item_type: "attachment", version: state.attachment.version,
-        raw_data_sha256: sha(state.attachment),
-        stable_data_sha256: sha(core.metadataSerializerAttachmentStableData(state.attachment)),
-        filename_sha256: sha(state.attachment.filename),
+        raw_data_sha256: sha(attachmentProjection),
+        stable_data_sha256: sha(core.metadataSerializerAttachmentStableData(
+          state.attachment,
+          state.attachment.md5,
+        )),
+        filename_sha256: sha(attachmentProjection.filename),
         storage_path_sha256: sha(state.storagePath),
         content_sha256: state.contentHash, size_bytes: state.sizeBytes,
       },
@@ -184,6 +198,80 @@ function serializerGuardFromState(state) {
 function serializerGuard(postCommit = false) {
   return serializerGuardFromState(serializerState(postCommit));
 }
+
+test("shared anonymous fixture identifies md5 and mtime and canonicalizes both serializers", () => {
+  assert.deepEqual(
+    core.metadataSerializerProjectionContract(),
+    {
+      schema: "ZoteroMetadataCanonicalProjection/v1",
+      defaults: {text: "", list: [], object: {}, boolean: false, scalar: null},
+      parent: {
+        item_type: "journalArticle",
+        text_fields: [
+          "title", "abstractNote", "publicationTitle", "volume", "issue", "pages", "date",
+          "series", "seriesTitle", "seriesText", "journalAbbreviation", "language", "DOI",
+          "ISSN", "PMID", "PMCID", "shortTitle", "url", "accessDate", "archive",
+          "archiveLocation", "libraryCatalog", "callNumber", "rights", "extra", "citationKey",
+          "partNumber", "partTitle", "place", "publisher", "section",
+        ],
+        list_fields: ["creators", "tags", "collections"],
+        object_fields: ["relations"],
+        boolean_fields: ["deleted", "inPublications"],
+        stable_excluded: [
+          "version", "dateModified", "tags", "collections", "DOI", "creators",
+          "publicationTitle", "volume", "issue", "pages", "date",
+        ],
+      },
+      note: {
+        item_type: "note",
+        text_fields: ["parentItem", "note", "dateAdded", "dateModified"],
+        list_fields: ["tags", "collections"],
+        object_fields: ["relations"],
+        boolean_fields: ["deleted"],
+        exact: true,
+      },
+      attachment: {
+        item_type: "attachment",
+        text_fields: [
+          "parentItem", "title", "url", "accessDate", "linkMode", "contentType", "charset",
+          "path", "filename", "note", "dateAdded", "dateModified",
+        ],
+        scalar_fields: ["lastRead"],
+        list_fields: ["tags", "collections"],
+        object_fields: ["relations"],
+        boolean_fields: ["deleted"],
+        supplemental_fields: ["content_md5"],
+        serializer_only_fields: ["md5", "mtime"],
+        stable_excluded: ["version", "filename"],
+      },
+    },
+  );
+  assert.deepEqual(crossSerializerFixture.diagnosis.local_api_only_fields, ["md5", "mtime"]);
+  const stable = {};
+  for (const phase of ["pre", "post"]) {
+    const local = crossSerializerFixture[phase].local_api;
+    const runtime = crossSerializerFixture[phase].item_to_json;
+    assert.deepEqual(
+      Object.keys(local).filter(field => !(field in runtime)).sort(),
+      crossSerializerFixture.diagnosis.local_api_only_fields,
+    );
+    const localProjection = core.metadataSerializerAttachmentProjection(
+      local,
+      crossSerializerFixture.content_md5,
+    );
+    const runtimeProjection = core.metadataSerializerAttachmentProjection(
+      runtime,
+      crossSerializerFixture.content_md5,
+    );
+    assert.deepEqual(localProjection, crossSerializerFixture[phase].expected_projection);
+    assert.deepEqual(runtimeProjection, crossSerializerFixture[phase].expected_projection);
+    stable[phase] = core.metadataSerializerAttachmentStableData(
+      runtime,
+      crossSerializerFixture.content_md5,
+    );
+  }
+  assert.deepEqual(stable.pre, stable.post);
+});
 
 test("isolated metadata schema validates without widening the old allowlist", () => {
   const manifest = fixture();
@@ -293,6 +381,16 @@ test("v2 equivalence rejects stable attachment, note, byte, and tag-member drift
     state.attachment[field] = value;
     const observed = serializerGuardFromState(state);
     assert.throws(() => classify(observed), new RegExp(`stable_data_sha256 drift`), field);
+  }
+
+  for (const field of ["tags", "collections"]) {
+    const state = serializerState(true);
+    state.attachment[field].push(field === "tags" ? {tag: "new-member"} : "EXTRA001");
+    assert.throws(
+      () => classify(serializerGuardFromState(state)),
+      /stable_data_sha256 drift/,
+      field,
+    );
   }
 
   const bytesState = serializerState(true);

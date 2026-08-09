@@ -40,21 +40,59 @@ This skill models a local, auditable graph with explicit provenance boundaries:
   - `canonical_identity`: normalized DOI when present; otherwise a digest of
     normalized title and date.
   - `canonical_version` and `read_version`: the Zotero parent item version.
-  - `version_hash`: a canonical hash of parent metadata, excluding children.
+  - `version_hash`: a canonical parent-metadata hash for legacy parent-only
+    ingest, or the complete source-revision hash when note-aware ingest is used.
   - `snapshot_state`: the verified corpus identity and state digests.
+  - `zotero_source_revision` (note-aware rows): a privacy-safe guard containing
+    the parent metadata and short-title hashes plus exactly-one child-note key,
+    item version, schema, availability, raw-HTML content hash, verified semantic
+    hash/status, and combined revision hash. It never contains note HTML,
+    short-title text, semantic payload text, or extracted note text.
 
 - Source IDs are deterministic and derived from canonical identity plus the
-  canonical parent hash.
+  canonical parent hash for legacy rows, or the combined parent-and-note
+  revision hash for the first note-aware occurrence. If a later change returns
+  to a historical revision, its occurrence hash additionally binds the
+  immediate predecessor source ID. Thus `A -> B -> A` appends three source
+  occurrences and the last one supersedes `B`; a historical ID is never
+  silently reused as an apparent no-op.
 - Import order is canonicalized by parent identity and hash to keep diffs stable.
-- Notes and PDF children are presence metadata only. They never upgrade
-  `read_depth` or create evidence.
-- Refreshes append a superseding source row only when parent metadata changed.
+- Notes and PDF children never upgrade `read_depth` or create evidence. When a
+  producer semantic snapshot is explicitly bound, the exactly-one note child
+  is source-defining metadata: raw HTML changes create a new revision even when
+  the inventory state, Zotero item versions, or normalized semantic payloads do
+  not change. Declared semantic hashes are recomputed from canonical semantic
+  payloads before use.
+- Refreshes append a superseding source row when parent metadata or the bound
+  note revision changes.
   Removed or superseded rows remain in the ledger, while
   `corpus_snapshot_current_source_ids` defines current membership.
 - Refresh prior matching is role-scoped: only an earlier `zotero_corpus` row
   can be superseded by refreshed corpus metadata. A reviewed `method` source
   with the same DOI or title identity remains an independent full-text
   provenance object and is never a corpus-refresh predecessor.
+- Corpus membership reconciliation is injective and fail-closed. A parent key
+  and canonical identity must not resolve to different current or historical
+  lineages, and one predecessor source cannot match multiple current parents.
+  An ambiguous refresh performs no write rather than guessing a predecessor.
+- Every parent field other than `children` is source-defining. Contracted core
+  fields retain their documented normalization; any additional JSON metadata
+  is hashed exactly. Child state remains governed by its explicit revision
+  fields, and neither parent metadata values nor note content enter a source
+  row or current-state guard.
+- A one-time migration from legacy parent-only rows requires both the prior and
+  current semantic snapshots. The prior semantic snapshot must bind exactly to
+  the already-bound inventory identity and state. Only differing combined
+  guards append source rows; unchanged legacy IDs remain current. The refresh
+  event and `network.json` store the full current privacy-safe guard set, so all
+  later comparisons are independent of the prior semantic artifact.
+  Presence of a prior corpus membership binding defines legacy migration even
+  when that membership is empty; an empty corpus installs an explicit empty
+  guard list before later note-aware re-additions.
+- Note-aware guards accept only an eight-character uppercase Zotero note key,
+  string schema version `9`, `present` availability, and the documented
+  semantic-status enum. Values are never coerced with `str()`; unbounded text
+  cannot enter source, state, or event guards through these fields.
 
 ## Source binding
 

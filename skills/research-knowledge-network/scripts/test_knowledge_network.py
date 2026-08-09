@@ -195,6 +195,68 @@ class KnowledgeNetworkTest(unittest.TestCase):
         )
         return snapshot_path, snapshot["state_sha256"]
 
+    def make_zotero_semantic_snapshot(
+        self,
+        inventory_path: Path,
+        note_html_by_parent: dict[str, str],
+        *,
+        semantic_digest_by_parent: dict[str, str] | None = None,
+        suffix: str = "semantic",
+    ) -> Path:
+        inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+        parents = []
+        for parent in inventory["parents"]:
+            parent_key = str(parent["key"])
+            notes = [
+                child
+                for child in parent.get("children", [])
+                if child.get("item_type") == "note"
+            ]
+            semantic_notes = []
+            for note in notes:
+                raw_html = note_html_by_parent[parent_key]
+                semantic_payload = {
+                    "root_contract": {
+                        "schema_version": note.get("schema_version")
+                    },
+                    "heading_tree": [],
+                    "normalized_blocks": [],
+                }
+                semantic_notes.append(
+                    {
+                        "key": note["key"],
+                        "version": note["version"],
+                        "content_sha256": MODULE._sha256_text(raw_html),
+                        "semantic_status": "structured",
+                        "semantic_payload": semantic_payload,
+                        "semantic_sha256": (
+                            semantic_digest_by_parent or {}
+                        ).get(parent_key, MODULE._sha256_json(semantic_payload)),
+                    }
+                )
+            parents.append(
+                {
+                    "key": parent_key,
+                    "version": parent["version"],
+                    "short_title": "synthetic scenario conclusion",
+                    "notes": semantic_notes,
+                }
+            )
+        semantic = {
+            "schema": MODULE.ZOTERO_SEMANTIC_SNAPSHOT_SCHEMA,
+            "retrieved_at": "2026-01-01T00:00:00Z",
+            "corpus_identity_sha256": inventory["identity_sha256"],
+            "corpus_state_sha256": inventory["state_sha256"],
+            "parents": parents,
+        }
+        semantic["state_sha256"] = MODULE._semantic_snapshot_state_digest(semantic)
+        output = self.root / f"{inventory_path.stem}-{suffix}.json"
+        output.write_text(
+            json.dumps(semantic, ensure_ascii=False, sort_keys=True, indent=2),
+            encoding="utf-8",
+        )
+        return output
+
     def init_network_with_snapshot(
         self, network_id: str, snapshot_path: Path, digest: str
     ) -> tuple[str, Path, str]:
@@ -933,8 +995,1488 @@ class KnowledgeNetworkTest(unittest.TestCase):
             },
             before,
         )
+    def test_note_aware_legacy_refresh_changes_exact_raw_html_delta_append_only(self):
+        parents = []
+        prior_html = {}
+        for index in range(67):
+            parent_key = f"P{index:07d}"
+            note_key = f"N{index:07d}"
+            parents.append(
+                {
+                    "key": parent_key,
+                    "version": 10,
+                    "item_type": "journalArticle",
+                    "title": f"Sensitivity paper {index}",
+                    "date": "2026",
+                    "DOI": f"10.1000/sa-{index}",
+                    "ISBN": "",
+                    "creators": [],
+                    "children": [
+                        {
+                            "key": f"A{index:07d}",
+                            "version": 4,
+                            "item_type": "attachment",
+                            "availability": "local_reference",
+                            "content_type": "application/pdf",
+                            "link_mode": "imported_file",
+                            "artifact_role": "main_text_candidate",
+                        },
+                        {
+                            "key": note_key,
+                            "version": 20,
+                            "item_type": "note",
+                            "availability": "present",
+                            "schema_version": "9",
+                        },
+                    ],
+                }
+            )
+            prior_html[parent_key] = (
+                f'<div data-schema-version="9"><p>old {index}</p></div>'
+            )
+
+        prior_inventory, _ = self.make_zotero_snapshot(
+            self.network_id, parents, collection_version=1
+        )
+        prior_inventory = prior_inventory.replace(
+            self.root / "legacy-67-prior-inventory.json"
+        )
+        prior_semantic = self.make_zotero_semantic_snapshot(
+            prior_inventory, prior_html, suffix="prior-semantic"
+        )
+        self.init_network_with_snapshot(
+            self.network_id, prior_inventory, sha256(prior_inventory)
+        )
+        initial = invoke(
+            self.root,
+            self.network_id,
+            ["ingest-zotero-snapshot", "--snapshot", str(prior_inventory)],
+        )
+        self.assertEqual(initial[0], 0, initial[2])
+
+        network_dir = self.root / "networks" / self.network_id
+        source_path = network_dir / "sources.jsonl"
+        event_path = network_dir / "events.jsonl"
+        source_prefix = source_path.read_bytes()
+        event_prefix = event_path.read_bytes()
+        current_html = dict(prior_html)
+        for index in range(10):
+            current_html[f"P{index:07d}"] = (
+                f'<div data-schema-version="9"><p>new {index}</p></div>'
+            )
+        current_inventory, _ = self.make_zotero_snapshot(
+            self.network_id, parents, collection_version=2
+        )
+        current_semantic = self.make_zotero_semantic_snapshot(
+            current_inventory, current_html, suffix="current-semantic"
+        )
+        refreshed = invoke(
+            self.root,
+            self.network_id,
+            [
+                "ingest-zotero-snapshot",
+                "--snapshot",
+                str(current_inventory),
+                "--semantic-snapshot",
+                str(current_semantic),
+                "--prior-semantic-snapshot",
+                str(prior_semantic),
+                "--allow-refresh",
+            ],
+        )
+        self.assertEqual(refreshed[0], 0, refreshed[2])
+        receipt = json.loads(refreshed[1])
+        self.assertEqual(
+            {
+                key: receipt[key]
+                for key in ("added", "changed", "existing", "removed", "total")
+            },
+            {
+                "added": 0,
+                "changed": 10,
+                "existing": 57,
+                "removed": 0,
+                "total": 67,
+            },
+        )
+        self.assertTrue(source_path.read_bytes().startswith(source_prefix))
+        self.assertTrue(event_path.read_bytes().startswith(event_prefix))
+        self.assertEqual(len(self.load_ledger(self.network_id, "sources")), 77)
+        self.assertEqual(len(self.load_ledger(self.network_id, "events")), 2)
+        appended = self.load_ledger(self.network_id, "sources")[-10:]
+        self.assertTrue(all(row["supersedes"] for row in appended))
+        serialized = json.dumps(appended, ensure_ascii=False)
+        self.assertNotIn("<div", serialized)
+        self.assertNotIn("new 0", serialized)
+        self.assertTrue(all("zotero_source_revision" in row for row in appended))
+        state = json.loads(
+            (network_dir / "network.json").read_text(encoding="utf-8")
+        )
+        guards = state["corpus_snapshot_current_source_revision_guards"]
+        self.assertEqual(len(guards), 67)
+        self.assertEqual(
+            self.load_ledger(self.network_id, "events")[-1][
+                "source_revision_guards"
+            ],
+            guards,
+        )
+        validation = invoke(self.root, self.network_id, ["validate"])
+        self.assertEqual(validation[0], 0, validation[2])
+        watched = [
+            network_dir / "network.json",
+            network_dir / "sources.jsonl",
+            network_dir / "events.jsonl",
+        ]
+        before_noop = {
+            path: (path.read_bytes(), path.stat().st_ino, path.stat().st_mtime_ns)
+            for path in watched
+        }
+        with mock.patch.object(MODULE.os, "replace", wraps=os.replace) as replace:
+            no_op = invoke(
+                self.root,
+                self.network_id,
+                [
+                    "ingest-zotero-snapshot",
+                    "--snapshot",
+                    str(current_inventory),
+                    "--semantic-snapshot",
+                    str(current_semantic),
+                ],
+            )
+        self.assertEqual(no_op[0], 0, no_op[2])
+        self.assertEqual(
+            {
+                key: json.loads(no_op[1])[key]
+                for key in ("added", "changed", "existing", "removed", "total")
+            },
+            {
+                "added": 0,
+                "changed": 0,
+                "existing": 67,
+                "removed": 0,
+                "total": 67,
+            },
+        )
+        replace.assert_not_called()
+        self.assertEqual(
+            {
+                path: (
+                    path.read_bytes(),
+                    path.stat().st_ino,
+                    path.stat().st_mtime_ns,
+                )
+                for path in watched
+            },
+            before_noop,
+        )
+
+    def test_note_aware_refresh_uses_raw_hash_not_version_or_semantic_hash(self):
+        parent = {
+            "key": "RAWHTML1",
+            "version": 5,
+            "item_type": "journalArticle",
+            "title": "Raw note storage",
+            "date": "2026",
+            "DOI": "10.1000/raw-note",
+            "ISBN": "",
+            "creators": [],
+            "children": [
+                {
+                    "key": "RAWNOTE1",
+                    "version": 9,
+                    "item_type": "note",
+                    "availability": "present",
+                    "schema_version": "9",
+                }
+            ],
+        }
+        first_inventory, _ = self.make_zotero_snapshot(
+            self.network_id, [parent], collection_version=1
+        )
+        first_inventory = first_inventory.replace(
+            self.root / "guarded-raw-first-inventory.json"
+        )
+        first_semantic = self.make_zotero_semantic_snapshot(
+            first_inventory,
+            {"RAWHTML1": "<div><p>A</p><p>B</p></div>"},
+            suffix="raw-first",
+        )
+        self.init_network_with_snapshot(
+            self.network_id, first_inventory, sha256(first_inventory)
+        )
+        first = invoke(
+            self.root,
+            self.network_id,
+            [
+                "ingest-zotero-snapshot",
+                "--snapshot",
+                str(first_inventory),
+                "--semantic-snapshot",
+                str(first_semantic),
+            ],
+        )
+        self.assertEqual(first[0], 0, first[2])
+        second_inventory = first_inventory
+        second_semantic = self.make_zotero_semantic_snapshot(
+            second_inventory,
+            {"RAWHTML1": "<div><p>B</p><p>A</p></div>"},
+            suffix="raw-second",
+        )
+        second = invoke(
+            self.root,
+            self.network_id,
+            [
+                "ingest-zotero-snapshot",
+                "--snapshot",
+                str(second_inventory),
+                "--semantic-snapshot",
+                str(second_semantic),
+                "--allow-refresh",
+            ],
+        )
+        self.assertEqual(second[0], 0, second[2])
+        self.assertEqual(json.loads(second[1])["changed"], 1)
+
+    def test_note_aware_revision_reversion_appends_new_occurrence(self):
+        parent = {
+            "key": "REVERT01",
+            "version": 1,
+            "item_type": "journalArticle",
+            "title": "Revision occurrence chain",
+            "date": "2026",
+            "DOI": "10.1000/revision-occurrence",
+            "ISBN": "",
+            "creators": [],
+            "children": [
+                {
+                    "key": "NOTEABAB",
+                    "version": 1,
+                    "item_type": "note",
+                    "availability": "present",
+                    "schema_version": "9",
+                }
+            ],
+        }
+        inventory, _ = self.make_zotero_snapshot(
+            self.network_id, [parent], collection_version=1
+        )
+        semantic_a = self.make_zotero_semantic_snapshot(
+            inventory, {"REVERT01": "<div>A</div>"}, suffix="revert-a"
+        )
+        self.init_network_with_snapshot(
+            self.network_id, inventory, sha256(inventory)
+        )
+        first = invoke(
+            self.root,
+            self.network_id,
+            [
+                "ingest-zotero-snapshot",
+                "--snapshot",
+                str(inventory),
+                "--semantic-snapshot",
+                str(semantic_a),
+            ],
+        )
+        self.assertEqual(first[0], 0, first[2])
+        semantic_b = self.make_zotero_semantic_snapshot(
+            inventory, {"REVERT01": "<div>B</div>"}, suffix="revert-b"
+        )
+        second = invoke(
+            self.root,
+            self.network_id,
+            [
+                "ingest-zotero-snapshot",
+                "--snapshot",
+                str(inventory),
+                "--semantic-snapshot",
+                str(semantic_b),
+                "--allow-refresh",
+            ],
+        )
+        self.assertEqual(second[0], 0, second[2])
+        self.assertEqual(json.loads(second[1])["changed"], 1)
+        third = invoke(
+            self.root,
+            self.network_id,
+            [
+                "ingest-zotero-snapshot",
+                "--snapshot",
+                str(inventory),
+                "--semantic-snapshot",
+                str(semantic_a),
+                "--allow-refresh",
+            ],
+        )
+        self.assertEqual(third[0], 0, third[2])
+        third_receipt = json.loads(third[1])
+        self.assertEqual(third_receipt["changed"], 1)
+        self.assertEqual(third_receipt["existing"], 0)
+        rows = self.load_ledger(self.network_id, "sources")
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(rows[2]["supersedes"], rows[1]["source_id"])
+        self.assertNotEqual(rows[2]["source_id"], rows[0]["source_id"])
+        self.assertEqual(
+            rows[2]["zotero_source_revision"]["revision_sha256"],
+            rows[0]["zotero_source_revision"]["revision_sha256"],
+        )
+        self.assertNotEqual(
+            rows[2]["zotero_source_occurrence_sha256"],
+            rows[0]["zotero_source_occurrence_sha256"],
+        )
+        validation = invoke(self.root, self.network_id, ["validate"])
+        self.assertEqual(validation[0], 0, validation[2])
+
+    def test_note_aware_rejects_forged_semantic_payload_digest(self):
+        parent = {
+            "key": "FORGE001",
+            "version": 1,
+            "item_type": "journalArticle",
+            "title": "Semantic digest binding",
+            "date": "2026",
+            "DOI": "10.1000/semantic-forge",
+            "ISBN": "",
+            "creators": [],
+            "children": [
+                {
+                    "key": "NOTEFRGE",
+                    "version": 1,
+                    "item_type": "note",
+                    "availability": "present",
+                    "schema_version": "9",
+                }
+            ],
+        }
+        inventory, _ = self.make_zotero_snapshot(
+            self.network_id, [parent], collection_version=1
+        )
+        semantic = self.make_zotero_semantic_snapshot(
+            inventory, {"FORGE001": "<div>original</div>"}, suffix="forged"
+        )
+        forged = json.loads(semantic.read_text(encoding="utf-8"))
+        forged["parents"][0]["notes"][0]["semantic_payload"][
+            "normalized_blocks"
+        ] = [{"kind": "p", "location": "p[1]", "text": "FORGED DIFFERENT"}]
+        forged["state_sha256"] = MODULE._semantic_snapshot_state_digest(forged)
+        semantic.write_text(
+            json.dumps(forged, ensure_ascii=False, sort_keys=True, indent=2),
+            encoding="utf-8",
+        )
+        self.init_network_with_snapshot(
+            self.network_id, inventory, sha256(inventory)
+        )
+        result = invoke(
+            self.root,
+            self.network_id,
+            [
+                "ingest-zotero-snapshot",
+                "--snapshot",
+                str(inventory),
+                "--semantic-snapshot",
+                str(semantic),
+            ],
+        )
+        self.assertEqual(result[0], 1)
+        self.assertIn("note semantic_sha256 mismatch", result[2])
+        self.assertEqual(self.load_ledger(self.network_id, "sources"), [])
+
+    def test_note_aware_semantic_versions_require_exact_integers(self):
+        invalid_versions = (
+            ("parent", True),
+            ("parent", 1.0),
+            ("note", True),
+            ("note", 1.0),
+        )
+        for index, (target, invalid_version) in enumerate(invalid_versions):
+            network_id = f"semantic-version-{index}"
+            parent_key = f"VERS{index:04d}"
+            note_key = f"NVER{index:04d}"
+            parent = {
+                "key": parent_key,
+                "version": 1,
+                "item_type": "journalArticle",
+                "title": "Semantic exact version",
+                "date": "2026",
+                "DOI": f"10.1000/semantic-version-{index}",
+                "ISBN": "",
+                "creators": [],
+                "children": [
+                    {
+                        "key": note_key,
+                        "version": 1,
+                        "item_type": "note",
+                        "availability": "present",
+                        "schema_version": "9",
+                    }
+                ],
+            }
+            inventory, _ = self.make_zotero_snapshot(
+                network_id, [parent], collection_version=1
+            )
+            semantic = self.make_zotero_semantic_snapshot(
+                inventory,
+                {parent_key: "<div>safe</div>"},
+                suffix=f"exact-version-{index}",
+            )
+            semantic_payload = json.loads(semantic.read_text(encoding="utf-8"))
+            if target == "parent":
+                semantic_payload["parents"][0]["version"] = invalid_version
+            else:
+                semantic_payload["parents"][0]["notes"][0][
+                    "version"
+                ] = invalid_version
+            semantic_payload["state_sha256"] = (
+                MODULE._semantic_snapshot_state_digest(semantic_payload)
+            )
+            semantic.write_text(
+                json.dumps(
+                    semantic_payload, ensure_ascii=False, sort_keys=True, indent=2
+                ),
+                encoding="utf-8",
+            )
+            self.init_network_with_snapshot(
+                network_id, inventory, sha256(inventory)
+            )
+            result = invoke(
+                self.root,
+                network_id,
+                [
+                    "ingest-zotero-snapshot",
+                    "--snapshot",
+                    str(inventory),
+                    "--semantic-snapshot",
+                    str(semantic),
+                ],
+            )
+            self.assertEqual(result[0], 1)
+            self.assertIn("version invalid", result[2])
+            self.assertEqual(self.load_ledger(network_id, "sources"), [])
+
+    def test_revision_guard_note_child_count_rejects_boolean(self):
+        note_state = {
+            "parent_short_title_sha256": MODULE._sha256_text("short title"),
+            "note_child_count": 1,
+            "note_key": "NOTE0001",
+            "note_version": 1,
+            "note_schema_version": "9",
+            "note_availability": "present",
+            "note_content_sha256": MODULE._sha256_text("raw"),
+            "note_semantic_sha256": MODULE._sha256_json({"safe": True}),
+            "note_semantic_status": "structured",
+        }
+        parent = {
+            "key": "PARENT01",
+            "version": 1,
+            "item_type": "journalArticle",
+            "title": "Exact child count",
+            "date": "2026",
+            "DOI": "10.1000/exact-child-count",
+            "ISBN": "",
+            "creators": [],
+            "children": [],
+        }
+        guard = MODULE._source_revision_core(parent, note_state)
+        guard["note_child_count"] = True
+        guard["revision_sha256"] = MODULE._sha256_json(
+            {key: value for key, value in guard.items() if key != "revision_sha256"}
+        )
+        with self.assertRaisesRegex(ValueError, "note_child_count"):
+            MODULE._validate_revision_guard_shape(guard, "forged guard")
+
+    def test_note_aware_additional_parent_metadata_is_source_defining(self):
+        parent = {
+            "key": "EXTRA001",
+            "version": 1,
+            "item_type": "journalArticle",
+            "title": "Additional parent metadata",
+            "date": "2026",
+            "DOI": "10.1000/additional-parent-metadata",
+            "ISBN": "",
+            "creators": [],
+            "children": [
+                {
+                    "key": "EXNOTE01",
+                    "version": 1,
+                    "item_type": "note",
+                    "availability": "present",
+                    "schema_version": "9",
+                }
+            ],
+        }
+        first_inventory, _ = self.make_zotero_snapshot(
+            self.network_id, [parent], collection_version=1
+        )
+        first_inventory = first_inventory.replace(
+            self.root / "additional-parent-first-inventory.json"
+        )
+        first_semantic = self.make_zotero_semantic_snapshot(
+            first_inventory,
+            {"EXTRA001": "<div>same note</div>"},
+            suffix="additional-parent-first",
+        )
+        self.init_network_with_snapshot(
+            self.network_id, first_inventory, sha256(first_inventory)
+        )
+        first = invoke(
+            self.root,
+            self.network_id,
+            [
+                "ingest-zotero-snapshot",
+                "--snapshot",
+                str(first_inventory),
+                "--semantic-snapshot",
+                str(first_semantic),
+            ],
+        )
+        self.assertEqual(first[0], 0, first[2])
+        changed_parent = dict(parent)
+        secret = "UNEMBEDDED PRIVATE METADATA patient@example.invalid"
+        changed_parent["abstractNote"] = secret
+        second_inventory, _ = self.make_zotero_snapshot(
+            self.network_id, [changed_parent], collection_version=2
+        )
+        second_semantic = self.make_zotero_semantic_snapshot(
+            second_inventory,
+            {"EXTRA001": "<div>same note</div>"},
+            suffix="additional-parent-second",
+        )
+        refreshed = invoke(
+            self.root,
+            self.network_id,
+            [
+                "ingest-zotero-snapshot",
+                "--snapshot",
+                str(second_inventory),
+                "--semantic-snapshot",
+                str(second_semantic),
+                "--allow-refresh",
+            ],
+        )
+        self.assertEqual(refreshed[0], 0, refreshed[2])
+        self.assertEqual(json.loads(refreshed[1])["changed"], 1)
+        rows = self.load_ledger(self.network_id, "sources")
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[1]["supersedes"], rows[0]["source_id"])
+        network_dir = self.root / "networks" / self.network_id
+        self.assertNotIn(secret, (network_dir / "sources.jsonl").read_text())
+        self.assertNotIn(secret, (network_dir / "network.json").read_text())
+
+    def test_note_aware_guard_rejects_unbounded_schema_and_note_key(self):
+        secret = "PRIVATE NOTE BODY: patient@example.invalid"
+        invalid_fields = (
+            ("schema_version", secret),
+            ("schema_version", 9),
+            ("schema_version", None),
+            ("key", secret),
+        )
+        for index, (field, invalid_value) in enumerate(invalid_fields):
+            network_id = f"guard-privacy-{index}"
+            note = {
+                "key": "NOTEPRIV",
+                "version": 1,
+                "item_type": "note",
+                "availability": "present",
+                "schema_version": "9",
+            }
+            note[field] = invalid_value
+            parent = {
+                "key": f"PRIV{index:04d}",
+                "version": 1,
+                "item_type": "journalArticle",
+                "title": "Guard allowlist",
+                "date": "2026",
+                "DOI": f"10.1000/guard-privacy-{index}",
+                "ISBN": "",
+                "creators": [],
+                "children": [note],
+            }
+            inventory, _ = self.make_zotero_snapshot(
+                network_id, [parent], collection_version=1
+            )
+            semantic = self.make_zotero_semantic_snapshot(
+                inventory,
+                {str(parent["key"]): "<div>safe</div>"},
+                suffix=f"guard-privacy-{index}",
+            )
+            self.init_network_with_snapshot(
+                network_id, inventory, sha256(inventory)
+            )
+            result = invoke(
+                self.root,
+                network_id,
+                [
+                    "ingest-zotero-snapshot",
+                    "--snapshot",
+                    str(inventory),
+                    "--semantic-snapshot",
+                    str(semantic),
+                ],
+            )
+            self.assertEqual(result[0], 1)
+            network_dir = self.root / "networks" / network_id
+            self.assertEqual(
+                (network_dir / "sources.jsonl").read_text(encoding="utf-8"), ""
+            )
+            self.assertNotIn(
+                secret,
+                (network_dir / "network.json").read_text(encoding="utf-8"),
+            )
+
+    def test_note_aware_removed_parent_readd_appends_occurrence(self):
+        parents = []
+        note_html = {}
+        for index in range(2):
+            parent_key = f"READD00{index + 1}"
+            parents.append(
+                {
+                    "key": parent_key,
+                    "version": 1,
+                    "item_type": "journalArticle",
+                    "title": f"Re-add parent {index}",
+                    "date": "2026",
+                    "DOI": f"10.1000/readd-{index}",
+                    "ISBN": "",
+                    "creators": [],
+                    "children": [
+                        {
+                            "key": f"NOTEADD{index}",
+                            "version": 1,
+                            "item_type": "note",
+                            "availability": "present",
+                            "schema_version": "9",
+                        }
+                    ],
+                }
+            )
+            note_html[parent_key] = f"<div>stable {index}</div>"
+
+        first_inventory, _ = self.make_zotero_snapshot(
+            self.network_id, parents, collection_version=1
+        )
+        first_inventory = first_inventory.replace(
+            self.root / "readd-first-inventory.json"
+        )
+        first_semantic = self.make_zotero_semantic_snapshot(
+            first_inventory, note_html, suffix="readd-first"
+        )
+        self.init_network_with_snapshot(
+            self.network_id, first_inventory, sha256(first_inventory)
+        )
+        first = invoke(
+            self.root,
+            self.network_id,
+            [
+                "ingest-zotero-snapshot",
+                "--snapshot",
+                str(first_inventory),
+                "--semantic-snapshot",
+                str(first_semantic),
+            ],
+        )
+        self.assertEqual(first[0], 0, first[2])
+        initial_rows = self.load_ledger(self.network_id, "sources")
+        removed_parent_id = next(
+            row["source_id"]
+            for row in initial_rows
+            if row["zotero_parent_key"] == "READD001"
+        )
+
+        second_inventory, _ = self.make_zotero_snapshot(
+            self.network_id, [parents[1]], collection_version=2
+        )
+        second_inventory = second_inventory.replace(
+            self.root / "readd-second-inventory.json"
+        )
+        second_semantic = self.make_zotero_semantic_snapshot(
+            second_inventory,
+            {"READD002": note_html["READD002"]},
+            suffix="readd-second",
+        )
+        removed = invoke(
+            self.root,
+            self.network_id,
+            [
+                "ingest-zotero-snapshot",
+                "--snapshot",
+                str(second_inventory),
+                "--semantic-snapshot",
+                str(second_semantic),
+                "--allow-refresh",
+            ],
+        )
+        self.assertEqual(removed[0], 0, removed[2])
+        self.assertEqual(json.loads(removed[1])["removed"], 1)
+
+        third_inventory, _ = self.make_zotero_snapshot(
+            self.network_id, parents, collection_version=3
+        )
+        third_inventory = third_inventory.replace(
+            self.root / "readd-third-inventory.json"
+        )
+        third_semantic = self.make_zotero_semantic_snapshot(
+            third_inventory, note_html, suffix="readd-third"
+        )
+        readded = invoke(
+            self.root,
+            self.network_id,
+            [
+                "ingest-zotero-snapshot",
+                "--snapshot",
+                str(third_inventory),
+                "--semantic-snapshot",
+                str(third_semantic),
+                "--allow-refresh",
+            ],
+        )
+        self.assertEqual(readded[0], 0, readded[2])
+        readded_receipt = json.loads(readded[1])
+        self.assertEqual(readded_receipt["added"], 1)
+        self.assertEqual(readded_receipt["changed"], 0)
+        self.assertEqual(readded_receipt["existing"], 1)
+        self.assertEqual(readded_receipt["removed"], 0)
+        rows = self.load_ledger(self.network_id, "sources")
+        self.assertEqual(len(rows), 3)
+        readded_row = rows[-1]
+        self.assertEqual(readded_row["zotero_parent_key"], "READD001")
+        self.assertEqual(readded_row["supersedes"], removed_parent_id)
+        self.assertNotEqual(readded_row["source_id"], removed_parent_id)
+        validation = invoke(self.root, self.network_id, ["validate"])
+        self.assertEqual(validation[0], 0, validation[2])
+
+    def test_note_aware_empty_corpus_readd_changed_revision_appends_history(self):
+        parent = {
+            "key": "EMPTY001",
+            "version": 1,
+            "item_type": "journalArticle",
+            "title": "Empty corpus re-add",
+            "date": "2026",
+            "DOI": "10.1000/empty-readd",
+            "ISBN": "",
+            "creators": [],
+            "children": [
+                {
+                    "key": "NOTEEMPT",
+                    "version": 1,
+                    "item_type": "note",
+                    "availability": "present",
+                    "schema_version": "9",
+                }
+            ],
+        }
+        first_inventory, _ = self.make_zotero_snapshot(
+            self.network_id, [parent], collection_version=1
+        )
+        first_inventory = first_inventory.replace(
+            self.root / "empty-readd-first-inventory.json"
+        )
+        first_semantic = self.make_zotero_semantic_snapshot(
+            first_inventory,
+            {"EMPTY001": "<div>before removal</div>"},
+            suffix="empty-readd-first",
+        )
+        self.init_network_with_snapshot(
+            self.network_id, first_inventory, sha256(first_inventory)
+        )
+        first = invoke(
+            self.root,
+            self.network_id,
+            [
+                "ingest-zotero-snapshot",
+                "--snapshot",
+                str(first_inventory),
+                "--semantic-snapshot",
+                str(first_semantic),
+            ],
+        )
+        self.assertEqual(first[0], 0, first[2])
+        old_source_id = self.load_ledger(self.network_id, "sources")[0][
+            "source_id"
+        ]
+
+        empty_inventory, _ = self.make_zotero_snapshot(
+            self.network_id, [], collection_version=2
+        )
+        empty_inventory = empty_inventory.replace(
+            self.root / "empty-readd-empty-inventory.json"
+        )
+        empty_semantic = self.make_zotero_semantic_snapshot(
+            empty_inventory, {}, suffix="empty-readd-empty"
+        )
+        removed = invoke(
+            self.root,
+            self.network_id,
+            [
+                "ingest-zotero-snapshot",
+                "--snapshot",
+                str(empty_inventory),
+                "--semantic-snapshot",
+                str(empty_semantic),
+                "--allow-refresh",
+            ],
+        )
+        self.assertEqual(removed[0], 0, removed[2])
+        self.assertEqual(json.loads(removed[1])["removed"], 1)
+        self.assertEqual(json.loads(removed[1])["total"], 0)
+
+        readd_inventory, _ = self.make_zotero_snapshot(
+            self.network_id, [parent], collection_version=3
+        )
+        readd_inventory = readd_inventory.replace(
+            self.root / "empty-readd-third-inventory.json"
+        )
+        readd_semantic = self.make_zotero_semantic_snapshot(
+            readd_inventory,
+            {"EMPTY001": "<div>changed while absent</div>"},
+            suffix="empty-readd-third",
+        )
+        readded = invoke(
+            self.root,
+            self.network_id,
+            [
+                "ingest-zotero-snapshot",
+                "--snapshot",
+                str(readd_inventory),
+                "--semantic-snapshot",
+                str(readd_semantic),
+                "--allow-refresh",
+            ],
+        )
+        self.assertEqual(readded[0], 0, readded[2])
+        receipt = json.loads(readded[1])
+        self.assertEqual(receipt["added"], 1)
+        self.assertEqual(receipt["changed"], 0)
+        self.assertEqual(receipt["existing"], 0)
+        rows = self.load_ledger(self.network_id, "sources")
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[1]["supersedes"], old_source_id)
+        self.assertNotEqual(rows[1]["source_id"], old_source_id)
+        validation = invoke(self.root, self.network_id, ["validate"])
+        self.assertEqual(validation[0], 0, validation[2])
+
+    def test_note_aware_parent_key_replacement_matches_canonical_identity(self):
+        old_parent = {
+            "key": "OLDPAR01",
+            "version": 1,
+            "item_type": "journalArticle",
+            "title": "Canonical identity predecessor",
+            "date": "2026",
+            "DOI": "10.1000/key-replacement",
+            "ISBN": "",
+            "creators": [],
+            "children": [
+                {
+                    "key": "NOTEKEY1",
+                    "version": 1,
+                    "item_type": "note",
+                    "availability": "present",
+                    "schema_version": "9",
+                }
+            ],
+        }
+        first_inventory, _ = self.make_zotero_snapshot(
+            self.network_id, [old_parent], collection_version=1
+        )
+        first_inventory = first_inventory.replace(
+            self.root / "key-replacement-first-inventory.json"
+        )
+        first_semantic = self.make_zotero_semantic_snapshot(
+            first_inventory,
+            {"OLDPAR01": "<div>same reviewed note</div>"},
+            suffix="key-replacement-first",
+        )
+        self.init_network_with_snapshot(
+            self.network_id, first_inventory, sha256(first_inventory)
+        )
+        first = invoke(
+            self.root,
+            self.network_id,
+            [
+                "ingest-zotero-snapshot",
+                "--snapshot",
+                str(first_inventory),
+                "--semantic-snapshot",
+                str(first_semantic),
+            ],
+        )
+        self.assertEqual(first[0], 0, first[2])
+        old_source_id = self.load_ledger(self.network_id, "sources")[0][
+            "source_id"
+        ]
+
+        new_parent = dict(old_parent)
+        new_parent["key"] = "NEWPAR01"
+        second_inventory, _ = self.make_zotero_snapshot(
+            self.network_id, [new_parent], collection_version=2
+        )
+        second_inventory = second_inventory.replace(
+            self.root / "key-replacement-second-inventory.json"
+        )
+        second_semantic = self.make_zotero_semantic_snapshot(
+            second_inventory,
+            {"NEWPAR01": "<div>same reviewed note</div>"},
+            suffix="key-replacement-second",
+        )
+        refreshed = invoke(
+            self.root,
+            self.network_id,
+            [
+                "ingest-zotero-snapshot",
+                "--snapshot",
+                str(second_inventory),
+                "--semantic-snapshot",
+                str(second_semantic),
+                "--allow-refresh",
+            ],
+        )
+        self.assertEqual(refreshed[0], 0, refreshed[2])
+        receipt = json.loads(refreshed[1])
+        self.assertEqual(receipt["changed"], 1)
+        self.assertEqual(receipt["added"], 0)
+        self.assertEqual(receipt["removed"], 0)
+        rows = self.load_ledger(self.network_id, "sources")
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[1]["supersedes"], old_source_id)
+        self.assertEqual(rows[1]["zotero_parent_key"], "NEWPAR01")
+        validation = invoke(self.root, self.network_id, ["validate"])
+        self.assertEqual(validation[0], 0, validation[2])
+
+    def test_note_aware_rejects_key_identity_predecessor_conflict(self):
+        def parent(key, note_key, doi):
+            return {
+                "key": key,
+                "version": 1,
+                "item_type": "journalArticle",
+                "title": f"Lineage {doi}",
+                "date": "2026",
+                "DOI": doi,
+                "ISBN": "",
+                "creators": [],
+                "children": [
+                    {
+                        "key": note_key,
+                        "version": 1,
+                        "item_type": "note",
+                        "availability": "present",
+                        "schema_version": "9",
+                    }
+                ],
+            }
+
+        old_a = parent("PARENTA1", "NOTEA001", "10.1000/lineage-a")
+        old_b = parent("PARENTB2", "NOTEB002", "10.1000/lineage-b")
+        first_inventory, _ = self.make_zotero_snapshot(
+            self.network_id, [old_a, old_b], collection_version=1
+        )
+        first_inventory = first_inventory.replace(
+            self.root / "lineage-conflict-first-inventory.json"
+        )
+        first_semantic = self.make_zotero_semantic_snapshot(
+            first_inventory,
+            {
+                "PARENTA1": "<div>A</div>",
+                "PARENTB2": "<div>B</div>",
+            },
+            suffix="lineage-conflict-first",
+        )
+        self.init_network_with_snapshot(
+            self.network_id, first_inventory, sha256(first_inventory)
+        )
+        first = invoke(
+            self.root,
+            self.network_id,
+            [
+                "ingest-zotero-snapshot",
+                "--snapshot",
+                str(first_inventory),
+                "--semantic-snapshot",
+                str(first_semantic),
+            ],
+        )
+        self.assertEqual(first[0], 0, first[2])
+        network_dir = self.root / "networks" / self.network_id
+        watched = [
+            network_dir / "network.json",
+            network_dir / "sources.jsonl",
+            network_dir / "events.jsonl",
+        ]
+        before = {path: path.read_bytes() for path in watched}
+
+        replacement_a = dict(old_a)
+        replacement_a["key"] = "PARENTB2"
+        second_inventory, _ = self.make_zotero_snapshot(
+            self.network_id, [replacement_a], collection_version=2
+        )
+        second_semantic = self.make_zotero_semantic_snapshot(
+            second_inventory,
+            {"PARENTB2": "<div>A</div>"},
+            suffix="lineage-conflict-second",
+        )
+        rejected = invoke(
+            self.root,
+            self.network_id,
+            [
+                "ingest-zotero-snapshot",
+                "--snapshot",
+                str(second_inventory),
+                "--semantic-snapshot",
+                str(second_semantic),
+                "--allow-refresh",
+            ],
+        )
+        self.assertEqual(rejected[0], 1)
+        self.assertIn("predecessor conflict", rejected[2])
+        self.assertEqual({path: path.read_bytes() for path in watched}, before)
+
+    def test_note_aware_rejects_non_injective_predecessor_match(self):
+        old_parent = {
+            "key": "SPLIT001",
+            "version": 1,
+            "item_type": "journalArticle",
+            "title": "Original lineage",
+            "date": "2026",
+            "DOI": "10.1000/original-lineage",
+            "ISBN": "",
+            "creators": [],
+            "children": [
+                {
+                    "key": "SPLNOTE1",
+                    "version": 1,
+                    "item_type": "note",
+                    "availability": "present",
+                    "schema_version": "9",
+                }
+            ],
+        }
+        first_inventory, _ = self.make_zotero_snapshot(
+            self.network_id, [old_parent], collection_version=1
+        )
+        first_inventory = first_inventory.replace(
+            self.root / "split-lineage-first-inventory.json"
+        )
+        first_semantic = self.make_zotero_semantic_snapshot(
+            first_inventory,
+            {"SPLIT001": "<div>original</div>"},
+            suffix="split-lineage-first",
+        )
+        self.init_network_with_snapshot(
+            self.network_id, first_inventory, sha256(first_inventory)
+        )
+        first = invoke(
+            self.root,
+            self.network_id,
+            [
+                "ingest-zotero-snapshot",
+                "--snapshot",
+                str(first_inventory),
+                "--semantic-snapshot",
+                str(first_semantic),
+            ],
+        )
+        self.assertEqual(first[0], 0, first[2])
+        network_dir = self.root / "networks" / self.network_id
+        watched = [
+            network_dir / "network.json",
+            network_dir / "sources.jsonl",
+            network_dir / "events.jsonl",
+        ]
+        before = {path: path.read_bytes() for path in watched}
+
+        key_match = dict(old_parent)
+        key_match["DOI"] = "10.1000/different-lineage"
+        identity_match = dict(old_parent)
+        identity_match["key"] = "SPLIT002"
+        identity_match["children"] = [
+            {**old_parent["children"][0], "key": "SPLNOTE2"}
+        ]
+        second_inventory, _ = self.make_zotero_snapshot(
+            self.network_id,
+            [key_match, identity_match],
+            collection_version=2,
+        )
+        second_semantic = self.make_zotero_semantic_snapshot(
+            second_inventory,
+            {
+                "SPLIT001": "<div>key branch</div>",
+                "SPLIT002": "<div>identity branch</div>",
+            },
+            suffix="split-lineage-second",
+        )
+        rejected = invoke(
+            self.root,
+            self.network_id,
+            [
+                "ingest-zotero-snapshot",
+                "--snapshot",
+                str(second_inventory),
+                "--semantic-snapshot",
+                str(second_semantic),
+                "--allow-refresh",
+            ],
+        )
+        self.assertEqual(rejected[0], 1)
+        self.assertIn("matches multiple current parents", rejected[2])
+        self.assertEqual({path: path.read_bytes() for path in watched}, before)
+
+    def test_note_aware_empty_legacy_migration_requires_prior_then_readds(self):
+        parent = {
+            "key": "EMPTYLEG",
+            "version": 1,
+            "item_type": "journalArticle",
+            "title": "Empty legacy migration",
+            "date": "2026",
+            "DOI": "10.1000/empty-legacy",
+            "ISBN": "",
+            "creators": [],
+            "children": [
+                {
+                    "key": "EMPTNOTE",
+                    "version": 1,
+                    "item_type": "note",
+                    "availability": "present",
+                    "schema_version": "9",
+                }
+            ],
+        }
+        first_inventory, _ = self.make_zotero_snapshot(
+            self.network_id, [parent], collection_version=1
+        )
+        first_inventory = first_inventory.replace(
+            self.root / "empty-legacy-first-inventory.json"
+        )
+        self.init_network_with_snapshot(
+            self.network_id, first_inventory, sha256(first_inventory)
+        )
+        first = invoke(
+            self.root,
+            self.network_id,
+            ["ingest-zotero-snapshot", "--snapshot", str(first_inventory)],
+        )
+        self.assertEqual(first[0], 0, first[2])
+        old_source_id = self.load_ledger(self.network_id, "sources")[0][
+            "source_id"
+        ]
+
+        empty_inventory, _ = self.make_zotero_snapshot(
+            self.network_id, [], collection_version=2
+        )
+        empty_inventory = empty_inventory.replace(
+            self.root / "empty-legacy-empty-inventory.json"
+        )
+        removed = invoke(
+            self.root,
+            self.network_id,
+            [
+                "ingest-zotero-snapshot",
+                "--snapshot",
+                str(empty_inventory),
+                "--allow-refresh",
+            ],
+        )
+        self.assertEqual(removed[0], 0, removed[2])
+        self.assertEqual(json.loads(removed[1])["removed"], 1)
+        prior_empty_semantic = self.make_zotero_semantic_snapshot(
+            empty_inventory, {}, suffix="empty-legacy-prior"
+        )
+        current_empty_semantic = self.make_zotero_semantic_snapshot(
+            empty_inventory, {}, suffix="empty-legacy-current"
+        )
+        missing_prior = invoke(
+            self.root,
+            self.network_id,
+            [
+                "ingest-zotero-snapshot",
+                "--snapshot",
+                str(empty_inventory),
+                "--semantic-snapshot",
+                str(current_empty_semantic),
+                "--allow-refresh",
+            ],
+        )
+        self.assertEqual(missing_prior[0], 1)
+        self.assertIn("requires --prior-semantic-snapshot", missing_prior[2])
+        migrated = invoke(
+            self.root,
+            self.network_id,
+            [
+                "ingest-zotero-snapshot",
+                "--snapshot",
+                str(empty_inventory),
+                "--semantic-snapshot",
+                str(current_empty_semantic),
+                "--prior-semantic-snapshot",
+                str(prior_empty_semantic),
+                "--allow-refresh",
+            ],
+        )
+        self.assertEqual(migrated[0], 0, migrated[2])
+        self.assertEqual(json.loads(migrated[1])["total"], 0)
+        state = json.loads(
+            (self.root / "networks" / self.network_id / "network.json").read_text()
+        )
+        self.assertEqual(state["corpus_snapshot_current_source_revision_guards"], [])
+
+        readd_inventory, _ = self.make_zotero_snapshot(
+            self.network_id, [parent], collection_version=3
+        )
+        readd_semantic = self.make_zotero_semantic_snapshot(
+            readd_inventory,
+            {"EMPTYLEG": "<div>reviewed after re-add</div>"},
+            suffix="empty-legacy-readd",
+        )
+        readded = invoke(
+            self.root,
+            self.network_id,
+            [
+                "ingest-zotero-snapshot",
+                "--snapshot",
+                str(readd_inventory),
+                "--semantic-snapshot",
+                str(readd_semantic),
+                "--allow-refresh",
+            ],
+        )
+        self.assertEqual(readded[0], 0, readded[2])
+        receipt = json.loads(readded[1])
+        self.assertEqual(receipt["added"], 1)
+        self.assertEqual(receipt["changed"], 0)
+        rows = self.load_ledger(self.network_id, "sources")
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[1]["supersedes"], old_source_id)
+        validation = invoke(self.root, self.network_id, ["validate"])
+        self.assertEqual(validation[0], 0, validation[2])
+
+    def test_note_aware_legacy_migration_requires_bound_prior_semantic(self):
+        parent = {
+            "key": "PRIOR001",
+            "version": 1,
+            "item_type": "journalArticle",
+            "title": "Prior binding",
+            "date": "2026",
+            "DOI": "10.1000/prior-binding",
+            "ISBN": "",
+            "creators": [],
+            "children": [
+                {
+                    "key": "NOTE0001",
+                    "version": 1,
+                    "item_type": "note",
+                    "availability": "present",
+                    "schema_version": "9",
+                }
+            ],
+        }
+        prior_inventory, _ = self.make_zotero_snapshot(
+            self.network_id, [parent], collection_version=1
+        )
+        prior_inventory = prior_inventory.replace(
+            self.root / "legacy-binding-prior-inventory.json"
+        )
+        self.init_network_with_snapshot(
+            self.network_id, prior_inventory, sha256(prior_inventory)
+        )
+        self.assertEqual(
+            invoke(
+                self.root,
+                self.network_id,
+                ["ingest-zotero-snapshot", "--snapshot", str(prior_inventory)],
+            )[0],
+            0,
+        )
+        current_inventory, _ = self.make_zotero_snapshot(
+            self.network_id, [parent], collection_version=2
+        )
+        current_semantic = self.make_zotero_semantic_snapshot(
+            current_inventory,
+            {"PRIOR001": "<div>current</div>"},
+            suffix="requires-prior",
+        )
+        missing = invoke(
+            self.root,
+            self.network_id,
+            [
+                "ingest-zotero-snapshot",
+                "--snapshot",
+                str(current_inventory),
+                "--semantic-snapshot",
+                str(current_semantic),
+                "--allow-refresh",
+            ],
+        )
+        self.assertEqual(missing[0], 1)
+        self.assertIn("requires --prior-semantic-snapshot", missing[2])
+
+        unrelated_inventory, _ = self.make_zotero_snapshot(
+            "unrelated", [parent], collection_version=99
+        )
+        unrelated_semantic = self.make_zotero_semantic_snapshot(
+            unrelated_inventory,
+            {"PRIOR001": "<div>prior</div>"},
+            suffix="unrelated-prior",
+        )
+        mismatch = invoke(
+            self.root,
+            self.network_id,
+            [
+                "ingest-zotero-snapshot",
+                "--snapshot",
+                str(current_inventory),
+                "--semantic-snapshot",
+                str(current_semantic),
+                "--prior-semantic-snapshot",
+                str(unrelated_semantic),
+                "--allow-refresh",
+            ],
+        )
+        self.assertEqual(mismatch[0], 1)
+        self.assertIn("prior semantic snapshot invalid", mismatch[2])
+
+    def test_note_aware_ingest_rejects_missing_or_multiple_notes(self):
+        base = {
+            "key": "NOTECARD",
+            "version": 1,
+            "item_type": "journalArticle",
+            "title": "Note cardinality",
+            "date": "2026",
+            "DOI": "10.1000/note-cardinality",
+            "ISBN": "",
+            "creators": [],
+            "children": [],
+        }
+        for count in (0, 2):
+            network_id = f"note-cardinality-{count}"
+            parent = dict(base)
+            parent["children"] = [
+                {
+                    "key": f"NOTE000{index}",
+                    "version": 1,
+                    "item_type": "note",
+                    "availability": "present",
+                    "schema_version": "9",
+                }
+                for index in range(count)
+            ]
+            inventory, _ = self.make_zotero_snapshot(
+                network_id, [parent], collection_version=1
+            )
+            semantic = self.make_zotero_semantic_snapshot(
+                inventory,
+                {"NOTECARD": "<div>note</div>"},
+                suffix=f"cardinality-{count}",
+            )
+            self.init_network_with_snapshot(
+                network_id, inventory, sha256(inventory)
+            )
+            result = invoke(
+                self.root,
+                network_id,
+                [
+                    "ingest-zotero-snapshot",
+                    "--snapshot",
+                    str(inventory),
+                    "--semantic-snapshot",
+                    str(semantic),
+                ],
+            )
+            self.assertEqual(result[0], 1)
+            self.assertIn("exactly one note child", result[2])
+
+    def test_note_aware_idempotent_ingest_does_not_replace_files(self):
+        parent = {
+            "key": "NOOP0001",
+            "version": 1,
+            "item_type": "journalArticle",
+            "title": "No-op guarded source",
+            "date": "2026",
+            "DOI": "10.1000/noop-guard",
+            "ISBN": "",
+            "creators": [],
+            "children": [
+                {
+                    "key": "NOOPNOTE",
+                    "version": 1,
+                    "item_type": "note",
+                    "availability": "present",
+                    "schema_version": "9",
+                }
+            ],
+        }
+        inventory, _ = self.make_zotero_snapshot(
+            self.network_id, [parent], collection_version=1
+        )
+        semantic = self.make_zotero_semantic_snapshot(
+            inventory, {"NOOP0001": "<div>same</div>"}, suffix="noop"
+        )
+        self.init_network_with_snapshot(
+            self.network_id, inventory, sha256(inventory)
+        )
+        command = [
+            "ingest-zotero-snapshot",
+            "--snapshot",
+            str(inventory),
+            "--semantic-snapshot",
+            str(semantic),
+        ]
+        first = invoke(self.root, self.network_id, command)
+        self.assertEqual(first[0], 0, first[2])
+        network_dir = self.root / "networks" / self.network_id
+        watched = [
+            network_dir / "network.json",
+            network_dir / "sources.jsonl",
+            network_dir / "events.jsonl",
+        ]
+        before = {
+            path: (path.read_bytes(), path.stat().st_ino, path.stat().st_mtime_ns)
+            for path in watched
+        }
+        with mock.patch.object(MODULE.os, "replace", wraps=os.replace) as replace:
+            second = invoke(self.root, self.network_id, command)
+        self.assertEqual(second[0], 0, second[2])
+        self.assertEqual(json.loads(second[1])["existing"], 1)
+        replace.assert_not_called()
+        self.assertEqual(
+            {
+                path: (
+                    path.read_bytes(),
+                    path.stat().st_ino,
+                    path.stat().st_mtime_ns,
+                )
+                for path in watched
+            },
+            before,
+        )
+        rebound_semantic = self.root / "noop-rebound-semantic.json"
+        rebound_semantic.write_bytes(semantic.read_bytes())
+        rebound_before = {
+            path: (path.read_bytes(), path.stat().st_ino, path.stat().st_mtime_ns)
+            for path in watched
+        }
+        rebound = invoke(
+            self.root,
+            self.network_id,
+            [
+                "ingest-zotero-snapshot",
+                "--snapshot",
+                str(inventory),
+                "--semantic-snapshot",
+                str(rebound_semantic),
+            ],
+        )
+        self.assertEqual(rebound[0], 1)
+        self.assertIn("semantic snapshot binding mismatch", rebound[2])
+        self.assertEqual(
+            {
+                path: (
+                    path.read_bytes(),
+                    path.stat().st_ino,
+                    path.stat().st_mtime_ns,
+                )
+                for path in watched
+            },
+            rebound_before,
+        )
 
     def test_zotero_refresh_does_not_supersede_same_identity_method_source(self):
+        # Parent-only compatibility remains covered here; note-aware revisions
+        # use the same role-scoped predecessor lookup.
         baseline_parent = {
             "key": "BASE0001",
             "version": 1,

@@ -266,6 +266,57 @@ def build_reviewed(draft: dict | None = None, sidecar: Path | bytes | None = Non
 
 
 class MetadataRepairContractTests(unittest.TestCase):
+    def test_cross_serializer_fixture_has_exact_diagnosis_and_one_canonical_projection(self) -> None:
+        fixture_path = (
+            Path(__file__).resolve().parents[2]
+            / "zotero-declarative-bridge"
+            / "scripts"
+            / "fixtures"
+            / "metadata_cross_serializer_attachment_v1.json"
+        )
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            fixture["diagnosis"]["local_api_only_fields"],
+            ["md5", "mtime"],
+        )
+        projections = {}
+        for phase in ("pre", "post"):
+            local_api = fixture[phase]["local_api"]
+            item_to_json = fixture[phase]["item_to_json"]
+            self.assertEqual(
+                sorted(set(local_api) - set(item_to_json)),
+                fixture["diagnosis"]["local_api_only_fields"],
+            )
+            local_projection = contract.serializer_attachment_projection(
+                local_api,
+                content_md5=fixture["content_md5"],
+            )
+            runtime_projection = contract.serializer_attachment_projection(
+                item_to_json,
+                content_md5=fixture["content_md5"],
+            )
+            self.assertEqual(local_projection, fixture[phase]["expected_projection"])
+            self.assertEqual(runtime_projection, fixture[phase]["expected_projection"])
+            projections[phase] = contract.serializer_attachment_stable_data(
+                item_to_json,
+                content_md5=fixture["content_md5"],
+            )
+        self.assertEqual(projections["pre"], projections["post"])
+
+    def test_projection_contract_is_explicit_and_defaults_parent_and_note_fields(self) -> None:
+        self.assertEqual(
+            contract.SERIALIZER_PROJECTION_CONTRACT["schema"],
+            contract.SERIALIZER_PROJECTION_SCHEMA,
+        )
+        parent, children = synthetic_v2_state()
+        projected_parent = contract.serializer_parent_projection(parent)
+        projected_note = contract.serializer_note_projection(children[0]["data"])
+        self.assertEqual(projected_parent["fields"]["PMID"], "")
+        self.assertEqual(projected_parent["fields"]["citationKey"], "")
+        self.assertEqual(projected_note["date_added"], "")
+        with self.assertRaisesRegex(contract.ContractError, "unknown fields"):
+            contract.serializer_parent_projection({**parent, "futureField": "unsafe"})
+
     def test_builds_and_validates_sealed_fixed_profile_source(self) -> None:
         reviewed = build_reviewed(synthetic_draft())
         validated = contract.validate_reviewed_source(reviewed)
@@ -339,6 +390,17 @@ class MetadataRepairContractTests(unittest.TestCase):
                         expected, observed, allow_equivalent=True
                     )
 
+        for field in ("tags", "collections"):
+            with self.subTest(attachment_member_field=field):
+                parent, children = synthetic_v2_state(post_commit=True)
+                value = {"tag": "new-member"} if field == "tags" else "EXTRA001"
+                children[1]["data"][field].append(value)
+                observed = contract.serializer_guard_from_records(parent, children)
+                with self.assertRaisesRegex(contract.ContractError, "stable_data_sha256"):
+                    contract.classify_serializer_guard(
+                        expected, observed, allow_equivalent=True
+                    )
+
         parent, children = synthetic_v2_state(post_commit=True)
         children[1]["content_sha256"] = SHA_A
         with self.assertRaisesRegex(contract.ContractError, "content_sha256"):
@@ -360,6 +422,15 @@ class MetadataRepairContractTests(unittest.TestCase):
         parent, children = synthetic_v2_state(post_commit=True)
         parent["tags"].append({"tag": "new-member"})
         with self.assertRaisesRegex(contract.ContractError, "tags member drift"):
+            contract.classify_serializer_guard(
+                expected,
+                contract.serializer_guard_from_records(parent, children),
+                allow_equivalent=True,
+            )
+
+        parent, children = synthetic_v2_state(post_commit=True)
+        parent["collections"].append("EXTRA001")
+        with self.assertRaisesRegex(contract.ContractError, "collections member drift"):
             contract.classify_serializer_guard(
                 expected,
                 contract.serializer_guard_from_records(parent, children),

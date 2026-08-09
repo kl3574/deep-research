@@ -151,6 +151,7 @@ def compile_v2_source(
             "storage_path": storage_path,
             "content_sha256": kwargs["expected_content_sha256"],
             "size_bytes": kwargs["expected_size_bytes"],
+            "content_md5": attachment_record["data"]["md5"],
         }
 
     with tempfile.TemporaryDirectory() as directory:
@@ -259,14 +260,83 @@ class MetadataRepairBridgeTests(unittest.TestCase):
                 "build_opener",
                 return_value=opener,
             ):
-                evidence = bridge.local_api_attachment_file_evidence(
-                    999999,
-                    "PDF00001",
-                    expected_size_bytes=len(payload),
-                    expected_content_sha256=expected_sha,
-                )
+                real_open = bridge.os.open
+                real_read = bridge.os.read
+                real_sha256 = bridge.hashlib.sha256
+                real_md5 = bridge.hashlib.md5
+                open_descriptors = []
+                read_descriptors = []
+                read_blocks = []
+                digest_updates = {"sha256": [], "md5": []}
+                digest_constructors = {"sha256": 0, "md5": 0}
+
+                def counted_open(*args, **kwargs):
+                    descriptor = real_open(*args, **kwargs)
+                    open_descriptors.append(descriptor)
+                    return descriptor
+
+                def counted_read(descriptor, size):
+                    read_descriptors.append(descriptor)
+                    block = real_read(descriptor, size)
+                    read_blocks.append(block)
+                    return block
+
+                class DigestSpy:
+                    def __init__(self, algorithm, digest):
+                        self.algorithm = algorithm
+                        self.digest = digest
+
+                    def update(self, block):
+                        digest_updates[self.algorithm].append(block)
+                        return self.digest.update(block)
+
+                    def hexdigest(self):
+                        return self.digest.hexdigest()
+
+                def sha256_spy(*args, **kwargs):
+                    digest_constructors["sha256"] += 1
+                    return DigestSpy("sha256", real_sha256(*args, **kwargs))
+
+                def md5_spy(*args, **kwargs):
+                    digest_constructors["md5"] += 1
+                    return DigestSpy("md5", real_md5(*args, **kwargs))
+
+                with mock.patch.object(
+                    bridge.os,
+                    "open",
+                    side_effect=counted_open,
+                ), mock.patch.object(
+                    bridge.os,
+                    "read",
+                    side_effect=counted_read,
+                ), mock.patch.object(
+                    bridge.hashlib,
+                    "sha256",
+                    side_effect=sha256_spy,
+                ), mock.patch.object(
+                    bridge.hashlib,
+                    "md5",
+                    side_effect=md5_spy,
+                ):
+                    evidence = bridge.local_api_attachment_file_evidence(
+                        999999,
+                        "PDF00001",
+                        expected_size_bytes=len(payload),
+                        expected_content_sha256=expected_sha,
+                    )
                 self.assertEqual(evidence["content_sha256"], expected_sha)
                 self.assertEqual(evidence["size_bytes"], len(payload))
+                self.assertEqual(
+                    evidence["content_md5"],
+                    hashlib.md5(payload, usedforsecurity=False).hexdigest(),
+                )
+                self.assertEqual(len(open_descriptors), 1)
+                self.assertEqual(read_descriptors, open_descriptors * 2)
+                self.assertEqual(read_blocks, [payload, b""])
+                self.assertEqual(digest_constructors, {"sha256": 1, "md5": 1})
+                self.assertEqual(digest_updates, {"sha256": [payload], "md5": [payload]})
+                self.assertIs(digest_updates["sha256"][0], read_blocks[0])
+                self.assertIs(digest_updates["md5"][0], read_blocks[0])
                 self.assertTrue(opener.request_url.endswith("/items/PDF00001/file"))
 
                 with self.assertRaisesRegex(bridge.BridgeError, "size drift"):
@@ -362,6 +432,7 @@ class MetadataRepairBridgeTests(unittest.TestCase):
                         "content_sha256"
                     ],
                     "size_bytes": source["entry"]["children"][1]["size_bytes"],
+                    "content_md5": child_records[1]["data"]["md5"],
                 },
             ), mock.patch.object(
                 bridge, "live_library_top_items", return_value=[parent_record]

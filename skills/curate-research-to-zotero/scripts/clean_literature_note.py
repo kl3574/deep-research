@@ -113,6 +113,15 @@ class CleanNoteParser(HTMLParser):
         clean, duplicate = _attrs_dict(attrs)
         if duplicate:
             self.errors.append(f"CN-02: duplicate attribute on <{tag}>")
+        root_schema_attributes = not self.stack and tag == "div"
+        for key in clean:
+            if key.startswith("data-") and not (
+                root_schema_attributes and key in ROOT_ATTRIBUTES
+            ):
+                self.errors.append(
+                    f"CN-04: custom data attribute {key} is not allowed; "
+                    "only root schema attributes may be preserved"
+                )
         if tag in DANGEROUS_TAGS:
             self.errors.append(f"CN-03: forbidden element <{tag}>")
         for key, value in clean.items():
@@ -229,6 +238,33 @@ METADATA_LINE_FIELD_RE = re.compile(
     rf"(?im)^\s*(?:[-*]\s*)?[\"']?(?:{METADATA_FIELD_NAMES})[\"']?"
     r"\s*(?::|=)\s*\S"
 )
+CURATION_FIELD_NAMES = (
+    r"target[ _-]?(?:collection|library|path)|"
+    r"collection[ _-]?(?:id|key|name|path)|"
+    r"library[ _-]?(?:id|key|name|path)|"
+    r"collection|library|target|path"
+)
+CURATION_HTML_ATTRIBUTE_RE = re.compile(
+    rf"(?is)<[^>]*\sdata[-_:](?:{CURATION_FIELD_NAMES})\s*="
+)
+CURATION_STRUCTURED_FIELD_RE = re.compile(
+    rf"(?im)(?:^|[{{\[,]\s*)[\"']?(?:{CURATION_FIELD_NAMES})[\"']?"
+    r"\s*(?::|=)\s*\S"
+)
+CURATION_LINE_FIELD_RE = re.compile(
+    rf"(?im)^\s*(?:[-*]\s*)?[\"']?(?:{CURATION_FIELD_NAMES})[\"']?"
+    r"\s*(?::|=)\s*\S"
+)
+CURATION_CHINESE_PREFIX_RE = re.compile(
+    r"(?im)^\s*(?:[-*]\s*)?(?:"
+    r"目标集合|目标文库|目标资料库|目标库|目标路径|集合路径|"
+    r"文库路径|资料库路径|库路径|策展路径|Zotero\s*(?:集合|文库)"
+    r")[：:]\s*\S"
+)
+CURATION_HEADING_RE = re.compile(
+    rf"(?i)(?:{CURATION_FIELD_NAMES}|target\s+collection|"
+    r"目标集合|目标文库|目标资料库|目标路径|集合路径|文库路径|策展路径)"
+)
 HTML_BLOCK_BREAK_RE = re.compile(
     r"(?is)</?(?:p|div|li|tr|td|th|h[1-6]|pre|blockquote|br)\b[^>]*>"
 )
@@ -260,6 +296,11 @@ def _operational_metadata_errors(note_html: str) -> list[str]:
             "operational metadata HTML attribute is not allowed in a clean "
             "literature note; store workflow state in a sidecar"
         )
+    if CURATION_HTML_ATTRIBUTE_RE.search(decoded):
+        errors.append(
+            "CN-10: curation target HTML attribute is not allowed in a clean "
+            "literature note; store collection routing in a sidecar"
+        )
 
     visible = HTML_MATH_NODE_RE.sub("", decoded)
     visible = HTML_BLOCK_BREAK_RE.sub("\n", visible)
@@ -271,6 +312,16 @@ def _operational_metadata_errors(note_html: str) -> list[str]:
             "operational metadata/schema field is not allowed in a clean "
             "literature note; store workflow state in a sidecar"
         )
+    if (
+        CURATION_STRUCTURED_FIELD_RE.search(visible)
+        or CURATION_LINE_FIELD_RE.search(visible)
+        or CURATION_CHINESE_PREFIX_RE.search(visible)
+    ):
+        errors.append(
+            "CN-10: curation collection/library/target/path field is not "
+            "allowed in a clean literature note; store collection routing "
+            "in a sidecar"
+        )
 
     for heading_html in HTML_HEADING_RE.findall(decoded):
         heading = HTML_TAG_RE.sub("", heading_html).strip()
@@ -280,6 +331,12 @@ def _operational_metadata_errors(note_html: str) -> list[str]:
             errors.append(
                 "operational metadata/schema heading is not allowed in a clean "
                 "literature note; store workflow state in a sidecar"
+            )
+            break
+        if CURATION_HEADING_RE.fullmatch(heading) is not None:
+            errors.append(
+                "CN-10: curation target heading is not allowed in a clean "
+                "literature note; store collection routing in a sidecar"
             )
             break
     return errors

@@ -1023,6 +1023,7 @@ def local_api_attachment_file_evidence(
         ):
             raise BridgeError("Local API attachment file identity is invalid")
         digest = hashlib.sha256()
+        md5_digest = hashlib.md5(usedforsecurity=False)
         size_bytes = 0
         magic = b""
         while True:
@@ -1035,6 +1036,7 @@ def local_api_attachment_file_evidence(
             if size_bytes > MAX_METADATA_ATTACHMENT_BYTES:
                 raise BridgeError("Local API attachment file is too large")
             digest.update(block)
+            md5_digest.update(block)
         after = os.fstat(descriptor)
     except OSError as exc:
         raise BridgeError("Local API attachment file is unreadable") from exc
@@ -1062,6 +1064,7 @@ def local_api_attachment_file_evidence(
         "storage_path": str(candidate),
         "size_bytes": size_bytes,
         "content_sha256": observed_content_sha256,
+        "content_md5": md5_digest.hexdigest(),
     }
 
 
@@ -1320,6 +1323,7 @@ def metadata_serializer_records_from_local_api(
                 "storage_path": evidence["storage_path"],
                 "content_sha256": evidence["content_sha256"],
                 "size_bytes": evidence["size_bytes"],
+                "content_md5": evidence["content_md5"],
             }
         )
     projected.sort(key=lambda child: child["key"])

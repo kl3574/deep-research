@@ -21,10 +21,11 @@ Keep bibliographic review separate from Zotero execution.
    `ZoteroReviewedParentMetadataRepair/v2` with
    [metadata_repair_contract.py](scripts/metadata_repair_contract.py), passing
    that `0600` sidecar through `--source-evidence-sidecar`.
-6. Bind the v2 `serializer_guard` from the exact pre-state: parent stable
-   non-profile data, raw and set-normalized tag/collection hashes, exact note
-   records, and attachment raw/stable/file/path hashes. A PDF-only check is not
-   sufficient.
+6. Bind the v2 `serializer_guard` from the exact pre-state through
+   `ZoteroMetadataCanonicalProjection/v1`: parent stable non-profile data, raw
+   and set-normalized tag/collection hashes, exact note projections, and
+   attachment raw/stable/file/path hashes. MD5 must come from the attachment
+   bytes rather than serializer presence. A PDF-only check is not sufficient.
 7. Route the sealed source to `$zotero-declarative-bridge` command
    `compile-reviewed-metadata-repair`. Preview, explicit apply, and exact
    readback remain bridge responsibilities.

@@ -125,6 +125,14 @@ two consecutive qualifying rounds in the complete plan, with disjoint
 request/query IDs and pre-reviewed orthogonal axes, can support bounded
 `pragmatic_saturation`.
 
+If an already closed partial-provider round must follow a newer RKN authority
+whose only changes are reviewed Zotero-corpus revision guards, never reseal the
+plan, search artifacts, screening, review, or closure. Use the immutable
+`CountercheckAuthorityBinding/v1` overlay and `rebind-authority` procedure in
+[countercheck-closure.md](references/countercheck-closure.md); it recursively
+proves an unchanged scientific core and cannot advance a streak or upgrade any
+stopping/completeness claim.
+
 Lead with the bounded answer, then coverage, map/deep branches, aligned route
 comparison, evidence/conflicts, gaps, limits, and the next highest-information
 check. `$curate-research-to-zotero` alone owns approved acquisition, writes, and

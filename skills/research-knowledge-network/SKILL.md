@@ -13,6 +13,9 @@ Persist reviewed research state without changing what the evidence says.
    [references/gap-policy.md](references/gap-policy.md).
 2. Use one explicit network root and ID. Validate every reviewed source, entity,
    claim, evidence record, relation, and gap before appending it.
+   For note-aware Zotero ingest, pair the inventory with its semantic snapshot;
+   a one-time legacy migration also requires the prior semantic snapshot bound
+   to the currently authoritative inventory.
 3. Preserve scope, locator, source version, polarity, independence group,
    assumptions, exclusions, and defeaters. Never upgrade evidence strength.
 4. Run `derive-gaps`, `validate`, and `status` after substantive changes. Resolve

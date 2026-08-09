@@ -44,21 +44,93 @@ SHA_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 DOI_RE = re.compile(r"^10\.\d{4,9}/\S+$")
 DUPLICATE_TITLE_PREFIX_MIN_CHARS = 20
-SERIALIZER_GUARD_PROFILE = "zotero_managed_storage_equivalence_v1"
-SERIALIZER_PARENT_EXCLUDED_FIELDS = {
-    "DOI",
-    "collections",
-    "creators",
-    "date",
-    "dateModified",
+SERIALIZER_GUARD_PROFILE = "zotero_managed_storage_equivalence_v2"
+SERIALIZER_PROJECTION_SCHEMA = "ZoteroMetadataCanonicalProjection/v1"
+SERIALIZER_PARENT_TEXT_FIELDS = (
+    "title",
+    "abstractNote",
+    "publicationTitle",
+    "volume",
     "issue",
     "pages",
-    "publicationTitle",
-    "tags",
-    "version",
-    "volume",
+    "date",
+    "series",
+    "seriesTitle",
+    "seriesText",
+    "journalAbbreviation",
+    "language",
+    "DOI",
+    "ISSN",
+    "PMID",
+    "PMCID",
+    "shortTitle",
+    "url",
+    "accessDate",
+    "archive",
+    "archiveLocation",
+    "libraryCatalog",
+    "callNumber",
+    "rights",
+    "extra",
+    "citationKey",
+    "partNumber",
+    "partTitle",
+    "place",
+    "publisher",
+    "section",
+)
+SERIALIZER_NOTE_TEXT_FIELDS = ("parentItem", "note", "dateAdded", "dateModified")
+SERIALIZER_ATTACHMENT_TEXT_FIELDS = (
+    "parentItem",
+    "title",
+    "url",
+    "accessDate",
+    "linkMode",
+    "contentType",
+    "charset",
+    "path",
+    "filename",
+    "note",
+    "dateAdded",
+    "dateModified",
+)
+SERIALIZER_PROJECTION_CONTRACT = {
+    "schema": SERIALIZER_PROJECTION_SCHEMA,
+    "defaults": {"text": "", "list": [], "object": {}, "boolean": False, "scalar": None},
+    "parent": {
+        "item_type": "journalArticle",
+        "text_fields": list(SERIALIZER_PARENT_TEXT_FIELDS),
+        "list_fields": ["creators", "tags", "collections"],
+        "object_fields": ["relations"],
+        "boolean_fields": ["deleted", "inPublications"],
+        "stable_excluded": [
+            "version",
+            "dateModified",
+            "tags",
+            "collections",
+            *PROFILE_FIELDS,
+        ],
+    },
+    "note": {
+        "item_type": "note",
+        "text_fields": list(SERIALIZER_NOTE_TEXT_FIELDS),
+        "list_fields": ["tags", "collections"],
+        "object_fields": ["relations"],
+        "boolean_fields": ["deleted"],
+        "exact": True,
+    },
+    "attachment": {
+        "item_type": "attachment",
+        "text_fields": list(SERIALIZER_ATTACHMENT_TEXT_FIELDS),
+        "scalar_fields": ["lastRead"],
+        "list_fields": ["tags", "collections"],
+        "object_fields": ["relations"],
+        "boolean_fields": ["deleted"],
+        "supplemental_fields": ["content_md5"],
+        "serializer_only_fields": ["md5", "mtime"],
+        "stable_excluded": ["version", "filename"],
+    },
 }
-SERIALIZER_ATTACHMENT_ALLOWED_FIELDS = {"filename", "version"}
 
 
 class ContractError(ValueError):
@@ -275,23 +347,242 @@ def _sorted_serializer_values(values: Any, label: str) -> list[Any]:
     return sorted(copy.deepcopy(values), key=canonical_bytes)
 
 
-def serializer_parent_stable_data(data: Any) -> dict[str, Any]:
+def _serializer_known_fields(data: dict[str, Any], allowed: set[str], label: str) -> None:
+    unknown = sorted(set(data) - allowed)
+    if unknown:
+        raise ContractError(f"{label} contains unknown fields: {', '.join(unknown)}")
+
+
+def _serializer_text(data: dict[str, Any], field: str, label: str) -> str:
+    value = data.get(field, "")
+    if value is None or value is False:
+        value = ""
+    return text(value, f"{label}.{field}", nonempty=False, limit=65_536)
+
+
+def _serializer_boolean(data: dict[str, Any], field: str, label: str) -> bool:
+    value = data.get(field, False)
+    if not isinstance(value, bool):
+        raise ContractError(f"{label}.{field} must be boolean")
+    return value
+
+
+def _serializer_tags(data: dict[str, Any], label: str) -> list[dict[str, Any]]:
+    values = data.get("tags", [])
+    if not isinstance(values, list):
+        raise ContractError(f"{label}.tags must be an array")
+    result: list[dict[str, Any]] = []
+    for index, value in enumerate(values):
+        if not isinstance(value, dict) or set(value) - {"tag", "type"} or "tag" not in value:
+            raise ContractError(f"{label}.tags[{index}] is invalid")
+        tag_type = value.get("type", 0)
+        if not isinstance(tag_type, int) or isinstance(tag_type, bool) or tag_type < 0:
+            raise ContractError(f"{label}.tags[{index}].type is invalid")
+        result.append(
+            {
+                "tag": text(
+                    value["tag"],
+                    f"{label}.tags[{index}].tag",
+                    nonempty=True,
+                    limit=16_384,
+                ),
+                "type": tag_type,
+            }
+        )
+    return result
+
+
+def _serializer_collections(data: dict[str, Any], label: str) -> list[str]:
+    values = data.get("collections", [])
+    if not isinstance(values, list):
+        raise ContractError(f"{label}.collections must be an array")
+    result = [item_key(value, f"{label}.collections[{index}]") for index, value in enumerate(values)]
+    if len(result) != len(set(result)):
+        raise ContractError(f"{label}.collections contains duplicates")
+    return result
+
+
+def _serializer_relations(data: dict[str, Any], label: str) -> dict[str, list[str]]:
+    values = data.get("relations", {})
+    if not isinstance(values, dict):
+        raise ContractError(f"{label}.relations must be an object")
+    result: dict[str, list[str]] = {}
+    for predicate, raw_members in values.items():
+        predicate = text(predicate, f"{label}.relations predicate", nonempty=True, limit=16_384)
+        members = [raw_members] if isinstance(raw_members, str) else raw_members
+        if not isinstance(members, list) or any(not isinstance(member, str) for member in members):
+            raise ContractError(f"{label}.relations[{predicate}] is invalid")
+        normalized = sorted(members)
+        if len(normalized) != len(set(normalized)):
+            raise ContractError(f"{label}.relations[{predicate}] contains duplicates")
+        result[predicate] = normalized
+    return result
+
+
+def _serializer_creators(data: dict[str, Any], label: str) -> list[dict[str, str]]:
+    values = data.get("creators", [])
+    if not isinstance(values, list):
+        raise ContractError(f"{label}.creators must be an array")
+    result: list[dict[str, str]] = []
+    for index, value in enumerate(values):
+        creator_label = f"{label}.creators[{index}]"
+        if not isinstance(value, dict) or set(value) - {"creatorType", "firstName", "lastName", "name"}:
+            raise ContractError(f"{creator_label} is invalid")
+        result.append(
+            {
+                "creator_type": text(
+                    value.get("creatorType"),
+                    f"{creator_label}.creatorType",
+                    nonempty=True,
+                    limit=4096,
+                ),
+                "first_name": _serializer_text(value, "firstName", creator_label),
+                "last_name": _serializer_text(value, "lastName", creator_label),
+                "name": _serializer_text(value, "name", creator_label),
+            }
+        )
+    return result
+
+
+def serializer_parent_projection(data: Any) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ContractError("serializer parent data must be an object")
+    allowed = {
+        "key", "version", "itemType", "creators", "tags", "collections", "relations",
+        "dateAdded", "dateModified", "deleted", "inPublications", *SERIALIZER_PARENT_TEXT_FIELDS,
+    }
+    _serializer_known_fields(data, allowed, "serializer parent data")
+    if data.get("itemType") != "journalArticle":
+        raise ContractError("serializer parent must be journalArticle")
     return {
-        key: copy.deepcopy(value)
-        for key, value in data.items()
-        if key not in SERIALIZER_PARENT_EXCLUDED_FIELDS
+        "key": item_key(data.get("key"), "serializer parent data.key"),
+        "version": positive_int(data.get("version"), "serializer parent data.version"),
+        "item_type": "journalArticle",
+        "fields": {
+            field: _serializer_text(data, field, "serializer parent data")
+            for field in SERIALIZER_PARENT_TEXT_FIELDS
+        },
+        "creators": _serializer_creators(data, "serializer parent data"),
+        "tags": _serializer_tags(data, "serializer parent data"),
+        "collections": _serializer_collections(data, "serializer parent data"),
+        "relations": _serializer_relations(data, "serializer parent data"),
+        "date_added": _serializer_text(data, "dateAdded", "serializer parent data"),
+        "date_modified": _serializer_text(data, "dateModified", "serializer parent data"),
+        "deleted": _serializer_boolean(data, "deleted", "serializer parent data"),
+        "in_publications": _serializer_boolean(
+            data, "inPublications", "serializer parent data"
+        ),
     }
 
 
-def serializer_attachment_stable_data(data: Any) -> dict[str, Any]:
+def serializer_note_projection(data: Any) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        raise ContractError("serializer note data must be an object")
+    allowed = {
+        "key", "version", "itemType", "tags", "collections", "relations", "deleted",
+        *SERIALIZER_NOTE_TEXT_FIELDS,
+    }
+    _serializer_known_fields(data, allowed, "serializer note data")
+    if data.get("itemType") != "note":
+        raise ContractError("serializer note must be note")
+    return {
+        "key": item_key(data.get("key"), "serializer note data.key"),
+        "version": positive_int(data.get("version"), "serializer note data.version"),
+        "item_type": "note",
+        "parent_item": _serializer_text(data, "parentItem", "serializer note data"),
+        "note": _serializer_text(data, "note", "serializer note data"),
+        "tags": _serializer_tags(data, "serializer note data"),
+        "collections": _serializer_collections(data, "serializer note data"),
+        "relations": _serializer_relations(data, "serializer note data"),
+        "date_added": _serializer_text(data, "dateAdded", "serializer note data"),
+        "date_modified": _serializer_text(data, "dateModified", "serializer note data"),
+        "deleted": _serializer_boolean(data, "deleted", "serializer note data"),
+    }
+
+
+def serializer_attachment_projection(
+    data: Any,
+    *,
+    content_md5: Any = None,
+) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ContractError("serializer attachment data must be an object")
+    allowed = {
+        "key", "version", "itemType", "tags", "collections", "relations", "deleted",
+        "lastRead", "md5", "mtime", *SERIALIZER_ATTACHMENT_TEXT_FIELDS,
+    }
+    _serializer_known_fields(data, allowed, "serializer attachment data")
+    if data.get("itemType") != "attachment":
+        raise ContractError("serializer attachment must be attachment")
+    raw_md5 = data.get("md5")
+    observed_md5 = content_md5 if content_md5 not in {None, ""} else raw_md5
+    if not isinstance(observed_md5, str) or not re.fullmatch(r"[0-9A-Fa-f]{32}", observed_md5):
+        raise ContractError("serializer attachment content_md5 is invalid")
+    observed_md5 = observed_md5.lower()
+    if raw_md5 not in {None, ""} and (
+        not isinstance(raw_md5, str) or raw_md5.lower() != observed_md5
+    ):
+        raise ContractError("serializer attachment md5 evidence mismatch")
+    mtime = data.get("mtime")
+    if mtime is not None and (not isinstance(mtime, int) or isinstance(mtime, bool) or mtime < 0):
+        raise ContractError("serializer attachment mtime is invalid")
+    last_read = data.get("lastRead")
+    if last_read is not None and (
+        isinstance(last_read, bool) or not isinstance(last_read, (int, str))
+    ):
+        raise ContractError("serializer attachment lastRead is invalid")
+    return {
+        "key": item_key(data.get("key"), "serializer attachment data.key"),
+        "version": positive_int(data.get("version"), "serializer attachment data.version"),
+        "item_type": "attachment",
+        "parent_item": _serializer_text(data, "parentItem", "serializer attachment data"),
+        "title": _serializer_text(data, "title", "serializer attachment data"),
+        "url": _serializer_text(data, "url", "serializer attachment data"),
+        "access_date": _serializer_text(data, "accessDate", "serializer attachment data"),
+        "link_mode": _serializer_text(data, "linkMode", "serializer attachment data"),
+        "content_type": _serializer_text(data, "contentType", "serializer attachment data"),
+        "charset": _serializer_text(data, "charset", "serializer attachment data"),
+        "path": _serializer_text(data, "path", "serializer attachment data"),
+        "filename": _serializer_text(data, "filename", "serializer attachment data"),
+        "note": _serializer_text(data, "note", "serializer attachment data"),
+        "last_read": last_read,
+        "tags": _serializer_tags(data, "serializer attachment data"),
+        "collections": _serializer_collections(data, "serializer attachment data"),
+        "relations": _serializer_relations(data, "serializer attachment data"),
+        "date_added": _serializer_text(data, "dateAdded", "serializer attachment data"),
+        "date_modified": _serializer_text(data, "dateModified", "serializer attachment data"),
+        "deleted": _serializer_boolean(data, "deleted", "serializer attachment data"),
+        "content_md5": observed_md5,
+    }
+
+
+def serializer_parent_stable_data(data: Any) -> dict[str, Any]:
+    projection = serializer_parent_projection(data)
+    return {
+        "key": projection["key"],
+        "item_type": projection["item_type"],
+        "fields": {
+            field: value
+            for field, value in projection["fields"].items()
+            if field not in PROFILE_FIELDS
+        },
+        "relations": projection["relations"],
+        "date_added": projection["date_added"],
+        "deleted": projection["deleted"],
+        "in_publications": projection["in_publications"],
+    }
+
+
+def serializer_attachment_stable_data(
+    data: Any,
+    *,
+    content_md5: Any = None,
+) -> dict[str, Any]:
+    projection = serializer_attachment_projection(data, content_md5=content_md5)
     return {
         key: copy.deepcopy(value)
-        for key, value in data.items()
-        if key not in SERIALIZER_ATTACHMENT_ALLOWED_FIELDS
+        for key, value in projection.items()
+        if key not in {"filename", "version"}
     }
 
 
@@ -299,13 +590,10 @@ def serializer_guard_from_records(
     parent_data: Any,
     child_records: Any,
 ) -> dict[str, Any]:
-    """Build the hash-only v2 guard from Local-API-shaped pre-state records."""
-    if not isinstance(parent_data, dict):
-        raise ContractError("serializer parent data must be an object")
-    if parent_data.get("itemType") != "journalArticle":
-        raise ContractError("serializer parent must be journalArticle")
-    tags = parent_data.get("tags", [])
-    collections = parent_data.get("collections", [])
+    """Build the hash-only v2 guard from canonical cross-serializer projections."""
+    parent_projection = serializer_parent_projection(parent_data)
+    tags = parent_projection["tags"]
+    collections = parent_projection["collections"]
     sorted_tags = _sorted_serializer_values(tags, "serializer parent tags")
     sorted_collections = _sorted_serializer_values(
         collections, "serializer parent collections"
@@ -321,15 +609,14 @@ def serializer_guard_from_records(
         key = item_key(data.get("key"), f"{label}.data.key")
         version = positive_int(data.get("version"), f"{label}.data.version")
         if data.get("itemType") == "note":
-            note_html = data.get("note")
-            if not isinstance(note_html, str):
-                raise ContractError(f"{label}.data.note must be a string")
+            note_projection = serializer_note_projection(data)
+            note_html = note_projection["note"]
             children.append(
                 {
                     "key": key,
                     "item_type": "note",
                     "version": version,
-                    "raw_data_sha256": sha256_value(data),
+                    "raw_data_sha256": sha256_value(note_projection),
                     "content_sha256": "sha256:"
                     + hashlib.sha256(note_html.encode("utf-8")).hexdigest(),
                 }
@@ -337,9 +624,11 @@ def serializer_guard_from_records(
             continue
         if data.get("itemType") != "attachment":
             raise ContractError(f"{label}.data.itemType is unsupported")
-        filename = text(
-            data.get("filename"), f"{label}.data.filename", nonempty=False, limit=16_384
+        attachment_projection = serializer_attachment_projection(
+            data,
+            content_md5=wrapper.get("content_md5"),
         )
+        filename = attachment_projection["filename"]
         storage_path = text(
             wrapper.get("storage_path"),
             f"{label}.storage_path",
@@ -359,9 +648,12 @@ def serializer_guard_from_records(
                 "key": key,
                 "item_type": "attachment",
                 "version": version,
-                "raw_data_sha256": sha256_value(data),
+                "raw_data_sha256": sha256_value(attachment_projection),
                 "stable_data_sha256": sha256_value(
-                    serializer_attachment_stable_data(data)
+                    serializer_attachment_stable_data(
+                        data,
+                        content_md5=wrapper.get("content_md5"),
+                    )
                 ),
                 "filename_sha256": sha256_value(filename),
                 "storage_path_sha256": sha256_value(storage_path),
@@ -374,8 +666,9 @@ def serializer_guard_from_records(
         raise ContractError("serializer child records contain duplicate keys")
     unsigned = {
         "profile": SERIALIZER_GUARD_PROFILE,
+        "projection_contract": SERIALIZER_PROJECTION_SCHEMA,
         "parent": {
-            "raw_data_sha256": sha256_value(parent_data),
+            "raw_data_sha256": sha256_value(parent_projection),
             "stable_nonprofile_sha256": sha256_value(
                 serializer_parent_stable_data(parent_data)
             ),
@@ -390,9 +683,15 @@ def serializer_guard_from_records(
 
 
 def validate_serializer_guard(value: Any, label: str) -> dict[str, Any]:
-    guard = exact_keys(value, {"profile", "parent", "children", "guard_sha256"}, label)
+    guard = exact_keys(
+        value,
+        {"profile", "projection_contract", "parent", "children", "guard_sha256"},
+        label,
+    )
     if guard["profile"] != SERIALIZER_GUARD_PROFILE:
         raise ContractError(f"{label}.profile is unsupported")
+    if guard["projection_contract"] != SERIALIZER_PROJECTION_SCHEMA:
+        raise ContractError(f"{label}.projection_contract is unsupported")
     parent = exact_keys(
         guard["parent"],
         {

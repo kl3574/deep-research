@@ -37,15 +37,19 @@ parent version and protected identity, complete child inventory and content
 hashes, one evidence PDF hash, exact target, empty full-library duplicate
 candidate sets, and canonical JSON hashes for every nested state object.
 
-Version 2 additionally binds a hash-only `serializer_guard`. The parent guard
-keeps the full raw-data hash, a stable hash of every field except the writable
-profile, version/dateModified, tags, and collections, plus raw-order and
-set-normalized hashes for tags and collections. Each note binds its complete
-raw record and exact content hash. Each attachment binds its complete raw
-record, a stable record with only `version` and `filename` removed, its local
-file SHA-256 and size, and hashes of filename and storage path. Attachment
-title, URL, link mode, content type, MD5, bytes, key/type, note content, and tag
-or collection membership therefore remain fail-closed.
+Version 2 additionally binds a hash-only `serializer_guard` using the explicit
+`ZoteroMetadataCanonicalProjection/v1` contract. Local API and plugin objects
+are first mapped to one fixed parent/note/attachment field set with explicit
+missing/null defaults and canonical creator, tag, relation, and collection
+shapes; unknown fields fail closed. The parent guard keeps the canonical
+raw-order hash, a stable hash of every field except the writable profile,
+version/dateModified, tags, and collections, plus raw-order and set-normalized
+hashes for tags and collections. Each note binds its complete canonical record
+and exact content hash. Each attachment binds its canonical raw record, a
+stable projection with only `version` and `filename` removed, its local file
+SHA-256, size, byte-derived MD5, and hashes of filename and storage path.
+Attachment title, URL, link mode, content type, MD5, bytes, key/type, note
+content, and tag or collection membership therefore remain fail-closed.
 An exact normalized title/year is a candidate when creator surnames overlap or
 either side lacks creators. A differing normalized title/year is a candidate
 only when one title is a prefix of the other for at least 20 characters and
@@ -69,11 +73,14 @@ For v2 compilation and readback-only recovery, attachment bytes are observed
 only by requesting the exact attachment's Local API `/file` endpoint and
 following its returned local-file identity under
 `$HOME/Zotero/storage/<attachment-key>/`. The compiler opens a direct regular
-non-symlink file with no-follow semantics, hashes the bytes it actually reads,
-and compares both size and SHA-256 to the reviewed child. Expected values are
-never substituted for an unavailable observation; redirect, path, identity,
-read-time size, magic, or hash drift fails closed without exposing the path in
-the executable manifest or public error.
+non-symlink file with no-follow semantics and computes SHA-256 and MD5 from the
+bytes it actually reads. The plugin independently computes MD5 from the live
+attachment because default `item.toJSON()` omits the Local API's synchronized
+`md5` and `mtime` fields. `mtime` is not an identity signal; exact bytes and
+size remain authoritative. Expected values are never substituted for an
+unavailable observation; redirect, path, identity, read-time size, magic, or
+hash drift fails closed without exposing the path in the executable manifest
+or public error.
 
 Preview and repeated in-transaction preflight are always strict. Only
 post-commit inspection and readback may accept identical tag/collection members

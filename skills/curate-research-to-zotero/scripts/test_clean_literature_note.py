@@ -151,6 +151,71 @@ class CleanLiteratureNoteTests(unittest.TestCase):
         errors, _, _ = clean.validate_clean_note_html(note(scientific_prose))
         self.assertEqual(errors, [])
 
+    def test_rejects_structured_curation_target_fields(self) -> None:
+        polluted_fragments = [
+            "<p>目标集合：示例文库 / 研究主题 / 子主题</p>",
+            "<p>目标文库: 示例团队文库</p>",
+            "<p>集合路径：研究主题 / 子主题</p>",
+            "<p>collection: example-corpus</p>",
+            "<p>library = example-team</p>",
+            "<p>target: example-subcollection</p>",
+            "<p>path: example / branch</p>",
+            '<p>{"collection_path": "example / branch"}</p>',
+            '<p data-library="example-team">研究结论。</p>',
+            "<h2>Target collection</h2><p>example-corpus</p>",
+        ]
+        for fragment in polluted_fragments:
+            with self.subTest(fragment=fragment):
+                self.assert_invalid(note(fragment), "CN-10")
+
+    def test_allows_scientific_prose_using_curation_words(self) -> None:
+        scientific_prose = (
+            "<p>The specimen collection spans three process regimes, and the "
+            "software library implements a path-sampling algorithm.</p>"
+            "<p>The target response is surface roughness. The inferred path "
+            "through parameter space is compared with the reference curve.</p>"
+            "<p>本文分析轨迹集合，并把路径采样用于稀有事件估计；这些词是论文内容。"
+            "</p>"
+        )
+        errors, _, _ = clean.validate_clean_note_html(note(scientific_prose))
+        self.assertEqual(errors, [])
+
+    def test_rejects_every_custom_data_attribute_outside_root_schema(self) -> None:
+        attributes = [
+            "data-curation-path",
+            "data-zotero-collection",
+            "data-run-id",
+            "data-local-path",
+            "data-workflow",
+            "data-private-state",
+        ]
+        for attribute in attributes:
+            with self.subTest(attribute=attribute):
+                self.assert_invalid(
+                    note(f'<p {attribute}="synthetic">研究结论。</p>'),
+                    "CN-04",
+                )
+        for attribute in ("data-schema-version", "data-citation-items"):
+            with self.subTest(descendant_attribute=attribute):
+                self.assert_invalid(
+                    note(f'<p {attribute}="synthetic">研究结论。</p>'),
+                    "CN-04",
+                )
+
+    def test_allows_only_root_schema_data_attributes_and_ordinary_attributes(
+        self,
+    ) -> None:
+        raw = (
+            '<div data-schema-version="9" data-citation-items="[]">'
+            "<h1>研究结论</h1>"
+            '<p class="finding" title="paper statement">'
+            '<em lang="en">The target response follows a path.</em>'
+            "</p></div>"
+        )
+        errors, warnings, _ = clean.validate_clean_note_html(raw)
+        self.assertEqual(errors, [])
+        self.assertEqual(warnings, [])
+
     def test_rejects_prose_dominated_math_payloads(self) -> None:
         invalid_payloads = [
             "输入变量必须相互独立，否则结果不成立。",

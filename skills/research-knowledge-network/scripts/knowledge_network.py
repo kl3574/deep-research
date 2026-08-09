@@ -34,6 +34,28 @@ ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{1,62}")
 GAP_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{1,254}")
 SNAPSHOT_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 ZOTERO_SNAPSHOT_SCHEMA = "ZoteroCorpusSnapshot/v1"
+ZOTERO_SEMANTIC_SNAPSHOT_SCHEMA = "ZoteroCorpusSemanticSnapshot/v1"
+SOURCE_REVISION_CORE_FIELDS = frozenset(
+    {
+        "parent_metadata_sha256",
+        "parent_short_title_sha256",
+        "note_child_count",
+        "note_key",
+        "note_version",
+        "note_schema_version",
+        "note_availability",
+        "note_content_sha256",
+        "note_semantic_sha256",
+        "note_semantic_status",
+        "revision_sha256",
+    }
+)
+SOURCE_REVISION_STATE_FIELDS = SOURCE_REVISION_CORE_FIELDS | {
+    "source_id",
+    "zotero_parent_key",
+    "source_record_mode",
+    "source_occurrence_sha256",
+}
 
 READ_DEPTHS = {"full", "partial", "metadata", "abstract"}
 EVIDENCE_POLARITY = {"supports", "contradicts", "qualifies", "not_tested"}
@@ -196,6 +218,10 @@ def _sha256_json(value: Any) -> str:
     return f"sha256:{hashlib.sha256(_canonical_json_bytes(value)).hexdigest()}"
 
 
+def _sha256_text(value: str) -> str:
+    return f"sha256:{hashlib.sha256(value.encode('utf-8')).hexdigest()}"
+
+
 def _normalized_text(value: str) -> str:
     return " ".join(value.strip().split())
 
@@ -220,7 +246,312 @@ def _snapshot_parent_identity_hash(parent: dict[str, Any]) -> str:
         "ISBN": _normalized_text(str(parent.get("ISBN") or "")),
         "creators": parent.get("creators") or [],
     }
+    additional_metadata = {
+        key: value
+        for key, value in parent.items()
+        if key
+        not in {
+            "key",
+            "version",
+            "item_type",
+            "title",
+            "date",
+            "DOI",
+            "ISBN",
+            "creators",
+            "children",
+        }
+    }
+    if additional_metadata:
+        # Preserve the legacy digest for the contracted core shape while making
+        # any producer-added parent metadata source-defining. Child state is
+        # deliberately governed by its own explicit revision fields.
+        payload["additional_metadata"] = additional_metadata
     return _sha256_json(payload)
+
+
+def _semantic_snapshot_state_digest(snapshot: dict[str, Any]) -> str | None:
+    corpus_identity = snapshot.get("corpus_identity_sha256")
+    corpus_state = snapshot.get("corpus_state_sha256")
+    parents = snapshot.get("parents")
+    if (
+        not SNAPSHOT_DIGEST_RE.fullmatch(str(corpus_identity or ""))
+        or not SNAPSHOT_DIGEST_RE.fullmatch(str(corpus_state or ""))
+        or not isinstance(parents, list)
+    ):
+        return None
+    return _sha256_json(
+        {
+            "corpus_identity_sha256": corpus_identity,
+            "corpus_state_sha256": corpus_state,
+            "parents": parents,
+        }
+    )
+
+
+def _semantic_notes_by_parent(
+    inventory: dict[str, Any], semantic: dict[str, Any]
+) -> dict[str, dict[str, Any]]:
+    inventory_parents = {
+        str(parent["key"]): parent for parent in inventory.get("parents", [])
+    }
+    semantic_parents = semantic.get("parents")
+    if not isinstance(semantic_parents, list):
+        raise ValueError("semantic snapshot parents must be a list")
+    if len(semantic_parents) != len(inventory_parents):
+        raise ValueError("semantic snapshot parent membership mismatch")
+
+    output: dict[str, dict[str, Any]] = {}
+    for position, semantic_parent in enumerate(semantic_parents):
+        prefix = f"semantic snapshot parent[{position}]"
+        if not isinstance(semantic_parent, dict):
+            raise ValueError(f"{prefix} must be an object")
+        parent_key = semantic_parent.get("key")
+        if not isinstance(parent_key, str) or parent_key not in inventory_parents:
+            raise ValueError(f"{prefix} key missing from inventory")
+        if not re.fullmatch(r"[A-Z0-9]{8}", parent_key):
+            raise ValueError(f"{prefix} key is not a Zotero item key")
+        if parent_key in output:
+            raise ValueError(f"duplicate semantic snapshot parent key: {parent_key}")
+        inventory_parent = inventory_parents[parent_key]
+        semantic_parent_version = semantic_parent.get("version")
+        if (
+            not isinstance(semantic_parent_version, int)
+            or isinstance(semantic_parent_version, bool)
+            or semantic_parent_version < 0
+        ):
+            raise ValueError(f"{prefix} version invalid")
+        if semantic_parent_version != inventory_parent.get("version"):
+            raise ValueError(f"{prefix} version mismatch")
+
+        inventory_notes = [
+            child
+            for child in inventory_parent.get("children", [])
+            if child.get("item_type") == "note"
+        ]
+        semantic_notes = semantic_parent.get("notes")
+        if len(inventory_notes) != 1:
+            raise ValueError(
+                f"inventory parent {parent_key} must have exactly one note child"
+            )
+        if not isinstance(semantic_notes, list) or len(semantic_notes) != 1:
+            raise ValueError(
+                f"semantic parent {parent_key} must have exactly one note child"
+            )
+        inventory_note = inventory_notes[0]
+        semantic_note = semantic_notes[0]
+        if not isinstance(semantic_note, dict):
+            raise ValueError(f"semantic parent {parent_key} note must be an object")
+        if semantic_note.get("key") != inventory_note.get("key"):
+            raise ValueError(f"semantic parent {parent_key} note key mismatch")
+        semantic_note_version = semantic_note.get("version")
+        if (
+            not isinstance(semantic_note_version, int)
+            or isinstance(semantic_note_version, bool)
+            or semantic_note_version < 0
+        ):
+            raise ValueError(f"semantic parent {parent_key} note version invalid")
+        if semantic_note_version != inventory_note.get("version"):
+            raise ValueError(f"semantic parent {parent_key} note version mismatch")
+        content_sha256 = semantic_note.get("content_sha256")
+        semantic_sha256 = semantic_note.get("semantic_sha256")
+        if not SNAPSHOT_DIGEST_RE.fullmatch(str(content_sha256 or "")):
+            raise ValueError(
+                f"semantic parent {parent_key} note content_sha256 invalid"
+            )
+        if not SNAPSHOT_DIGEST_RE.fullmatch(str(semantic_sha256 or "")):
+            raise ValueError(
+                f"semantic parent {parent_key} note semantic_sha256 invalid"
+            )
+        semantic_payload = semantic_note.get("semantic_payload")
+        if not isinstance(semantic_payload, dict):
+            raise ValueError(
+                f"semantic parent {parent_key} note semantic_payload invalid"
+            )
+        if semantic_sha256 != _sha256_json(semantic_payload):
+            raise ValueError(
+                f"semantic parent {parent_key} note semantic_sha256 mismatch"
+            )
+        semantic_status = semantic_note.get("semantic_status")
+        if semantic_status not in {"structured", "legacy_unstructured"}:
+            raise ValueError(
+                f"semantic parent {parent_key} note semantic_status invalid"
+            )
+        root_contract = (
+            semantic_payload.get("root_contract")
+            if isinstance(semantic_payload, dict)
+            else None
+        )
+        semantic_schema = (
+            root_contract.get("schema_version")
+            if isinstance(root_contract, dict)
+            else None
+        )
+        inventory_schema = inventory_note.get("schema_version")
+        if inventory_schema != "9":
+            raise ValueError(
+                f"inventory parent {parent_key} note schema_version must be '9'"
+            )
+        if semantic_schema != inventory_schema:
+            raise ValueError(f"semantic parent {parent_key} note schema mismatch")
+        note_key = inventory_note.get("key")
+        if not isinstance(note_key, str) or not re.fullmatch(
+            r"[A-Z0-9]{8}", note_key
+        ):
+            raise ValueError(f"inventory parent {parent_key} note key invalid")
+        if inventory_note.get("availability") != "present":
+            raise ValueError(
+                f"inventory parent {parent_key} note availability invalid"
+            )
+        short_title = semantic_parent.get("short_title")
+        if not isinstance(short_title, str):
+            raise ValueError(f"{prefix} short_title must be a string")
+        output[parent_key] = {
+            "parent_short_title_sha256": _sha256_text(short_title),
+            "note_child_count": 1,
+            "note_key": note_key,
+            "note_version": int(inventory_note["version"]),
+            "note_schema_version": inventory_schema,
+            "note_availability": "present",
+            "note_content_sha256": str(content_sha256),
+            "note_semantic_sha256": str(semantic_sha256),
+            "note_semantic_status": semantic_status,
+        }
+    if set(output) != set(inventory_parents):
+        raise ValueError("semantic snapshot parent membership mismatch")
+    return output
+
+
+def _validate_zotero_semantic_snapshot(
+    semantic: dict[str, Any], inventory: dict[str, Any]
+) -> dict[str, dict[str, Any]]:
+    if semantic.get("schema") != ZOTERO_SEMANTIC_SNAPSHOT_SCHEMA:
+        raise ValueError(
+            "semantic snapshot schema must be ZoteroCorpusSemanticSnapshot/v1"
+        )
+    if semantic.get("retrieved_at") != inventory.get("retrieved_at"):
+        raise ValueError("semantic snapshot retrieved_at mismatch")
+    identity = _zotero_snapshot_identity_digest(inventory)
+    state = _zotero_snapshot_state_digest(inventory)
+    if semantic.get("corpus_identity_sha256") != identity:
+        raise ValueError("semantic snapshot corpus identity mismatch")
+    if semantic.get("corpus_state_sha256") != state:
+        raise ValueError("semantic snapshot corpus state mismatch")
+    declared_state = semantic.get("state_sha256")
+    computed_state = _semantic_snapshot_state_digest(semantic)
+    if not SNAPSHOT_DIGEST_RE.fullmatch(str(declared_state or "")):
+        raise ValueError("semantic snapshot state_sha256 missing or invalid")
+    if declared_state != computed_state:
+        raise ValueError("semantic snapshot state_sha256 mismatch")
+    return _semantic_notes_by_parent(inventory, semantic)
+
+
+def _read_zotero_semantic_snapshot_with_digest(
+    semantic_path: Path, inventory: dict[str, Any]
+) -> tuple[dict[str, Any], str, dict[str, dict[str, Any]]]:
+    semantic, file_digest = _read_stable_snapshot(semantic_path)
+    note_states = _validate_zotero_semantic_snapshot(semantic, inventory)
+    return semantic, file_digest, note_states
+
+
+def _source_revision_core(
+    parent: dict[str, Any], note_state: dict[str, Any]
+) -> dict[str, Any]:
+    core = {
+        "parent_metadata_sha256": _snapshot_parent_identity_hash(parent),
+        **note_state,
+    }
+    return {**core, "revision_sha256": _sha256_json(core)}
+
+
+def _state_source_revision_guard(
+    source_id: str,
+    parent: dict[str, Any],
+    note_state: dict[str, Any],
+    *,
+    source_record_mode: str,
+    source_occurrence_sha256: str | None = None,
+) -> dict[str, Any]:
+    revision = _source_revision_core(parent, note_state)
+    if source_occurrence_sha256 is None:
+        source_occurrence_sha256 = (
+            revision["revision_sha256"]
+            if source_record_mode == "bound"
+            else revision["parent_metadata_sha256"]
+        )
+    return {
+        "source_id": source_id,
+        "zotero_parent_key": str(parent["key"]),
+        "source_record_mode": source_record_mode,
+        "source_occurrence_sha256": source_occurrence_sha256,
+        **revision,
+    }
+
+
+def _revision_guard_core(guard: dict[str, Any]) -> dict[str, Any]:
+    return {key: guard[key] for key in SOURCE_REVISION_CORE_FIELDS}
+
+
+def _validate_revision_guard_shape(guard: Any, label: str) -> None:
+    if not isinstance(guard, dict):
+        raise ValueError(f"{label} must be an object")
+    if frozenset(guard) not in {
+        SOURCE_REVISION_CORE_FIELDS,
+        SOURCE_REVISION_STATE_FIELDS,
+    }:
+        raise ValueError(f"{label} fields invalid")
+    for field in (
+        "parent_metadata_sha256",
+        "parent_short_title_sha256",
+        "note_content_sha256",
+        "note_semantic_sha256",
+        "revision_sha256",
+    ):
+        if not SNAPSHOT_DIGEST_RE.fullmatch(str(guard.get(field) or "")):
+            raise ValueError(f"{label}.{field} invalid")
+    if type(guard.get("note_child_count")) is not int or guard.get(
+        "note_child_count"
+    ) != 1:
+        raise ValueError(f"{label}.note_child_count must equal one")
+    if not isinstance(guard.get("note_key"), str) or not re.fullmatch(
+        r"[A-Z0-9]{8}", guard["note_key"]
+    ):
+        raise ValueError(f"{label}.note_key invalid")
+    note_version = guard.get("note_version")
+    if (
+        not isinstance(note_version, int)
+        or isinstance(note_version, bool)
+        or note_version < 0
+    ):
+        raise ValueError(f"{label}.note_version invalid")
+    if guard.get("note_schema_version") != "9":
+        raise ValueError(f"{label}.note_schema_version invalid")
+    if guard.get("note_availability") != "present":
+        raise ValueError(f"{label}.note_availability invalid")
+    if guard.get("note_semantic_status") not in {
+        "structured",
+        "legacy_unstructured",
+    }:
+        raise ValueError(f"{label}.note_semantic_status invalid")
+    expected_revision = _sha256_json(
+        {
+            key: guard[key]
+            for key in (
+                "parent_metadata_sha256",
+                "parent_short_title_sha256",
+                "note_child_count",
+                "note_key",
+                "note_version",
+                "note_schema_version",
+                "note_availability",
+                "note_content_sha256",
+                "note_semantic_sha256",
+                "note_semantic_status",
+            )
+        }
+    )
+    if guard.get("revision_sha256") != expected_revision:
+        raise ValueError(f"{label}.revision_sha256 mismatch")
 
 
 def _zotero_snapshot_identity_digest(snapshot: dict[str, Any]) -> str | None:
@@ -1175,6 +1506,15 @@ def _validate_snapshot_membership(
 ) -> None:
     if "corpus_snapshot_current_source_ids" not in state:
         return
+    revision_guards = state.get("corpus_snapshot_current_source_revision_guards")
+    if revision_guards is not None:
+        try:
+            _validate_guarded_snapshot_membership(
+                snapshot, state, source_rows, revision_guards
+            )
+        except (OSError, ValueError) as exc:
+            errors.append(f"corpus source revision guard invalid: {exc}")
+        return
     snapshot_state = _zotero_snapshot_state_digest(snapshot) or ""
     expected: list[tuple[str, dict[str, Any]]] = []
     for parent in _snapshot_parents_sorted(snapshot.get("parents", [])):
@@ -1201,6 +1541,159 @@ def _validate_snapshot_membership(
             errors.append(f"current snapshot source payload mismatch: {source_id}")
 
 
+def _validated_bound_semantic_notes(
+    state: dict[str, Any], snapshot: dict[str, Any]
+) -> dict[str, dict[str, Any]]:
+    path_value = state.get("corpus_semantic_snapshot_path")
+    if not isinstance(path_value, str) or not Path(path_value).is_absolute():
+        raise ValueError("bound semantic snapshot path missing or invalid")
+    semantic, file_digest, notes = _read_zotero_semantic_snapshot_with_digest(
+        Path(path_value), snapshot
+    )
+    if file_digest != state.get("corpus_semantic_snapshot_file_sha256"):
+        raise ValueError("bound semantic snapshot file digest mismatch")
+    if semantic.get("state_sha256") != state.get(
+        "corpus_semantic_snapshot_state_sha256"
+    ):
+        raise ValueError("bound semantic snapshot state digest mismatch")
+    return notes
+
+
+def _validate_guarded_snapshot_membership(
+    snapshot: dict[str, Any],
+    state: dict[str, Any],
+    source_rows: list[dict[str, Any]],
+    revision_guards: Any,
+) -> None:
+    if not isinstance(revision_guards, list):
+        raise ValueError("current source revision guards must be a list")
+    note_states = _validated_bound_semantic_notes(state, snapshot)
+    sorted_parents = _snapshot_parents_sorted(snapshot.get("parents", []))
+    if len(revision_guards) != len(sorted_parents):
+        raise ValueError("current source revision guard membership mismatch")
+    latest_by_id = {
+        str(row.get("source_id")): row
+        for row in sorted(source_rows, key=lambda item: int(item.get("sequence") or 0))
+        if isinstance(row.get("source_id"), str)
+    }
+    expected_ids: list[str] = []
+    for position, (parent, observed_guard) in enumerate(
+        zip(sorted_parents, revision_guards, strict=True)
+    ):
+        label = f"current source revision guard[{position}]"
+        _validate_revision_guard_shape(observed_guard, label)
+        if set(observed_guard) != set(SOURCE_REVISION_STATE_FIELDS):
+            raise ValueError(f"{label} state fields invalid")
+        source_id = observed_guard.get("source_id")
+        if not isinstance(source_id, str) or not ID_RE.fullmatch(source_id):
+            raise ValueError(f"{label}.source_id invalid")
+        if observed_guard.get("zotero_parent_key") != parent.get("key"):
+            raise ValueError(f"{label}.zotero_parent_key mismatch")
+        mode = observed_guard.get("source_record_mode")
+        if mode not in {"bound", "legacy"}:
+            raise ValueError(f"{label}.source_record_mode invalid")
+        occurrence_hash = observed_guard.get("source_occurrence_sha256")
+        if not SNAPSHOT_DIGEST_RE.fullmatch(str(occurrence_hash or "")):
+            raise ValueError(f"{label}.source_occurrence_sha256 invalid")
+        expected_core = _source_revision_core(
+            parent, note_states[str(parent["key"])]
+        )
+        if _revision_guard_core(observed_guard) != expected_core:
+            raise ValueError(f"{label} does not match bound snapshots")
+        actual = latest_by_id.get(source_id)
+        if actual is None:
+            raise ValueError(f"current guarded source row missing: {source_id}")
+        if actual.get("role") != "zotero_corpus":
+            raise ValueError(f"current guarded source role mismatch: {source_id}")
+        if actual.get("zotero_parent_key") != parent.get("key"):
+            raise ValueError(f"current guarded source parent mismatch: {source_id}")
+        if mode == "bound":
+            if actual.get("zotero_source_revision") != expected_core:
+                raise ValueError(f"current source revision payload mismatch: {source_id}")
+            if actual.get("version_hash") != expected_core["revision_sha256"]:
+                raise ValueError(f"current source revision hash mismatch: {source_id}")
+            if actual.get("zotero_source_occurrence_sha256") != occurrence_hash:
+                raise ValueError(
+                    f"current source occurrence hash mismatch: {source_id}"
+                )
+            if source_id != _parent_source_id(
+                parent, str(occurrence_hash)
+            ):
+                raise ValueError(f"current source revision ID mismatch: {source_id}")
+            if occurrence_hash != expected_core["revision_sha256"]:
+                expected_occurrence = _sha256_json(
+                    {
+                        "revision_sha256": expected_core["revision_sha256"],
+                        "supersedes": actual.get("supersedes"),
+                    }
+                )
+                if occurrence_hash != expected_occurrence:
+                    raise ValueError(
+                        f"current source occurrence predecessor mismatch: {source_id}"
+                    )
+        else:
+            parent_hash = expected_core["parent_metadata_sha256"]
+            if actual.get("zotero_source_revision") is not None:
+                raise ValueError(f"legacy current source unexpectedly has guard: {source_id}")
+            if actual.get("version_hash") != parent_hash:
+                raise ValueError(f"legacy current source parent hash mismatch: {source_id}")
+            if occurrence_hash != parent_hash:
+                raise ValueError(
+                    f"legacy current source occurrence hash mismatch: {source_id}"
+                )
+            if source_id != _parent_source_id(parent, parent_hash):
+                raise ValueError(f"legacy current source ID mismatch: {source_id}")
+        expected_ids.append(source_id)
+    if expected_ids != _corpus_snapshot_current_source_ids(state):
+        raise ValueError("guarded current source membership mismatch")
+
+
+def _validate_source_revision_guard_event_binding(
+    state: dict[str, Any],
+    event_rows: list[dict[str, Any]],
+    errors: list[str],
+) -> None:
+    current_guards = state.get(
+        "corpus_snapshot_current_source_revision_guards"
+    )
+    if current_guards is None:
+        return
+    refresh_events = [
+        row
+        for row in sorted(
+            event_rows, key=lambda item: int(item.get("sequence") or 0)
+        )
+        if row.get("event_type") == "snapshot_refreshed"
+    ]
+    if not refresh_events:
+        return
+    if refresh_events[-1].get("source_revision_guards") != current_guards:
+        errors.append(
+            "latest snapshot refresh event source revision guards mismatch"
+        )
+    latest = refresh_events[-1]
+    event_bindings = (
+        ("snapshot_path", "corpus_snapshot_path"),
+        ("snapshot_file_sha256", "corpus_snapshot_file_sha256"),
+        ("snapshot_state_sha256", "corpus_snapshot_state_sha256"),
+        ("snapshot_identity_sha256", "corpus_snapshot_identity_sha256"),
+        ("semantic_snapshot_path", "corpus_semantic_snapshot_path"),
+        (
+            "semantic_snapshot_file_sha256",
+            "corpus_semantic_snapshot_file_sha256",
+        ),
+        (
+            "semantic_snapshot_state_sha256",
+            "corpus_semantic_snapshot_state_sha256",
+        ),
+    )
+    for event_field, state_field in event_bindings:
+        if latest.get(event_field) != state.get(state_field):
+            errors.append(
+                f"latest snapshot refresh event {event_field} mismatch"
+            )
+
+
 def _validate_zotero_source_record(
     row: dict[str, Any], known_sources: set[str], errors: list[str]
 ) -> None:
@@ -1219,6 +1712,39 @@ def _validate_zotero_source_record(
         errors.append(
             f"Zotero source {source_id} supersedes unknown source {supersedes}"
         )
+    revision = row.get("zotero_source_revision")
+    if revision is not None:
+        try:
+            _validate_revision_guard_shape(
+                revision, f"Zotero source {source_id} revision"
+            )
+        except ValueError as exc:
+            errors.append(str(exc))
+        if isinstance(revision, dict) and set(revision) != set(
+            SOURCE_REVISION_CORE_FIELDS
+        ):
+            errors.append(f"Zotero source {source_id} revision fields invalid")
+        if isinstance(revision, dict) and row.get("version_hash") != revision.get(
+            "revision_sha256"
+        ):
+            errors.append(f"Zotero source {source_id} revision hash mismatch")
+        occurrence = row.get("zotero_source_occurrence_sha256")
+        if not SNAPSHOT_DIGEST_RE.fullmatch(str(occurrence or "")):
+            errors.append(f"Zotero source {source_id} occurrence hash invalid")
+        elif (
+            isinstance(revision, dict)
+            and occurrence != revision.get("revision_sha256")
+        ):
+            expected_occurrence = _sha256_json(
+                {
+                    "revision_sha256": revision.get("revision_sha256"),
+                    "supersedes": row.get("supersedes"),
+                }
+            )
+            if occurrence != expected_occurrence:
+                errors.append(
+                    f"Zotero source {source_id} occurrence hash mismatch"
+                )
 
 
 def _validate_source_record(
@@ -1867,6 +2393,9 @@ def _validate_record_shapes(
     errors: list[str] = []
 
     _validate_snapshot_state(paths, state, records["sources"], errors)
+    _validate_source_revision_guard_event_binding(
+        state, records["events"], errors
+    )
 
     known = _collect_known_record_ids(records)
     _validate_source_records(records["sources"], paths.network_id, errors)
@@ -2850,10 +3379,18 @@ def _source_payload_from_parent(
     parent: dict[str, Any],
     snapshot: dict[str, Any],
     snapshot_state: str,
+    revision_guard: dict[str, Any] | None = None,
+    source_occurrence_sha256: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     source_identity = _snapshot_parent_identity(parent)
     parent_hash = _snapshot_parent_identity_hash(parent)
-    source_id = _parent_source_id(parent, parent_hash)
+    version_hash = (
+        str(revision_guard["revision_sha256"])
+        if revision_guard is not None
+        else parent_hash
+    )
+    occurrence_hash = source_occurrence_sha256 or version_hash
+    source_id = _parent_source_id(parent, occurrence_hash)
     parent_version = str(parent["version"])
     payload = {
         "source_id": source_id,
@@ -2861,7 +3398,7 @@ def _source_payload_from_parent(
         "canonical_version": parent_version,
         "read_version": parent_version,
         "read_depth": "metadata",
-        "version_hash": parent_hash,
+        "version_hash": version_hash,
         "notes": "ingested from ZoteroCorpusSnapshot/v1",
         "role": "zotero_corpus",
         "supersedes": None,
@@ -2873,6 +3410,9 @@ def _source_payload_from_parent(
             "state_sha256": snapshot_state,
         },
     }
+    if revision_guard is not None:
+        payload["zotero_source_revision"] = _revision_guard_core(revision_guard)
+        payload["zotero_source_occurrence_sha256"] = occurrence_hash
     return source_id, payload
 
 
@@ -2895,6 +3435,57 @@ def _latest_sources_by_identity_and_key(
         if isinstance(parent_key, str):
             by_key[parent_key] = row
     return by_identity, by_key
+
+
+def _resolve_unique_prior_sources(
+    parents: list[dict[str, Any]],
+    by_identity: dict[str, dict[str, Any]],
+    by_key: dict[str, dict[str, Any]],
+    *,
+    context: str,
+) -> dict[str, dict[str, Any] | None]:
+    resolved: dict[str, dict[str, Any] | None] = {}
+    matched_source_ids: dict[str, str] = {}
+    for parent in parents:
+        parent_key = str(parent["key"])
+        canonical_identity = _snapshot_parent_identity(parent)
+        key_candidate = by_key.get(parent_key)
+        identity_candidate = by_identity.get(canonical_identity)
+        key_source_id = (
+            _validate_id(str(key_candidate.get("source_id")), "source_id")
+            if key_candidate is not None
+            else None
+        )
+        identity_source_id = (
+            _validate_id(str(identity_candidate.get("source_id")), "source_id")
+            if identity_candidate is not None
+            else None
+        )
+        if (
+            key_source_id is not None
+            and identity_source_id is not None
+            and key_source_id != identity_source_id
+        ):
+            raise ValueError(
+                f"{context} predecessor conflict for {parent_key!r}: "
+                f"key maps to {key_source_id!r}, canonical identity maps to "
+                f"{identity_source_id!r}"
+            )
+        prior = key_candidate or identity_candidate
+        prior_source_id = key_source_id or identity_source_id
+        if prior_source_id is not None:
+            previous_parent_key = matched_source_ids.get(prior_source_id)
+            if (
+                previous_parent_key is not None
+                and previous_parent_key != parent_key
+            ):
+                raise ValueError(
+                    f"{context} predecessor {prior_source_id!r} matches multiple "
+                    f"current parents {previous_parent_key!r} and {parent_key!r}"
+                )
+            matched_source_ids[prior_source_id] = parent_key
+        resolved[parent_key] = prior
+    return resolved
 
 
 def _stage_source_rows(
@@ -2975,6 +3566,43 @@ def command_ingest_zotero_snapshot(args: argparse.Namespace) -> int:  # noqa: C9
         except (ValueError, OSError, json.JSONDecodeError) as exc:
             print(f"snapshot invalid: {exc}", file=sys.stderr)
             return 1
+
+        semantic_path_value = getattr(args, "semantic_snapshot", None)
+        prior_semantic_path_value = getattr(args, "prior_semantic_snapshot", None)
+        semantic: dict[str, Any] | None = None
+        semantic_file_digest: str | None = None
+        semantic_note_states: dict[str, dict[str, Any]] | None = None
+        semantic_path: Path | None = None
+        validated_prior_semantic: dict[str, Any] | None = None
+        validated_prior_semantic_file_digest: str | None = None
+        validated_prior_semantic_path: Path | None = None
+        if semantic_path_value is not None:
+            semantic_path = Path(semantic_path_value)
+            if not semantic_path.is_absolute():
+                print("semantic snapshot must be an absolute path", file=sys.stderr)
+                return 1
+            semantic_path = Path(os.path.abspath(semantic_path))
+            try:
+                semantic, semantic_file_digest, semantic_note_states = (
+                    _read_zotero_semantic_snapshot_with_digest(
+                        semantic_path, snapshot
+                    )
+                )
+            except (ValueError, OSError, json.JSONDecodeError) as exc:
+                print(f"semantic snapshot invalid: {exc}", file=sys.stderr)
+                return 1
+        elif state.get("corpus_snapshot_current_source_revision_guards") is not None:
+            print(
+                "semantic snapshot is required for guarded corpus ingest",
+                file=sys.stderr,
+            )
+            return 1
+        if prior_semantic_path_value is not None and semantic is None:
+            print(
+                "prior semantic snapshot requires current semantic snapshot",
+                file=sys.stderr,
+            )
+            return 1
         bound_identity = state.get("corpus_snapshot_identity_sha256")
         snapshot_identity = _zotero_snapshot_identity_digest(snapshot)
         if not SNAPSHOT_DIGEST_RE.fullmatch(str(bound_identity or "")):
@@ -3001,6 +3629,35 @@ def command_ingest_zotero_snapshot(args: argparse.Namespace) -> int:  # noqa: C9
                 if snapshot_state_sha != bound_state_sha:
                     print("snapshot state mismatch", file=sys.stderr)
                     return 1
+            if state.get("corpus_snapshot_current_source_revision_guards") is not None:
+                bound_semantic_path_value = state.get(
+                    "corpus_semantic_snapshot_path"
+                )
+                if (
+                    semantic is None
+                    or semantic_path is None
+                    or not isinstance(bound_semantic_path_value, str)
+                    or not Path(bound_semantic_path_value).is_absolute()
+                ):
+                    print("semantic snapshot binding missing", file=sys.stderr)
+                    return 1
+                try:
+                    bound_semantic_path = Path(
+                        bound_semantic_path_value
+                    ).resolve()
+                    candidate_semantic_path = semantic_path.resolve()
+                except OSError:
+                    print("semantic snapshot binding invalid", file=sys.stderr)
+                    return 1
+                if (
+                    candidate_semantic_path != bound_semantic_path
+                    or semantic_file_digest
+                    != state.get("corpus_semantic_snapshot_file_sha256")
+                    or semantic.get("state_sha256")
+                    != state.get("corpus_semantic_snapshot_state_sha256")
+                ):
+                    print("semantic snapshot binding mismatch", file=sys.stderr)
+                    return 1
         else:
             if "corpus_snapshot_current_source_ids" not in state:
                 print(
@@ -3014,15 +3671,224 @@ def command_ingest_zotero_snapshot(args: argparse.Namespace) -> int:  # noqa: C9
             if not SNAPSHOT_DIGEST_RE.fullmatch(bound_state_sha):
                 print("bound snapshot state digest invalid", file=sys.stderr)
                 return 1
-            if snapshot_state_sha == bound_state_sha:
+            guarded_semantic_changed = (
+                semantic is not None
+                and state.get("corpus_snapshot_current_source_revision_guards")
+                is not None
+                and semantic.get("state_sha256")
+                != state.get("corpus_semantic_snapshot_state_sha256")
+            )
+            legacy_semantic_migration = (
+                semantic is not None
+                and state.get("corpus_snapshot_current_source_revision_guards")
+                is None
+                and "corpus_snapshot_current_source_ids" in state
+            )
+            if (
+                snapshot_state_sha == bound_state_sha
+                and not guarded_semantic_changed
+                and not legacy_semantic_migration
+            ):
                 print("snapshot state unchanged", file=sys.stderr)
                 return 1
 
         parents = snapshot.get("parents", [])
         sorted_parents = _snapshot_parents_sorted(parents)
+        prior_current_ids = set(_corpus_snapshot_current_source_ids(state))
+        prior_current_rows = [
+            row
+            for row in records["sources"]
+            if row.get("source_id") in prior_current_ids
+            and row.get("role") == "zotero_corpus"
+        ]
+        has_current_membership = "corpus_snapshot_current_source_ids" in state
         latest_by_identity, latest_by_key = _latest_sources_by_identity_and_key(
-            records["sources"]
+            prior_current_rows if has_current_membership else records["sources"]
         )
+        historical_by_identity, historical_by_key = (
+            _latest_sources_by_identity_and_key(records["sources"])
+        )
+        prior_revision_guards_value = state.get(
+            "corpus_snapshot_current_source_revision_guards"
+        )
+        prior_revision_guards: dict[str, dict[str, Any]] | None = None
+        if prior_revision_guards_value is not None:
+            if prior_semantic_path_value is not None:
+                print(
+                    "prior semantic snapshot is only valid for legacy guard migration",
+                    file=sys.stderr,
+                )
+                return 1
+            try:
+                bound_snapshot, bound_file_digest = _read_zotero_snapshot_with_digest(
+                    bound_snapshot_path
+                )
+            except (ValueError, OSError, json.JSONDecodeError) as exc:
+                print(f"bound snapshot invalid: {exc}", file=sys.stderr)
+                return 1
+            if (
+                bound_file_digest != state.get("corpus_snapshot_file_sha256")
+                or _zotero_snapshot_identity_digest(bound_snapshot) != bound_identity
+                or _zotero_snapshot_state_digest(bound_snapshot) != bound_state_sha
+            ):
+                print("bound snapshot no longer matches authority", file=sys.stderr)
+                return 1
+            try:
+                _validate_guarded_snapshot_membership(
+                    bound_snapshot,
+                    state,
+                    records["sources"],
+                    prior_revision_guards_value,
+                )
+            except (OSError, ValueError) as exc:
+                print(f"bound source revision guards invalid: {exc}", file=sys.stderr)
+                return 1
+            if not isinstance(prior_revision_guards_value, list):
+                print("bound source revision guards invalid", file=sys.stderr)
+                return 1
+            try:
+                for position, guard in enumerate(prior_revision_guards_value):
+                    _validate_revision_guard_shape(
+                        guard, f"bound source revision guard[{position}]"
+                    )
+            except ValueError as exc:
+                print(f"bound source revision guards invalid: {exc}", file=sys.stderr)
+                return 1
+            prior_revision_guards = {
+                str(guard.get("zotero_parent_key")): guard
+                for guard in prior_revision_guards_value
+                if isinstance(guard, dict)
+            }
+            if len(prior_revision_guards) != len(prior_revision_guards_value):
+                print("bound source revision guards invalid", file=sys.stderr)
+                return 1
+        elif semantic_note_states is not None and has_current_membership:
+            if not allow_refresh:
+                print(
+                    "legacy source guard migration requires --allow-refresh",
+                    file=sys.stderr,
+                )
+                return 1
+            if prior_semantic_path_value is None:
+                print(
+                    "legacy source guard migration requires --prior-semantic-snapshot",
+                    file=sys.stderr,
+                )
+                return 1
+            try:
+                bound_snapshot, bound_file_digest = _read_zotero_snapshot_with_digest(
+                    bound_snapshot_path
+                )
+            except (ValueError, OSError, json.JSONDecodeError) as exc:
+                print(f"bound snapshot invalid: {exc}", file=sys.stderr)
+                return 1
+            if (
+                bound_file_digest != state.get("corpus_snapshot_file_sha256")
+                or _zotero_snapshot_identity_digest(bound_snapshot) != bound_identity
+                or _zotero_snapshot_state_digest(bound_snapshot) != bound_state_sha
+            ):
+                print("bound snapshot no longer matches authority", file=sys.stderr)
+                return 1
+            validated_prior_semantic_path = Path(prior_semantic_path_value)
+            if not validated_prior_semantic_path.is_absolute():
+                print(
+                    "prior semantic snapshot must be an absolute path",
+                    file=sys.stderr,
+                )
+                return 1
+            try:
+                (
+                    validated_prior_semantic,
+                    validated_prior_semantic_file_digest,
+                    prior_note_states,
+                ) = (
+                    _read_zotero_semantic_snapshot_with_digest(
+                        Path(os.path.abspath(validated_prior_semantic_path)),
+                        bound_snapshot,
+                    )
+                )
+                validated_prior_semantic_path = Path(
+                    os.path.abspath(validated_prior_semantic_path)
+                )
+            except (ValueError, OSError, json.JSONDecodeError) as exc:
+                print(f"prior semantic snapshot invalid: {exc}", file=sys.stderr)
+                return 1
+            prior_revision_guards = {}
+            sorted_bound_parents = _snapshot_parents_sorted(
+                bound_snapshot["parents"]
+            )
+            try:
+                legacy_prior_sources = _resolve_unique_prior_sources(
+                    sorted_bound_parents,
+                    latest_by_identity,
+                    latest_by_key,
+                    context="legacy current corpus",
+                )
+            except ValueError as exc:
+                print(
+                    f"corpus membership reconciliation invalid: {exc}",
+                    file=sys.stderr,
+                )
+                return 1
+            for prior_parent in sorted_bound_parents:
+                prior = legacy_prior_sources[str(prior_parent["key"])]
+                if prior is None or not isinstance(prior.get("source_id"), str):
+                    print(
+                        f"prior corpus source missing for {prior_parent['key']}",
+                        file=sys.stderr,
+                    )
+                    return 1
+                prior_revision_guards[str(prior_parent["key"])] = (
+                    _state_source_revision_guard(
+                        str(prior["source_id"]),
+                        prior_parent,
+                        prior_note_states[str(prior_parent["key"])],
+                        source_record_mode=(
+                            "bound"
+                            if prior.get("zotero_source_revision") is not None
+                            else "legacy"
+                        ),
+                        source_occurrence_sha256=(
+                            prior.get("zotero_source_occurrence_sha256")
+                            or prior.get("version_hash")
+                        ),
+                    )
+                )
+        elif prior_semantic_path_value is not None:
+            print(
+                "prior semantic snapshot is only valid for legacy guard migration",
+                file=sys.stderr,
+            )
+            return 1
+        prior_revision_guards_by_source_id = {
+            str(guard.get("source_id")): guard
+            for guard in (prior_revision_guards or {}).values()
+            if isinstance(guard.get("source_id"), str)
+        }
+        try:
+            resolved_prior_sources = _resolve_unique_prior_sources(
+                sorted_parents,
+                latest_by_identity,
+                latest_by_key,
+                context="current corpus",
+            )
+            unmatched_parents = [
+                parent
+                for parent in sorted_parents
+                if resolved_prior_sources[str(parent["key"])] is None
+            ]
+            resolved_historical_sources = _resolve_unique_prior_sources(
+                unmatched_parents,
+                historical_by_identity,
+                historical_by_key,
+                context="historical corpus",
+            )
+        except ValueError as exc:
+            print(
+                f"corpus membership reconciliation invalid: {exc}",
+                file=sys.stderr,
+            )
+            return 1
         existing_by_id = {
             str(row.get("source_id")): row
             for row in records["sources"]
@@ -3033,39 +3899,91 @@ def command_ingest_zotero_snapshot(args: argparse.Namespace) -> int:  # noqa: C9
         changed_count = 0
         existing_count = 0
         current_source_ids: list[str] = []
+        current_revision_guards: list[dict[str, Any]] = []
         seen_source_ids: set[str] = set()
         matched_prior_source_ids: set[str] = set()
         for parent in sorted_parents:
-            source_id, payload = _source_payload_from_parent(
+            candidate_revision = (
+                _source_revision_core(
+                    parent, semantic_note_states[str(parent["key"])]
+                )
+                if semantic_note_states is not None
+                else None
+            )
+            proposed_source_id, payload = _source_payload_from_parent(
                 parent,
                 snapshot,
                 snapshot_state_sha,
+                candidate_revision,
             )
-            source_id = _validate_id(source_id, "source_id")
-            if source_id in seen_source_ids:
-                print(f"duplicate derived source ID: {source_id}", file=sys.stderr)
-                return 1
-            seen_source_ids.add(source_id)
-            current_source_ids.append(source_id)
-
             canonical_identity = str(payload["canonical_identity"])
             parent_key = str(payload["zotero_parent_key"])
-            prior = latest_by_key.get(parent_key) or latest_by_identity.get(
-                canonical_identity
-            )
+            prior = resolved_prior_sources[parent_key]
             if prior is not None and isinstance(prior.get("source_id"), str):
                 matched_prior_source_ids.add(str(prior["source_id"]))
-            prior_same = (
-                prior is not None
-                and _source_row_signature(prior) == _source_row_signature(payload)
-            )
-            if prior_same:
-                if prior.get("source_id") != source_id:
-                    print(
-                        f"source identity/version conflict for {canonical_identity!r}",
-                        file=sys.stderr,
+            prior_guard = (
+                (
+                    prior_revision_guards_by_source_id.get(
+                        str(prior.get("source_id"))
                     )
+                    if prior is not None
+                    else None
+                )
+                or prior_revision_guards.get(parent_key)
+                if prior_revision_guards is not None
+                else None
+            )
+            if (
+                candidate_revision is not None
+                and prior is not None
+                and prior_revision_guards is not None
+                and prior_guard is None
+            ):
+                print(
+                    f"bound source revision guard missing for {parent_key}",
+                    file=sys.stderr,
+                )
+                return 1
+            if candidate_revision is not None and prior_guard is not None:
+                prior_same = _revision_guard_core(prior_guard) == candidate_revision
+            else:
+                prior_same = (
+                    prior is not None
+                    and _source_row_signature(prior)
+                    == _source_row_signature(payload)
+                )
+            if prior_same:
+                source_id = _validate_id(str(prior["source_id"]), "source_id")
+                if source_id in seen_source_ids:
+                    print(f"duplicate derived source ID: {source_id}", file=sys.stderr)
                     return 1
+                seen_source_ids.add(source_id)
+                current_source_ids.append(source_id)
+                if candidate_revision is not None:
+                    current_revision_guards.append(
+                        _state_source_revision_guard(
+                            source_id,
+                            parent,
+                            semantic_note_states[parent_key],
+                            source_record_mode=str(
+                                prior_guard.get("source_record_mode")
+                                if prior_guard is not None
+                                else (
+                                    "bound"
+                                    if prior.get("zotero_source_revision") is not None
+                                    else "legacy"
+                                )
+                            ),
+                            source_occurrence_sha256=str(
+                                prior_guard.get("source_occurrence_sha256")
+                                if prior_guard is not None
+                                else (
+                                    prior.get("zotero_source_occurrence_sha256")
+                                    or prior.get("version_hash")
+                                )
+                            ),
+                        )
+                    )
                 existing_count += 1
                 continue
             if prior is not None and not allow_refresh:
@@ -3078,8 +3996,72 @@ def command_ingest_zotero_snapshot(args: argparse.Namespace) -> int:  # noqa: C9
             if prior is not None:
                 payload["supersedes"] = prior.get("source_id")
 
+            source_occurrence_sha256 = (
+                str(candidate_revision["revision_sha256"])
+                if candidate_revision is not None
+                else str(payload["version_hash"])
+            )
+            historical_predecessor = (
+                resolved_historical_sources.get(parent_key)
+                if prior is None
+                else None
+            )
+            if (
+                candidate_revision is not None
+                and (
+                    proposed_source_id in existing_by_id
+                    or historical_predecessor is not None
+                )
+            ):
+                occurrence_predecessor = prior or historical_predecessor
+                if occurrence_predecessor is None or not isinstance(
+                    occurrence_predecessor.get("source_id"), str
+                ):
+                    print(
+                        f"historical source occurrence lacks predecessor for "
+                        f"{canonical_identity!r}",
+                        file=sys.stderr,
+                    )
+                    return 1
+                source_occurrence_sha256 = _sha256_json(
+                    {
+                        "revision_sha256": candidate_revision["revision_sha256"],
+                        "supersedes": occurrence_predecessor["source_id"],
+                    }
+                )
+                proposed_source_id, payload = _source_payload_from_parent(
+                    parent,
+                    snapshot,
+                    snapshot_state_sha,
+                    candidate_revision,
+                    source_occurrence_sha256,
+                )
+                payload["supersedes"] = occurrence_predecessor["source_id"]
+
+            source_id = _validate_id(proposed_source_id, "source_id")
+            if source_id in seen_source_ids:
+                print(f"duplicate derived source ID: {source_id}", file=sys.stderr)
+                return 1
+            seen_source_ids.add(source_id)
+            current_source_ids.append(source_id)
+            if candidate_revision is not None:
+                current_revision_guards.append(
+                    _state_source_revision_guard(
+                        source_id,
+                        parent,
+                        semantic_note_states[parent_key],
+                        source_record_mode="bound",
+                        source_occurrence_sha256=source_occurrence_sha256,
+                    )
+                )
             existing = existing_by_id.get(source_id)
             if existing is not None:
+                if candidate_revision is not None and prior is not None:
+                    print(
+                        f"source occurrence collision for {canonical_identity!r}",
+                        file=sys.stderr,
+                    )
+                    return 1
                 if _source_row_signature(existing) == _source_row_signature(payload):
                     existing_count += 1
                     continue
@@ -3094,11 +4076,25 @@ def command_ingest_zotero_snapshot(args: argparse.Namespace) -> int:  # noqa: C9
             else:
                 changed_count += 1
             existing_by_id[source_id] = payload
-            latest_by_identity[canonical_identity] = payload
-            latest_by_key[parent_key] = payload
 
         prior_current = set(_corpus_snapshot_current_source_ids(state))
         removed_count = len(prior_current - matched_prior_source_ids)
+        if (
+            allow_refresh
+            and snapshot_state_sha == bound_state_sha
+            and state.get("corpus_snapshot_current_source_revision_guards")
+            is not None
+            and semantic is not None
+            and semantic.get("state_sha256")
+            != state.get("corpus_semantic_snapshot_state_sha256")
+            and not pending_rows
+            and removed_count == 0
+        ):
+            print(
+                "semantic snapshot changed outside source-defining guards",
+                file=sys.stderr,
+            )
+            return 1
         staged_records = _stage_source_rows(paths, records, pending_rows)
         staged_state = dict(state)
         staged_state["corpus_snapshot_path"] = str(candidate_snapshot_path)
@@ -3107,6 +4103,17 @@ def command_ingest_zotero_snapshot(args: argparse.Namespace) -> int:  # noqa: C9
         staged_state["corpus_snapshot_identity_sha256"] = snapshot_identity
         staged_state["corpus_snapshot_state_sha256"] = snapshot_state_sha
         staged_state["corpus_snapshot_current_source_ids"] = current_source_ids
+        if semantic is not None and semantic_path is not None:
+            staged_state["corpus_semantic_snapshot_path"] = str(semantic_path)
+            staged_state["corpus_semantic_snapshot_file_sha256"] = (
+                semantic_file_digest
+            )
+            staged_state["corpus_semantic_snapshot_state_sha256"] = semantic.get(
+                "state_sha256"
+            )
+            staged_state["corpus_snapshot_current_source_revision_guards"] = (
+                current_revision_guards
+            )
 
         if allow_refresh:
             _stage_refresh_event(
@@ -3124,11 +4131,47 @@ def command_ingest_zotero_snapshot(args: argparse.Namespace) -> int:  # noqa: C9
                     "snapshot_file_sha256": file_digest,
                     "snapshot_state_sha256": snapshot_state_sha,
                     "snapshot_identity_sha256": snapshot_identity,
+                    **(
+                        {
+                            "previous_semantic_snapshot_path": state.get(
+                                "corpus_semantic_snapshot_path"
+                            )
+                            or (
+                                str(validated_prior_semantic_path)
+                                if validated_prior_semantic_path is not None
+                                else None
+                            ),
+                            "previous_semantic_snapshot_file_sha256": state.get(
+                                "corpus_semantic_snapshot_file_sha256"
+                            )
+                            or validated_prior_semantic_file_digest,
+                            "previous_semantic_snapshot_state_sha256": state.get(
+                                "corpus_semantic_snapshot_state_sha256"
+                            )
+                            or (
+                                validated_prior_semantic.get("state_sha256")
+                                if validated_prior_semantic is not None
+                                else None
+                            ),
+                            "semantic_snapshot_path": str(semantic_path),
+                            "semantic_snapshot_file_sha256": semantic_file_digest,
+                            "semantic_snapshot_state_sha256": semantic.get(
+                                "state_sha256"
+                            ),
+                        }
+                        if semantic is not None and semantic_path is not None
+                        else {}
+                    ),
                     "added": added_count,
                     "changed": changed_count,
                     "existing": existing_count,
                     "removed": removed_count,
                     "current": len(current_source_ids),
+                    **(
+                        {"source_revision_guards": current_revision_guards}
+                        if semantic is not None
+                        else {}
+                    ),
                 },
             )
 
@@ -3524,6 +4567,7 @@ def _export_parent_bibliography(parent: dict[str, Any]) -> dict[str, Any]:
 
 def _verified_export_zotero_metadata(
     state: dict[str, Any],
+    source_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, dict[str, Any]]:
     snapshot_path = state.get("corpus_snapshot_path")
     if not isinstance(snapshot_path, str) or not snapshot_path.strip():
@@ -3559,10 +4603,26 @@ def _verified_export_zotero_metadata(
             raise ValueError(f"bound Zotero snapshot {label} mismatch during export")
 
     metadata: dict[str, dict[str, Any]] = {}
+    revision_guards = state.get("corpus_snapshot_current_source_revision_guards")
+    guarded_ids_by_key: dict[str, str] | None = None
+    if revision_guards is not None:
+        _validate_guarded_snapshot_membership(
+            snapshot,
+            state,
+            source_rows or [],
+            revision_guards,
+        )
+        guarded_ids_by_key = {
+            str(guard["zotero_parent_key"]): str(guard["source_id"])
+            for guard in revision_guards
+        }
     expected_current_ids: list[str] = []
     for parent in _snapshot_parents_sorted(snapshot["parents"]):
-        parent_hash = _snapshot_parent_identity_hash(parent)
-        source_id = _parent_source_id(parent, parent_hash)
+        if guarded_ids_by_key is not None:
+            source_id = guarded_ids_by_key[str(parent["key"])]
+        else:
+            parent_hash = _snapshot_parent_identity_hash(parent)
+            source_id = _parent_source_id(parent, parent_hash)
         expected_current_ids.append(source_id)
         metadata[source_id] = _export_parent_bibliography(parent)
     if expected_current_ids != _corpus_snapshot_current_source_ids(state):
@@ -3576,7 +4636,9 @@ def _export_sources(
     has_current_membership = "corpus_snapshot_current_source_ids" in state
     current_ids = set(_corpus_snapshot_current_source_ids(state))
     zotero_bound = any(row.get("role") == "zotero_corpus" for row in sources)
-    zotero_metadata = _verified_export_zotero_metadata(state) if zotero_bound else {}
+    zotero_metadata = (
+        _verified_export_zotero_metadata(state, sources) if zotero_bound else {}
+    )
 
     exported: list[dict[str, Any]] = []
     for source in sorted(sources, key=lambda row: str(row.get("record_id") or "")):
@@ -4256,6 +5318,20 @@ def _build_parser() -> argparse.ArgumentParser:
 
     ingest = commands.add_parser("ingest-zotero-snapshot")
     ingest.add_argument("--snapshot", required=True)
+    ingest.add_argument(
+        "--semantic-snapshot",
+        help=(
+            "absolute ZoteroCorpusSemanticSnapshot/v1 paired with --snapshot "
+            "for note-aware source revisions"
+        ),
+    )
+    ingest.add_argument(
+        "--prior-semantic-snapshot",
+        help=(
+            "absolute prior semantic snapshot; required only for one-time "
+            "migration of legacy parent-only corpus rows"
+        ),
+    )
     ingest.add_argument("--allow-refresh", action="store_true")
     ingest.set_defaults(func=command_ingest_zotero_snapshot)
 

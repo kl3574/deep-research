@@ -172,6 +172,62 @@ Passing emits `CountercheckPragmaticSaturationAssessment/v1` with
 This is bounded pragmatic saturation, never systematic-review, domain, or
 universal completeness.
 
+## Scientific-equivalence authority rebind
+
+A historical countercheck is never resealed after its authoritative RKN gains
+only corpus-lifecycle revisions. Instead, create a private
+`CountercheckAuthorityRebindInput/v1` containing hash-bound references to the
+historical closure, its historical `KnowledgeNetwork/v1`, the current
+authoritative `KnowledgeNetwork/v1`, and both owners' `network.json` plus all
+seven JSONL ledgers. Run:
+
+```bash
+python scripts/countercheck_closure.py rebind-authority \
+  --input authority-rebind-input.json --output authority-binding.json
+```
+
+The owner recursively replays the old closure and requires its before/after
+network file SHA, snapshot ID, and canonical content SHA to be identical. Both
+networks must pass the export validator and must be regenerated exactly from
+their separately hash-bound, owner-validated ledger roots. The five scientific
+ledgers (`entities`, `claims`, `evidence`, `relations`, and `gaps`) are
+byte-identical. The non-corpus scientific export projection, including method
+and full-text sources, claims/evidence, conflicts, gaps, completion gates, and
+non-lifecycle relations, is also identical.
+
+The two owner directories are held under their ordered shared `.lock` files for
+the complete comparison. Every artifact is opened with no-follow semantics and
+checked by descriptor/path fingerprints before and after reading, so a mixed or
+concurrently replaced seven-file view cannot authorize an overlay.
+
+The only accepted delta is an exact byte-prefix append of Zotero-corpus source
+revisions plus one matching `snapshot_refreshed` event and its membership/revision
+guards. Each revision directly supersedes one old current member, preserves its
+canonical identity/version, read depth/version, role, item type, parent key,
+and parent bibliographic metadata hash, and exactly explains the ordered current
+membership. Additions, removals, reordering, non-prefix rewrites, other event
+types, count inconsistencies, or state changes outside corpus snapshot and
+semantic-snapshot bindings fail closed.
+
+Passing emits the immutable overlay `CountercheckAuthorityBinding/v1`. It binds
+the old closure digest, old/new network references, both ledger authorities, a
+scientific-core digest, and the computed delta audit. Its equivalence scope is
+only `countercheck_status_preservation_only`: full network content is explicitly
+changed, and note-semantic equality is measured only where the historical
+authority already binds a semantic snapshot or source revision. A legacy
+predecessor without such a binding is reported as
+`unproven_historical_legacy_guard`; an event-supplied previous-semantic path is
+never promoted into historical authority. Note semantics are never used as an
+equivalence claim. It preserves `round_status=partial` and
+`closure_status=partial_provider`, records historical search reuse while stating
+that the rebind operation itself performed no search, marks Round 07 only as
+`not_started_by_this_binding`, does not advance a streak, and fixes every
+saturation/completeness field to false. It also records
+`saturation_eligible: false` explicitly.
+`validate` reopens the input and recursively replays the entire chain. The
+overlay is not accepted by `assess-streak` and grants no authority to rewrite an
+axis plan, request/result set, screening, Tier-A review, closure, or RKN.
+
 ## Private output safety
 
 The writer creates missing directories as `0700`, rejects nonprivate or symlink

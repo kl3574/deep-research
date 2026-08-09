@@ -17,12 +17,53 @@ var ZoteroDeclarativeBridgeCore = (() => {
   const METADATA_PROFILE_FIELDS = [
     "DOI", "creators", "publicationTitle", "volume", "issue", "pages", "date",
   ];
-  const METADATA_SERIALIZER_GUARD_PROFILE = "zotero_managed_storage_equivalence_v1";
-  const METADATA_SERIALIZER_PARENT_EXCLUDED_FIELDS = new Set([
-    "DOI", "collections", "creators", "date", "dateModified", "issue", "pages",
-    "publicationTitle", "tags", "version", "volume",
-  ]);
-  const METADATA_SERIALIZER_ATTACHMENT_ALLOWED_FIELDS = new Set(["filename", "version"]);
+  const METADATA_SERIALIZER_GUARD_PROFILE = "zotero_managed_storage_equivalence_v2";
+  const METADATA_SERIALIZER_PROJECTION_SCHEMA = "ZoteroMetadataCanonicalProjection/v1";
+  const METADATA_SERIALIZER_PARENT_TEXT_FIELDS = [
+    "title", "abstractNote", "publicationTitle", "volume", "issue", "pages", "date",
+    "series", "seriesTitle", "seriesText", "journalAbbreviation", "language", "DOI",
+    "ISSN", "PMID", "PMCID", "shortTitle", "url", "accessDate", "archive",
+    "archiveLocation", "libraryCatalog", "callNumber", "rights", "extra", "citationKey",
+    "partNumber", "partTitle", "place", "publisher", "section",
+  ];
+  const METADATA_SERIALIZER_NOTE_TEXT_FIELDS = ["parentItem", "note", "dateAdded", "dateModified"];
+  const METADATA_SERIALIZER_ATTACHMENT_TEXT_FIELDS = [
+    "parentItem", "title", "url", "accessDate", "linkMode", "contentType", "charset",
+    "path", "filename", "note", "dateAdded", "dateModified",
+  ];
+  const METADATA_SERIALIZER_PROJECTION_CONTRACT = Object.freeze({
+    schema: METADATA_SERIALIZER_PROJECTION_SCHEMA,
+    defaults: {text: "", list: [], object: {}, boolean: false, scalar: null},
+    parent: {
+      item_type: "journalArticle",
+      text_fields: [...METADATA_SERIALIZER_PARENT_TEXT_FIELDS],
+      list_fields: ["creators", "tags", "collections"],
+      object_fields: ["relations"],
+      boolean_fields: ["deleted", "inPublications"],
+      stable_excluded: [
+        "version", "dateModified", "tags", "collections", ...METADATA_PROFILE_FIELDS,
+      ],
+    },
+    note: {
+      item_type: "note",
+      text_fields: [...METADATA_SERIALIZER_NOTE_TEXT_FIELDS],
+      list_fields: ["tags", "collections"],
+      object_fields: ["relations"],
+      boolean_fields: ["deleted"],
+      exact: true,
+    },
+    attachment: {
+      item_type: "attachment",
+      text_fields: [...METADATA_SERIALIZER_ATTACHMENT_TEXT_FIELDS],
+      scalar_fields: ["lastRead"],
+      list_fields: ["tags", "collections"],
+      object_fields: ["relations"],
+      boolean_fields: ["deleted"],
+      supplemental_fields: ["content_md5"],
+      serializer_only_fields: ["md5", "mtime"],
+      stable_excluded: ["version", "filename"],
+    },
+  });
   const STORAGE_BLOCK_TAGS = new Set([
     "blockquote", "div", "h1", "h2", "h3", "h4", "h5", "h6", "li",
     "ol", "p", "pre", "table", "tbody", "td", "th", "thead", "tr", "ul",
@@ -493,27 +534,207 @@ var ZoteroDeclarativeBridgeCore = (() => {
     });
   }
 
-  function metadataSerializerParentStableData(data) {
-    assertion(data && typeof data === "object" && !Array.isArray(data), "metadata serializer parent data is invalid");
-    return Object.fromEntries(
-      Object.entries(data)
-        .filter(([field]) => !METADATA_SERIALIZER_PARENT_EXCLUDED_FIELDS.has(field))
-        .map(([field, value]) => [field, JSON.parse(JSON.stringify(value))]),
-    );
+  function metadataSerializerProjectionContract() {
+    return JSON.parse(JSON.stringify(METADATA_SERIALIZER_PROJECTION_CONTRACT));
   }
 
-  function metadataSerializerAttachmentStableData(data) {
+  function metadataSerializerKnownFields(data, allowed, label) {
+    const unknown = Object.keys(data).filter(field => !allowed.has(field)).sort();
+    assertion(unknown.length === 0, `${label} contains unknown fields: ${unknown.join(", ")}`);
+  }
+
+  function metadataSerializerText(data, field, label) {
+    let value = data[field];
+    if (value === undefined || value === null || value === false) value = "";
+    assertion(typeof value === "string", `${label}.${field} must be a string`);
+    return value;
+  }
+
+  function metadataSerializerBoolean(data, field, label) {
+    const value = data[field] === undefined ? false : data[field];
+    assertion(typeof value === "boolean", `${label}.${field} must be boolean`);
+    return value;
+  }
+
+  function metadataSerializerTags(data, label) {
+    const values = data.tags === undefined ? [] : data.tags;
+    assertion(Array.isArray(values), `${label}.tags must be an array`);
+    return values.map((value, index) => {
+      assertion(value && typeof value === "object" && !Array.isArray(value), `${label}.tags[${index}] is invalid`);
+      const fields = Object.keys(value);
+      assertion(fields.includes("tag") && fields.every(field => ["tag", "type"].includes(field)), `${label}.tags[${index}] is invalid`);
+      const tagType = value.type === undefined ? 0 : value.type;
+      assertion(Number.isInteger(tagType) && tagType >= 0, `${label}.tags[${index}].type is invalid`);
+      return {tag: text(value.tag, `${label}.tags[${index}].tag`, false, 16384), type: tagType};
+    });
+  }
+
+  function metadataSerializerCollections(data, label) {
+    const values = data.collections === undefined ? [] : data.collections;
+    assertion(Array.isArray(values), `${label}.collections must be an array`);
+    const result = values.map((value, index) => key(value, `${label}.collections[${index}]`));
+    assertion(new Set(result).size === result.length, `${label}.collections contains duplicates`);
+    return result;
+  }
+
+  function metadataSerializerRelations(data, label) {
+    const values = data.relations === undefined ? {} : data.relations;
+    assertion(values && typeof values === "object" && !Array.isArray(values), `${label}.relations must be an object`);
+    const result = {};
+    for (const [predicate, rawMembers] of Object.entries(values)) {
+      text(predicate, `${label}.relations predicate`, false, 16384);
+      const members = typeof rawMembers === "string" ? [rawMembers] : rawMembers;
+      assertion(Array.isArray(members) && members.every(member => typeof member === "string"), `${label}.relations[${predicate}] is invalid`);
+      const normalized = [...members].sort();
+      assertion(new Set(normalized).size === normalized.length, `${label}.relations[${predicate}] contains duplicates`);
+      result[predicate] = normalized;
+    }
+    return result;
+  }
+
+  function metadataSerializerCreators(data, label) {
+    const values = data.creators === undefined ? [] : data.creators;
+    assertion(Array.isArray(values), `${label}.creators must be an array`);
+    return values.map((value, index) => {
+      const creatorLabel = `${label}.creators[${index}]`;
+      assertion(value && typeof value === "object" && !Array.isArray(value), `${creatorLabel} is invalid`);
+      assertion(Object.keys(value).every(field => ["creatorType", "firstName", "lastName", "name"].includes(field)), `${creatorLabel} is invalid`);
+      return {
+        creator_type: text(value.creatorType, `${creatorLabel}.creatorType`, false, 4096),
+        first_name: metadataSerializerText(value, "firstName", creatorLabel),
+        last_name: metadataSerializerText(value, "lastName", creatorLabel),
+        name: metadataSerializerText(value, "name", creatorLabel),
+      };
+    });
+  }
+
+  function metadataSerializerParentProjection(data) {
+    assertion(data && typeof data === "object" && !Array.isArray(data), "metadata serializer parent data is invalid");
+    const allowed = new Set([
+      "key", "version", "itemType", "creators", "tags", "collections", "relations",
+      "dateAdded", "dateModified", "deleted", "inPublications", ...METADATA_SERIALIZER_PARENT_TEXT_FIELDS,
+    ]);
+    metadataSerializerKnownFields(data, allowed, "metadata serializer parent data");
+    assertion(data.itemType === "journalArticle", "metadata serializer parent must be journalArticle");
+    const fields = {};
+    for (const field of METADATA_SERIALIZER_PARENT_TEXT_FIELDS) {
+      fields[field] = metadataSerializerText(data, field, "metadata serializer parent data");
+    }
+    return {
+      key: key(data.key, "metadata serializer parent data.key"),
+      version: positiveInt(data.version, "metadata serializer parent data.version"),
+      item_type: "journalArticle",
+      fields,
+      creators: metadataSerializerCreators(data, "metadata serializer parent data"),
+      tags: metadataSerializerTags(data, "metadata serializer parent data"),
+      collections: metadataSerializerCollections(data, "metadata serializer parent data"),
+      relations: metadataSerializerRelations(data, "metadata serializer parent data"),
+      date_added: metadataSerializerText(data, "dateAdded", "metadata serializer parent data"),
+      date_modified: metadataSerializerText(data, "dateModified", "metadata serializer parent data"),
+      deleted: metadataSerializerBoolean(data, "deleted", "metadata serializer parent data"),
+      in_publications: metadataSerializerBoolean(data, "inPublications", "metadata serializer parent data"),
+    };
+  }
+
+  function metadataSerializerNoteProjection(data) {
+    assertion(data && typeof data === "object" && !Array.isArray(data), "metadata serializer note data is invalid");
+    const allowed = new Set([
+      "key", "version", "itemType", "tags", "collections", "relations", "deleted",
+      ...METADATA_SERIALIZER_NOTE_TEXT_FIELDS,
+    ]);
+    metadataSerializerKnownFields(data, allowed, "metadata serializer note data");
+    assertion(data.itemType === "note", "metadata serializer note must be note");
+    return {
+      key: key(data.key, "metadata serializer note data.key"),
+      version: positiveInt(data.version, "metadata serializer note data.version"),
+      item_type: "note",
+      parent_item: metadataSerializerText(data, "parentItem", "metadata serializer note data"),
+      note: metadataSerializerText(data, "note", "metadata serializer note data"),
+      tags: metadataSerializerTags(data, "metadata serializer note data"),
+      collections: metadataSerializerCollections(data, "metadata serializer note data"),
+      relations: metadataSerializerRelations(data, "metadata serializer note data"),
+      date_added: metadataSerializerText(data, "dateAdded", "metadata serializer note data"),
+      date_modified: metadataSerializerText(data, "dateModified", "metadata serializer note data"),
+      deleted: metadataSerializerBoolean(data, "deleted", "metadata serializer note data"),
+    };
+  }
+
+  function metadataSerializerAttachmentProjection(data, contentMD5 = null) {
     assertion(data && typeof data === "object" && !Array.isArray(data), "metadata serializer attachment data is invalid");
+    const allowed = new Set([
+      "key", "version", "itemType", "tags", "collections", "relations", "deleted",
+      "lastRead", "md5", "mtime", ...METADATA_SERIALIZER_ATTACHMENT_TEXT_FIELDS,
+    ]);
+    metadataSerializerKnownFields(data, allowed, "metadata serializer attachment data");
+    assertion(data.itemType === "attachment", "metadata serializer attachment must be attachment");
+    const rawMD5 = data.md5;
+    let observedMD5 = contentMD5 === null || contentMD5 === "" ? rawMD5 : contentMD5;
+    assertion(typeof observedMD5 === "string" && /^[0-9A-Fa-f]{32}$/.test(observedMD5), "metadata serializer attachment content_md5 is invalid");
+    observedMD5 = observedMD5.toLowerCase();
+    assertion(rawMD5 === undefined || rawMD5 === null || rawMD5 === "" || (
+      typeof rawMD5 === "string" && rawMD5.toLowerCase() === observedMD5
+    ), "metadata serializer attachment md5 evidence mismatch");
+    assertion(data.mtime === undefined || data.mtime === null || (
+      Number.isInteger(data.mtime) && data.mtime >= 0
+    ), "metadata serializer attachment mtime is invalid");
+    const lastRead = data.lastRead === undefined ? null : data.lastRead;
+    assertion(lastRead === null || typeof lastRead === "string" || (
+      Number.isInteger(lastRead) && lastRead >= 0
+    ), "metadata serializer attachment lastRead is invalid");
+    return {
+      key: key(data.key, "metadata serializer attachment data.key"),
+      version: positiveInt(data.version, "metadata serializer attachment data.version"),
+      item_type: "attachment",
+      parent_item: metadataSerializerText(data, "parentItem", "metadata serializer attachment data"),
+      title: metadataSerializerText(data, "title", "metadata serializer attachment data"),
+      url: metadataSerializerText(data, "url", "metadata serializer attachment data"),
+      access_date: metadataSerializerText(data, "accessDate", "metadata serializer attachment data"),
+      link_mode: metadataSerializerText(data, "linkMode", "metadata serializer attachment data"),
+      content_type: metadataSerializerText(data, "contentType", "metadata serializer attachment data"),
+      charset: metadataSerializerText(data, "charset", "metadata serializer attachment data"),
+      path: metadataSerializerText(data, "path", "metadata serializer attachment data"),
+      filename: metadataSerializerText(data, "filename", "metadata serializer attachment data"),
+      note: metadataSerializerText(data, "note", "metadata serializer attachment data"),
+      last_read: lastRead,
+      tags: metadataSerializerTags(data, "metadata serializer attachment data"),
+      collections: metadataSerializerCollections(data, "metadata serializer attachment data"),
+      relations: metadataSerializerRelations(data, "metadata serializer attachment data"),
+      date_added: metadataSerializerText(data, "dateAdded", "metadata serializer attachment data"),
+      date_modified: metadataSerializerText(data, "dateModified", "metadata serializer attachment data"),
+      deleted: metadataSerializerBoolean(data, "deleted", "metadata serializer attachment data"),
+      content_md5: observedMD5,
+    };
+  }
+
+  function metadataSerializerParentStableData(data) {
+    const projection = metadataSerializerParentProjection(data);
+    const fields = Object.fromEntries(
+      Object.entries(projection.fields).filter(([field]) => !METADATA_PROFILE_FIELDS.includes(field)),
+    );
+    return {
+      key: projection.key,
+      item_type: projection.item_type,
+      fields,
+      relations: projection.relations,
+      date_added: projection.date_added,
+      deleted: projection.deleted,
+      in_publications: projection.in_publications,
+    };
+  }
+
+  function metadataSerializerAttachmentStableData(data, contentMD5 = null) {
+    const projection = metadataSerializerAttachmentProjection(data, contentMD5);
     return Object.fromEntries(
-      Object.entries(data)
-        .filter(([field]) => !METADATA_SERIALIZER_ATTACHMENT_ALLOWED_FIELDS.has(field))
+      Object.entries(projection)
+        .filter(([field]) => !["filename", "version"].includes(field))
         .map(([field, value]) => [field, JSON.parse(JSON.stringify(value))]),
     );
   }
 
   function validateMetadataSerializerGuard(guard, label) {
-    exactKeys(guard, ["profile", "parent", "children", "guard_sha256"], label);
+    exactKeys(guard, ["profile", "projection_contract", "parent", "children", "guard_sha256"], label);
     assertion(guard.profile === METADATA_SERIALIZER_GUARD_PROFILE, `${label}.profile is unsupported`);
+    assertion(guard.projection_contract === METADATA_SERIALIZER_PROJECTION_SCHEMA, `${label}.projection_contract is unsupported`);
     exactKeys(guard.parent, [
       "raw_data_sha256", "stable_nonprofile_sha256", "tags_raw_sha256",
       "tags_set_sha256", "collections_raw_sha256", "collections_set_sha256",
@@ -939,8 +1160,12 @@ var ZoteroDeclarativeBridgeCore = (() => {
     metadataRepairCommitStateAfterFailure,
     metadataRepairParentIsClean,
     metadataRepairParentData,
+    metadataSerializerAttachmentProjection,
     metadataSerializerAttachmentStableData,
+    metadataSerializerNoteProjection,
+    metadataSerializerParentProjection,
     metadataSerializerParentStableData,
+    metadataSerializerProjectionContract,
     metadataSerializerSortedValues,
     noteStorageDOMFingerprint,
     noteStorageHTMLFingerprint,

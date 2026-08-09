@@ -15,9 +15,43 @@ const bootstrapSource = fs.readFileSync(
 );
 const STATE_A = "sha256:" + "1".repeat(64);
 
-function loadBootstrap() {
+function loadBootstrap(options = {}) {
   const callbacks = {commit: [], rollback: []};
   const events = [];
+  const hashEvents = [];
+  const nsICryptoHash = Object.freeze({MD5: 2});
+  const components = {
+    classes: {
+      "@mozilla.org/security/hash;1": {
+        createInstance(requestedInterface) {
+          assert.equal(requestedInterface, nsICryptoHash);
+          if (options.md5Failure) throw new Error("synthetic nsICryptoHash failure");
+          let digest = null;
+          return {
+            MD5: nsICryptoHash.MD5,
+            init(algorithm) {
+              assert.equal(algorithm, nsICryptoHash.MD5);
+              digest = nodeCrypto.createHash("md5");
+            },
+            update(bytes, length) {
+              assert.ok(digest, "nsICryptoHash must be initialized before update");
+              assert.equal(length, bytes.byteLength);
+              digest.update(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength));
+            },
+            finish(ascii) {
+              assert.equal(ascii, false);
+              assert.ok(digest, "nsICryptoHash must be initialized before finish");
+              const result = digest.digest();
+              hashEvents.push({algorithm: "md5", hex: result.toString("hex")});
+              digest = null;
+              return result.toString("latin1");
+            },
+          };
+        },
+      },
+    },
+    interfaces: {nsICryptoHash},
+  };
   const zotero = {
     DB: {
       addCurrentCallback(kind, callback) {
@@ -46,11 +80,12 @@ function loadBootstrap() {
   const ioUtils = {};
   const context = vm.createContext({
     __ZOTERO_DECLARATIVE_BRIDGE_TEST__: true,
-    ZoteroDeclarativeBridgeCore: core,
+    ZoteroDeclarativeBridgeCore: options.core || core,
     Zotero: zotero,
     Services: {scriptloader: {loadSubScript() {}}},
     IOUtils: ioUtils,
     PathUtils: {join: (...parts) => parts.join("/")},
+    Components: components,
     crypto,
     TextEncoder,
     DOMParser: class {},
@@ -69,6 +104,7 @@ function loadBootstrap() {
   return {
     callbacks,
     events,
+    hashEvents,
     testing: context.ZoteroDeclarativeBridge.testing,
     zotero,
     ioUtils,
@@ -84,41 +120,52 @@ function rawSHA(value) {
   return "sha256:" + nodeCrypto.createHash("sha256").update(value).digest("hex");
 }
 
+function rawMD5(value) {
+  return nodeCrypto.createHash("md5").update(value).digest("hex");
+}
+
 function serializerGuardFromRaw(parentData, noteData, attachmentData, storagePath, contentSHA, sizeBytes) {
+  const parentProjection = core.metadataSerializerParentProjection(parentData);
+  const noteProjection = core.metadataSerializerNoteProjection(noteData);
+  const attachmentProjection = core.metadataSerializerAttachmentProjection(
+    attachmentData,
+    attachmentData.md5,
+  );
   const children = [
     {
       key: noteData.key,
       item_type: "note",
       version: noteData.version,
-      raw_data_sha256: canonicalSHA(noteData),
+      raw_data_sha256: canonicalSHA(noteProjection),
       content_sha256: rawSHA(Buffer.from(noteData.note, "utf8")),
     },
     {
       key: attachmentData.key,
       item_type: "attachment",
       version: attachmentData.version,
-      raw_data_sha256: canonicalSHA(attachmentData),
+      raw_data_sha256: canonicalSHA(attachmentProjection),
       stable_data_sha256: canonicalSHA(
-        core.metadataSerializerAttachmentStableData(attachmentData),
+        core.metadataSerializerAttachmentStableData(attachmentData, attachmentData.md5),
       ),
-      filename_sha256: canonicalSHA(attachmentData.filename),
+      filename_sha256: canonicalSHA(attachmentProjection.filename),
       storage_path_sha256: canonicalSHA(storagePath),
       content_sha256: contentSHA,
       size_bytes: sizeBytes,
     },
   ];
   const unsigned = {
-    profile: "zotero_managed_storage_equivalence_v1",
+    profile: "zotero_managed_storage_equivalence_v2",
+    projection_contract: "ZoteroMetadataCanonicalProjection/v1",
     parent: {
-      raw_data_sha256: canonicalSHA(parentData),
+      raw_data_sha256: canonicalSHA(parentProjection),
       stable_nonprofile_sha256: canonicalSHA(
         core.metadataSerializerParentStableData(parentData),
       ),
-      tags_raw_sha256: canonicalSHA(parentData.tags),
-      tags_set_sha256: canonicalSHA(core.metadataSerializerSortedValues(parentData.tags)),
-      collections_raw_sha256: canonicalSHA(parentData.collections),
+      tags_raw_sha256: canonicalSHA(parentProjection.tags),
+      tags_set_sha256: canonicalSHA(core.metadataSerializerSortedValues(parentProjection.tags)),
+      collections_raw_sha256: canonicalSHA(parentProjection.collections),
       collections_set_sha256: canonicalSHA(
-        core.metadataSerializerSortedValues(parentData.collections),
+        core.metadataSerializerSortedValues(parentProjection.collections),
       ),
     },
     children,
@@ -127,7 +174,7 @@ function serializerGuardFromRaw(parentData, noteData, attachmentData, storagePat
 }
 
 function loadProductionV2Bootstrap(options = {}) {
-  const runtime = loadBootstrap();
+  const runtime = loadBootstrap(options);
   const baselineBytes = Buffer.from("%PDF-production-metadata-evidence\n", "utf8");
   const liveBytes = Buffer.from(options.liveBytes || baselineBytes);
   const baselineContentSHA = rawSHA(baselineBytes);
@@ -176,7 +223,7 @@ function loadProductionV2Bootstrap(options = {}) {
     url: "https://example.invalid/paper.pdf",
     contentType: "application/pdf",
     linkMode: "imported_file",
-    md5: "0123456789abcdef0123456789abcdef",
+    md5: rawMD5(baselineBytes),
     mtime: 1700000000000,
     filename: "2026 - Synthetic sensitivity study.pdf",
     collections: [],
@@ -191,6 +238,9 @@ function loadProductionV2Bootstrap(options = {}) {
     title: options.attachmentTitle || expectedAttachmentData.title,
     filename: "Lovelace - 2026 - Synthetic sensitivity study.pdf",
   };
+  const liveAttachmentToJSON = {...liveAttachmentData};
+  delete liveAttachmentToJSON.md5;
+  delete liveAttachmentToJSON.mtime;
   const expectedPath = "/managed/storage/PDF00001/2026 - Synthetic sensitivity study.pdf";
   const livePath = "/managed/storage/PDF00001/Lovelace - 2026 - Synthetic sensitivity study.pdf";
   const parentBase = {
@@ -322,6 +372,7 @@ function loadProductionV2Bootstrap(options = {}) {
     getNote: () => noteHTML,
     toJSON: () => JSON.parse(JSON.stringify(noteData)),
   };
+  let attachmentHashReads = 0;
   const attachmentItem = {
     id: 61,
     parentItemID: 41,
@@ -329,9 +380,13 @@ function loadProductionV2Bootstrap(options = {}) {
     version: liveAttachmentData.version,
     attachmentContentType: "application/pdf",
     attachmentLinkMode: 1,
+    get attachmentHash() {
+      attachmentHashReads += 1;
+      return Promise.resolve(options.attachmentMD5 || "f".repeat(32));
+    },
     getCollections: () => [],
     getFilePathAsync: async () => livePath,
-    toJSON: () => JSON.parse(JSON.stringify(liveAttachmentData)),
+    toJSON: () => JSON.parse(JSON.stringify(liveAttachmentToJSON)),
   };
   const itemMap = new Map([[51, noteItem], [61, attachmentItem]]);
   runtime.zotero.Libraries = {
@@ -369,7 +424,14 @@ function loadProductionV2Bootstrap(options = {}) {
     ioEvents.push(["read", pathValue]);
     return new Uint8Array(liveBytes);
   };
-  return {...runtime, repairManifest, ioEvents, livePath, baselineBytes};
+  return {
+    ...runtime,
+    repairManifest,
+    ioEvents,
+    livePath,
+    baselineBytes,
+    attachmentHashReads: () => attachmentHashReads,
+  };
 }
 
 function manifest() {
@@ -403,7 +465,8 @@ function manifest() {
 function serializerGuard(postCommit = false) {
   const h = character => "sha256:" + character.repeat(64);
   return {
-    profile: "zotero_managed_storage_equivalence_v1",
+    profile: "zotero_managed_storage_equivalence_v2",
+    projection_contract: "ZoteroMetadataCanonicalProjection/v1",
     parent: {
       raw_data_sha256: postCommit ? h("9") : h("1"),
       stable_nonprofile_sha256: h("2"),
@@ -649,7 +712,8 @@ test("commit callback failure is reported as committed_unverified", async () => 
 });
 
 test("v2 production readback hashes attachment bytes and accepts only bounded rename/set-order equivalence", async () => {
-  const {testing, repairManifest, ioEvents, livePath} = loadProductionV2Bootstrap();
+  const runtime = loadProductionV2Bootstrap({attachmentMD5: "0".repeat(32)});
+  const {testing, repairManifest, ioEvents, livePath} = runtime;
   const result = await testing.dispatch(
     {action: "readback", payload: {manifest: repairManifest}},
   );
@@ -661,13 +725,46 @@ test("v2 production readback hashes attachment bytes and accepts only bounded re
   assert.ok(result.state.entry.operation.raw_hashes.expected_guard_sha256);
   assert.ok(result.state.entry.operation.raw_hashes.observed_guard_sha256);
   assert.deepEqual(ioEvents, [["stat", livePath], ["read", livePath]]);
+  assert.equal(runtime.attachmentHashReads(), 0);
+  assert.deepEqual(runtime.hashEvents, [
+    {algorithm: "md5", hex: rawMD5(runtime.baselineBytes)},
+  ]);
+});
+
+test("v2 attachment byte changes alter both same-read hashes and fail readback", async () => {
+  const baseline = Buffer.from("%PDF-production-metadata-evidence\n", "utf8");
+  const changedBytes = Buffer.from(baseline);
+  changedBytes[changedBytes.length - 2] ^= 1;
+
+  const direct = loadProductionV2Bootstrap({liveBytes: changedBytes});
+  const evidence = await direct.testing.fileEvidence(direct.livePath);
+  assert.equal(evidence.sha256, rawSHA(changedBytes));
+  assert.equal(evidence.content_md5, rawMD5(changedBytes));
+  assert.notEqual(evidence.sha256, rawSHA(direct.baselineBytes));
+  assert.notEqual(evidence.content_md5, rawMD5(direct.baselineBytes));
+  assert.deepEqual(direct.ioEvents, [["stat", direct.livePath], ["read", direct.livePath]]);
+  assert.equal(direct.attachmentHashReads(), 0);
+
+  const readback = loadProductionV2Bootstrap({liveBytes: changedBytes});
+  await assert.rejects(
+    readback.testing.dispatch({action: "readback", payload: {manifest: readback.repairManifest}}),
+    /stable_data_sha256 drift/,
+  );
+  assert.deepEqual(
+    readback.ioEvents,
+    [["stat", readback.livePath], ["read", readback.livePath]],
+  );
+  assert.equal(readback.attachmentHashReads(), 0);
+  assert.deepEqual(readback.hashEvents, [
+    {algorithm: "md5", hex: rawMD5(changedBytes)},
+  ]);
 });
 
 test("v2 production readback rejects byte, size, title, and version drift", async () => {
   const cases = [
-    ["bytes", {liveBytes: Buffer.from("%PDF-different-metadata-evidence!\n")}, /content_sha256 drift/],
     ["size", {reportedSize: 999}, /bytes are unreadable/],
     ["title", {attachmentTitle: "Changed attachment title"}, /stable_data_sha256 drift/],
+    ["md5 engine", {md5Failure: true}, /bytes are unreadable/],
     ["parent version", {parentVersion: 2}, /parent-version regressed/],
     ["attachment version", {attachmentVersion: 4}, /version regressed/],
   ];

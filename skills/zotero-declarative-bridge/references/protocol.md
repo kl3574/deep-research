@@ -117,19 +117,37 @@ attachment-write count. New reviewed sources use
 `ZoteroReviewedParentMetadataRepair/v2`; v1 remains accepted with exact-only
 readback behavior.
 
-The guard binds the parent raw hash, every stable non-profile field, raw and
-set-normalized tag/collection hashes, exact note raw/content hashes, and each
-attachment raw record, stable record, file SHA-256/size, filename hash, and
-storage-path hash. The attachment stable record removes only `version` and
-`filename`; path is bound separately. Attachment key/type/title/URL, linkMode,
-contentType, MD5, bytes, size, all other attachment metadata, note
-text/metadata, and parent tag/collection members cannot change.
+The guard binds hashes of the explicit
+`ZoteroMetadataCanonicalProjection/v1` parent, note, and attachment records,
+not arbitrary serializer output. That contract fixes the accepted Zotero 9
+fields, missing/null defaults, canonical creator/tag/relation shapes, and
+tag/collection set ordering. Unknown source fields fail closed. The parent
+binds its canonical raw-order hash, every stable non-profile field, and raw and
+set-normalized tag/collection hashes. Notes bind their exact canonical record
+and content. Attachments bind canonical raw/stable records, file SHA-256/size,
+filename, and storage path. The stable attachment projection removes only
+`version` and `filename`; path is bound separately. Attachment
+key/type/title/URL, linkMode, contentType, MD5, bytes, size, note, tags and
+collections therefore cannot change.
+
+Zotero's Local API response uses `toResponseJSON()` and exposes synchronized
+storage `md5` and `mtime`, while the plugin's default `item.toJSON()` omits
+both. `mtime` is intentionally excluded because byte SHA-256 and size are the
+file-content authority. MD5 is not excluded. The compiler feeds SHA-256 and MD5
+from the same descriptor-read loop and cross-checks the Local API MD5. The
+plugin performs exactly one `IOUtils.read()` and feeds that same `Uint8Array` to
+WebCrypto SHA-256 and Gecko `nsICryptoHash` MD5; `item.attachmentHash` is never
+a canonical source or trusted fallback. Hash initialization, update, finish,
+or digest-shape failure makes the bytes unreadable and fails closed. Both sides
+inject the resulting `content_md5` into the canonical attachment projection.
+This avoids cross-serializer false drift without weakening file or metadata
+checks.
 
 The Python live compiler obtains each v2 attachment path only from the exact
 Local API attachment `/file` redirect. The resolved file must be a direct,
 regular, non-symlink child of
 `$HOME/Zotero/storage/<attachment-key>/`; it is opened with no-follow semantics
-and its stable identity, byte count, PDF magic, and SHA-256 are measured from
+and its stable identity, byte count, PDF magic, SHA-256, and MD5 are measured from
 the opened descriptor. Observed size/hash fields cannot be copied from reviewed
 expectations. Missing bytes, a non-storage redirect, read-time drift, or a
 size/hash mismatch aborts compilation without serializing the private path.
