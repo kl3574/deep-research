@@ -18,6 +18,13 @@ Persist reviewed research state without changing what the evidence says.
    to the currently authoritative inventory.
 3. Preserve scope, locator, source version, polarity, independence group,
    assumptions, exclusions, and defeaters. Never upgrade evidence strength.
+   Before any new scientific append, replay the finalized evidence-appraisal
+   package against its detached approval, prepared request, independent review,
+   actual `EvidenceAppraisalOwnerBundle/v1` files and receipts, complete lineage,
+   and externally expected authority digest. Then create an owner-derived
+   `EvidenceAppraisalBinding/v1` and separately review its exact operation
+   projection. Bindings and events retain only ordered owner-binding digests,
+   never runtime paths.
 4. Run `derive-gaps`, `validate`, and `status` after substantive changes. Resolve
    or narrow gaps only through append-only transitions with evidence references.
 5. Create a snapshot, then export the validated projection. Keep the ledger and
@@ -29,6 +36,27 @@ Use `scripts/knowledge_network.py --help` for commands and fields.
 
 - Only `supports` is decisive coverage. Preserve `qualifies`, `contradicts`, and
   `not_tested`, but never count them as decisive support.
+- New `add-claim`, `add-evidence`, scientific `add-relation`, and evidence-based
+  `transition-gap` appends require the same finalized binding and reviewed exact-
+  operation projection at the low-level CLI. There is no `resolve-conflict`
+  mutation command; conflicts change only through appraised evidence/relation
+  appends and derived state. Exact no-ops remain no-ops. `add-source`, unreferenced
+  entity maintenance, validation, status, snapshot, export, ingest, and derive do
+  not consume appraisal authority.
+- `record-gap` creates only an initial `open` row and accepts no resolution
+  evidence or resolution source. Use `transition-gap` for every blocked/resolved
+  state, so evidence-based resolution cannot bypass the appraisal gate.
+- Map `decisive_within_scope` only to `supports` or `contradicts`. For
+  `qualified_only`, each admissible upstream `supports`, `qualifies`, or
+  `contradicts` verdict projects only to `qualifies`; it never preserves or
+  upgrades the directional stance. `context_only`, `inadmissible`,
+  `unresolved`, and `not_tested` cannot authorize a scientific mutation. Scope
+  must be explicitly reviewed as matching. Duplicate source/study lineages share
+  one independence group regardless of reviewer count.
+- A candidate set, self-resealed package, stale network binding, relation/scope
+  mismatch, or replayed operation fails closed with no override. Legacy ledgers
+  remain readable and legacy patch decisions are labeled `not_appraised_legacy`;
+  they cannot authorize a new scientific append.
 - Latest open claimless explicit P0/P1 or high-decision-impact gaps block
   completion; apply the documented legacy mapping rather than silently rewriting
   old records.

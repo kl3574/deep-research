@@ -17,6 +17,17 @@ Without a configured cryptographic trust store, its operator and authority
 identities are auditable assertions. The CLI therefore always requires a
 separate explicit acceptance file and never manufactures or self-authorizes one.
 
+Every accepted scientific operation additionally requires an
+`EvidenceAppraisalBinding/v1` and reviewed
+`EvidenceAppraisalNetworkProjection/v1`. `bind-appraisal` accepts only a package
+that the evidence-appraisal owner can replay from the detached approval,
+prepared request, independent review, actual `EvidenceAppraisalOwnerBundle/v1`
+files and verification receipts, complete predecessor lineage, and an externally
+supplied expected authority digest. A self-contained candidate set
+or self-resealed package is not authority. The binding remains
+`mutation_authorized=false`; only the separate projection review may authorize
+exact operations whose relation and scope mapping agree with the appraisal.
+
 ## `NetworkPatchEvidencePack/v1`
 
 Every validate, prepare, dry-run, and apply operation requires a runtime evidence
@@ -152,6 +163,13 @@ verifier checking two sources leaves two source streams.
 `prepare-patch` projects every v2 action into a content-addressed
 `NetworkPatchPlan/v1` with status `pending_acceptance`. It cannot execute.
 
+Validation and preparation may retain reject/defer governance without an
+appraisal gate, but any accepted scientific apply fails closed unless the full
+gate is supplied again and replayed against the current network. The exact
+operation digest, target IDs, `network.json`, and all seven ledger byte prefixes
+prevent stale use and cross-operation replay. Appraisal does not close or advance
+countercheck no-add/streak state.
+
 `NetworkPatchAcceptance/v1` binds the exact network, proposal, and plan. It
 records a second-precision UTC decision time, an operator, content-addressed
 authority bases, and one ordered decision for every action. Decisions are
@@ -173,7 +191,10 @@ fields. Foreign operations,
 cross-basis source/claim/evidence/locator changes, reordered prerequisites, and
 unrelated entity injection fail closed. A relation is materialized as the exact
 content-addressed `target_claim`, one reviewed evidence record per basis, and one
-typed `supports` claim-to-evidence relation per basis; the query-like
+typed claim-to-evidence relation per basis using the exact appraisal projection:
+decisive `supports|contradicts` retain their stance, while admissible
+`qualified_only` `supports|qualifies|contradicts` all project to `qualifies`;
+the query-like
 `target_signature` is only an audited binding and is never written as a
 scientific claim statement.
 
@@ -219,3 +240,10 @@ Malformed or extended events block network validation. A handled failure during
 multi-file replacement rolls back every replaced live file and removes the
 prepared transaction journal; an unrecoverable rollback leaves the journal in
 place so later validation and mutation fail closed.
+
+Each accepted typed operation also appends exactly one `appraised_mutation`
+event in the same transaction as its scientific row. The event records only
+content-addressed package, authority, binding, and projection refs plus operation
+and target digests/IDs; it never records scores, note prose, source content, or
+private artifact paths. Older decision events remain valid historical input and
+are reported as `not_appraised_legacy`, but they cannot be reused for new science.

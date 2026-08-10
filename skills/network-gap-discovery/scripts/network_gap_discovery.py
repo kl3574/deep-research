@@ -23,9 +23,11 @@ NETWORK_SCHEMA = "KnowledgeNetwork/v1"
 PROBE_SCHEMA = "NetworkGapProbe/v1"
 HYPOTHESES_SCHEMA = "KnowledgeGapHypotheses/v1"
 REQUEST_SET_SCHEMA = "ScholarDiscoveryRequestSet/v1"
+APPRAISAL_REQUEST_SET_SCHEMA = "AppraisalScholarDiscoveryRequestSet/v1"
 LEARN_FROM_PAPERS_REQUEST_SET_SCHEMA = "LearnFromPapersRequestSet/v1"
 LEARN_FROM_PAPERS_REQUEST_SCHEMA = "LearnFromPapersRequest/v1"
 RESULT_SET_SCHEMA = "ScholarDiscoveryResultSet/v1"
+RESULT_SET_V2_SCHEMA = "ScholarDiscoveryResultSet/v2"
 REQUEST_SCHEMA = "ScholarDiscoveryRequest/v1"
 RESULT_SCHEMA = "ScholarDiscoveryResult/v1"
 REVIEWED_EVIDENCE_SET_SCHEMA = "ReviewedEvidenceSet/v1"
@@ -41,11 +43,24 @@ PATCH_SCHEMA_VERSION = "2.0"
 VERIFICATION_REQUEST_SCHEMA = "VerificationAttestationRequest/v1"
 VERIFIER_ATTESTATION_SCHEMA = "VerificationAttestation/v1"
 TARGET_CLAIM_SCHEMA = "NetworkPatchTargetClaim/v1"
+EVIDENCE_CHALLENGE_SCHEMA = "EvidenceChallenge/v1"
+TARGETED_EVIDENCE_NEED_SET_SCHEMA = "TargetedEvidenceNeedSet/v1"
+SEARCH_HISTORY_INDEX_SCHEMA = "SearchHistoryIndex/v1"
+SEARCH_HISTORY_INDEX_V2_SCHEMA = "SearchHistoryIndex/v2"
+HISTORY_AUTHORITY_MANIFEST_SCHEMA = "HistoryAuthorityManifest/v1"
+HISTORY_AUTHORITY_CANDIDATE_SCHEMA = "HistoryAuthorityCandidate/v1"
+REVIEWED_HISTORY_AUTHORITY_SCHEMA = "ReviewedHistoryAuthority/v1"
+APPRAISAL_COMPILATION_SCHEMA = "AppraisalNeedCompilation/v1"
+APPRAISAL_ORIGIN_SCHEMA = "EvidenceAppraisalNeedOrigin/v1"
+REQUEST_PROJECTION_PROFILE_SCHEMA = "ScholarRequestProjectionProfile/v1"
+APPRAISAL_ROUTE_DISPATCH_SCHEMA = "EvidenceAppraisalRouteDispatch/v1"
 
 SCHEMA_VERSION = "1.0"
 REQUEST_SET_SCHEMA_VERSION = "v1"
 PAPER_READING_REPORT_SET_SCHEMA_VERSION = "v1"
 REQUEST_SET_ID_PREFIX = "request-set-"
+GENERIC_REQUEST_ID_PREFIX = "SDR-"
+APPRAISAL_REQUEST_ID_PREFIX = "ASDR-"
 LEARN_REQUEST_SET_ID_PREFIX = "LFR-"
 SOURCE_ID_PREFIX = "SRC-"
 REPORT_SET_ID_PREFIX = "reading-report-set-"
@@ -130,7 +145,9 @@ PAPER_UNDERSTANDING_GAP_FIELD_PATTERNS = {
 SENSITIVE_EXTERNAL_QUERY_PATTERNS = (
     re.compile(r"(?:^|\s)(?:/(?:home|root|Users)/|~/|[A-Za-z]:[\\/])"),
     re.compile(r"\b(?:file://|ghp_|github_pat_|sk-|xox[baprs]-)[A-Za-z0-9_./-]+", re.I),
-    re.compile(r"\b(?:api[_ -]?key|access[_ -]?token|authorization|cookie)\s*[:=]", re.I),
+    re.compile(
+        r"\b(?:api[_ -]?key|access[_ -]?token|authorization|cookie)\s*[:=]", re.I
+    ),
     re.compile(r"\b(?=[A-Z0-9]{8}\b)(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*[0-9])[A-Z0-9]{8}\b"),
     re.compile(r"\b[0-9a-f]{32,64}\b", re.I),
 )
@@ -296,6 +313,19 @@ QUERY_STOP_WORDS = {
     "benchmark",
 }
 SEMANTIC_QUERY_MAX_WORDS = 12
+APPRAISAL_QUERY_LABEL_TERMS = {
+    "boundary",
+    "claim",
+    "challenges",
+    "comparator",
+    "implication",
+    "metric",
+    "observation",
+    "state",
+    "supports",
+    "target",
+    "value",
+}
 QUERY_TERM_BLOCKLIST = {
     "claims_property",
     "evidence",
@@ -332,6 +362,109 @@ GAP_REASON_TERM_BLOCKLIST = {
     "which",
 }
 QUERY_TOKEN_RE = re.compile(r"[^\W_][\w.:+-]*", re.UNICODE)
+
+EVIDENCE_CHALLENGE_AXES = {
+    "counterexample",
+    "alternative_explanation",
+    "boundary_condition",
+    "method_failure",
+    "independent_replication",
+    "data_code_artifact",
+    "omitted_baseline",
+    "negative_or_missing_result",
+    "correction_retraction_version",
+}
+EVIDENCE_TARGET_DIMENSIONS = {
+    "provenance_integrity",
+    "claim_entailment",
+    "scope_directness",
+    "method_validity",
+    "result_uncertainty",
+    "artifact_reproducibility",
+    "independence_overlap",
+    "missing_conflict",
+}
+EVIDENCE_CHALLENGE_STATUSES = {
+    "open",
+    "resolved",
+    "unresolved",
+    "blocked",
+    "superseded",
+}
+EVIDENCE_CHALLENGE_ROUTES = {
+    "targeted_evidence_need",
+    "within_source_review",
+    "runtime_or_reconstruction",
+    "terminal_unresolved",
+}
+EVIDENCE_NEED_ROUTES = {
+    "scholar_discovery",
+    "source_acquisition",
+    "full_text_review",
+    "code_data",
+    "manual_experiment",
+    "version_status_check",
+}
+EVIDENCE_NEED_STATUSES = {
+    "proposed",
+    "selected",
+    "in_progress",
+    "satisfied",
+    "unresolved",
+    "blocked",
+    "superseded",
+}
+CHALLENGE_AXIS_SIGNATURE_FIELD = {
+    "counterexample": "target_scope",
+    "alternative_explanation": "comparator",
+    "boundary_condition": "boundary_variable",
+    "method_failure": "evidence_class",
+    "independent_replication": "independence_requirement",
+    "data_code_artifact": "evidence_class",
+    "omitted_baseline": "comparator",
+    "negative_or_missing_result": "evidence_class",
+    "correction_retraction_version": "evidence_class",
+}
+SEMANTIC_SIGNATURE_FIELDS = {
+    "target_scope",
+    "evidence_class",
+    "comparator",
+    "boundary_variable",
+    "independence_requirement",
+}
+STRUCTURAL_APPRAISAL_PATTERNS = (
+    re.compile(r"\bnetwork\s+dimension\b", re.I),
+    re.compile(r"\bsemantic\s+enrichment\s+required\b", re.I),
+    re.compile(
+        r"\b(?:missing[-_ ]dimension|validation_target|surrogate_family|task_type)\b",
+        re.I,
+    ),
+)
+OBSERVATION_OPERATOR_COMPLEMENTS = {
+    "eq": "neq",
+    "lt": "gte",
+    "lte": "gt",
+    "inside": "outside",
+    "present": "absent",
+    "reproduced": "not_reproduced",
+    "supports": "does_not_support",
+}
+OBSERVATION_OPERATOR_QUERY_TEXT = {
+    "eq": "equals",
+    "neq": "unequal differs",
+    "lt": "below",
+    "gte": "at least threshold",
+    "lte": "at most threshold",
+    "gt": "above",
+    "inside": "inside range",
+    "outside": "outside range",
+    "present": "present observed",
+    "absent": "absent missing",
+    "reproduced": "replicated reproduced",
+    "not_reproduced": "replication failure nonreproduction",
+    "supports": "supports corroborates",
+    "does_not_support": "contradicts unsupported",
+}
 
 PROBE_FAMILIES = [
     {
@@ -395,9 +528,7 @@ def _reading_dossier_module() -> Any:
         / "paper_reading_dossier.py"
     )
     if not module_path.is_file() or module_path.is_symlink():
-        raise ContractError(
-            "learn-from-papers paper_reading_dossier.py is unavailable"
-        )
+        raise ContractError("learn-from-papers paper_reading_dossier.py is unavailable")
     spec = importlib.util.spec_from_file_location(
         "network_gap_discovery_paper_reading_dossier", module_path
     )
@@ -410,6 +541,43 @@ def _reading_dossier_module() -> Any:
             "learn-from-papers dossier validator lacks validate_report_set_v2"
         )
     _READING_DOSSIER_MODULE = module
+    return module
+
+
+_SCHOLAR_DISCOVERY_MODULE: Any | None = None
+
+
+def _scholar_discovery_module() -> Any:
+    global _SCHOLAR_DISCOVERY_MODULE
+    if _SCHOLAR_DISCOVERY_MODULE is not None:
+        return _SCHOLAR_DISCOVERY_MODULE
+    module_path = (
+        Path(__file__).resolve().parents[2]
+        / "scholar-discovery"
+        / "scripts"
+        / "scholar_discovery.py"
+    )
+    if not module_path.is_file() or module_path.is_symlink():
+        raise ContractError(
+            "scholar-discovery is required to validate SearchHistoryIndex/v1 or v2"
+        )
+    spec = importlib.util.spec_from_file_location(
+        "network_gap_discovery_scholar_discovery", module_path
+    )
+    if spec is None or spec.loader is None:
+        raise ContractError("cannot load scholar-discovery history validator")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    required = {
+        "validate_search_history_index",
+        "canonical_semantic_terms",
+        "semantic_signature_from_terms",
+    }
+    if any(not callable(getattr(module, name, None)) for name in required):
+        raise ContractError(
+            "scholar-discovery lacks the SearchHistoryIndex owner interface"
+        )
+    _SCHOLAR_DISCOVERY_MODULE = module
     return module
 
 
@@ -538,7 +706,9 @@ def _ensure_private_output_directory(directory: Path) -> None:
         except FileExistsError:
             pass
         if candidate.is_symlink() or not candidate.is_dir():
-            raise ContractError(f"output parent must be a private directory: {candidate}")
+            raise ContractError(
+                f"output parent must be a private directory: {candidate}"
+            )
         if created:
             os.chmod(candidate, PRIVATE_DIRECTORY_MODE, follow_symlinks=False)
 
@@ -573,7 +743,10 @@ def write_json(path: str | Path, value: Any) -> None:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        if stat.S_IMODE(os.stat(temporary, follow_symlinks=False).st_mode) != PRIVATE_FILE_MODE:
+        if (
+            stat.S_IMODE(os.stat(temporary, follow_symlinks=False).st_mode)
+            != PRIVATE_FILE_MODE
+        ):
             raise ContractError("private temporary output mode is not 0600")
         os.replace(temporary, target)
         temporary = None
@@ -629,7 +802,12 @@ def require_timestamp(value: Any, label: str) -> str:
 
 
 def timestamp_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return (
+        datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
 
 def ensure_sha256(value: Any, label: str) -> str:
@@ -640,8 +818,8 @@ def ensure_sha256(value: Any, label: str) -> str:
 
 
 def _path_has_prefix(path: str, prefix: str) -> bool:
-    return path == prefix or path.startswith(f"{prefix}.") or path.startswith(
-        f"{prefix}["
+    return (
+        path == prefix or path.startswith(f"{prefix}.") or path.startswith(f"{prefix}[")
     )
 
 
@@ -688,8 +866,7 @@ def validate_paper_understanding_gap(value: Any) -> dict[str, Any]:
     }
     if set(gap) != expected_keys:
         raise ContractError(
-            "paper understanding gap must contain exactly "
-            f"{sorted(expected_keys)}"
+            f"paper understanding gap must contain exactly {sorted(expected_keys)}"
         )
     if gap.get("schema") != PAPER_UNDERSTANDING_GAP_SCHEMA:
         raise ContractError(
@@ -721,7 +898,9 @@ def validate_paper_understanding_gap(value: Any) -> dict[str, Any]:
     if gap.get("novelty_claimed") is not False:
         raise ContractError("paper understanding gap.novelty_claimed must be false")
 
-    terms = require_dict(gap.get("search_terms"), "paper understanding gap.search_terms")
+    terms = require_dict(
+        gap.get("search_terms"), "paper understanding gap.search_terms"
+    )
     if set(terms) != {"must", "should", "must_not"}:
         raise ContractError(
             "paper understanding gap.search_terms must contain exactly "
@@ -822,7 +1001,9 @@ def validate_paper_understanding_gap(value: Any) -> dict[str, Any]:
     if projection_ref.get("projection_id") != (
         "understanding-projection-" + projection_ref["projection_digest"][:16]
     ):
-        raise ContractError("projection_ref.projection_id does not match projection_digest")
+        raise ContractError(
+            "projection_ref.projection_id does not match projection_digest"
+        )
     if projection_ref.get("projection_type") != projection_type:
         raise ContractError("projection_ref.projection_type does not match gap")
     payload_digest = ensure_sha256(
@@ -853,16 +1034,21 @@ def validate_paper_understanding_gap(value: Any) -> dict[str, Any]:
         if basis.get("ref_type") != "understanding_projection_path":
             raise ContractError("paper understanding gap basis ref_type is invalid")
         if basis.get("projection_type") != projection_type:
-            raise ContractError("paper understanding gap basis projection_type mismatch")
+            raise ContractError(
+                "paper understanding gap basis projection_type mismatch"
+            )
         basis_path = _validate_understanding_gap_field(
             gap_type,
             basis.get("source_path"),
             f"paper understanding gap.provenance.basis_refs[{index}].source_path",
         )
-        if ensure_sha256(
-            basis.get("payload_digest"),
-            f"paper understanding gap.provenance.basis_refs[{index}].payload_digest",
-        ) != payload_digest:
+        if (
+            ensure_sha256(
+                basis.get("payload_digest"),
+                f"paper understanding gap.provenance.basis_refs[{index}].payload_digest",
+            )
+            != payload_digest
+        ):
             raise ContractError("paper understanding gap basis payload_digest mismatch")
         basis_key = (
             basis["ref_type"],
@@ -875,9 +1061,13 @@ def validate_paper_understanding_gap(value: Any) -> dict[str, Any]:
         seen_basis.add(basis_key)
         covers_missing_field = covers_missing_field or basis_path == missing_field
     if not covers_missing_field:
-        raise ContractError("paper understanding gap basis refs must bind missing_field")
+        raise ContractError(
+            "paper understanding gap basis refs must bind missing_field"
+        )
 
-    gap_digest = ensure_sha256(gap.get("gap_digest"), "paper understanding gap.gap_digest")
+    gap_digest = ensure_sha256(
+        gap.get("gap_digest"), "paper understanding gap.gap_digest"
+    )
     if gap_digest != canonical_paper_understanding_gap_digest(gap):
         raise ContractError("paper understanding gap.gap_digest is invalid")
     if gap.get("gap_id") != f"understanding-gap-{gap_digest[:16]}":
@@ -901,11 +1091,7 @@ def validate_network(value: Any) -> dict[str, Any]:
         network.get("content_sha256"), "network.content_sha256"
     )
     expected_content_sha256 = sha256_json(
-        {
-            key: item
-            for key, item in network.items()
-            if key != "content_sha256"
-        }
+        {key: item for key, item in network.items() if key != "content_sha256"}
     )
     if declared_content_sha256 != expected_content_sha256:
         raise ContractError(
@@ -918,7 +1104,9 @@ def validate_network(value: Any) -> dict[str, Any]:
         if not isinstance(network.get(field), list):
             raise ContractError(f"network.{field} must be a list")
 
-    network_node_ids = [str(node.get("node_id")) for node in network["nodes"] if node.get("node_id")]
+    network_node_ids = [
+        str(node.get("node_id")) for node in network["nodes"] if node.get("node_id")
+    ]
     if len(network_node_ids) != len(set(network_node_ids)):
         raise ContractError("network nodes must have unique node_id")
 
@@ -937,7 +1125,9 @@ def validate_network(value: Any) -> dict[str, Any]:
     for index, source in enumerate(sources):
         entry = require_dict(source, f"network.sources[{index}]")
         source_ids.append(
-            require_string(entry.get("source_id"), f"network.sources[{index}].source_id")
+            require_string(
+                entry.get("source_id"), f"network.sources[{index}].source_id"
+            )
         )
     if len(source_ids) != len(set(source_ids)):
         raise ContractError("network sources must have unique source_id")
@@ -1020,7 +1210,9 @@ def _query_semantic_token_candidates(value: str) -> list[str]:
     return output
 
 
-def _query_has_semantic_content(value: str, required_terms: list[str] | None = None) -> bool:
+def _query_has_semantic_content(
+    value: str, required_terms: list[str] | None = None
+) -> bool:
     if _query_has_internal_marker(value):
         return False
     if "no evidence for" in value.lower() and "at this snapshot" in value.lower():
@@ -1046,14 +1238,20 @@ def _query_has_semantic_content(value: str, required_terms: list[str] | None = N
 
 
 def _normalize_terms(values: list[str]) -> str:
-    return " ".join(_dedupe_terms([value.strip() for value in values if isinstance(value, str) and value.strip()]))
+    return " ".join(
+        _dedupe_terms(
+            [
+                value.strip()
+                for value in values
+                if isinstance(value, str) and value.strip()
+            ]
+        )
+    )
 
 
 def _strip_internal_query_tokens(value: str) -> str:
     tokens = QUERY_TOKEN_RE.findall(value)
-    return " ".join(
-        token for token in tokens if not _query_token_is_internal(token)
-    )
+    return " ".join(token for token in tokens if not _query_token_is_internal(token))
 
 
 def _collect_node_labels(node: dict[str, Any] | None) -> list[str]:
@@ -1188,13 +1386,19 @@ def _build_semantic_search_spec(
     signal: dict[str, Any],
     network: dict[str, Any],
 ) -> tuple[list[str], bool]:
-    node_lookup = {str(node.get("node_id")): node for node in network["nodes"] if node.get("node_id")}
+    node_lookup = {
+        str(node.get("node_id")): node
+        for node in network["nodes"]
+        if node.get("node_id")
+    }
     relation_lookup = {
         str(rel.get("relation_id")): rel
         for rel in network["relations"]
         if rel.get("relation_id")
     }
-    gap_lookup = {str(gap.get("gap_id")): gap for gap in network["gaps"] if gap.get("gap_id")}
+    gap_lookup = {
+        str(gap.get("gap_id")): gap for gap in network["gaps"] if gap.get("gap_id")
+    }
 
     kind = signal.get("kind")
     ref = str(signal.get("refs", [""])[0])
@@ -1208,8 +1412,7 @@ def _build_semantic_search_spec(
         gap = gap_lookup.get(ref)
         claim_node = _claim_node_for_gap(gap, node_lookup)
         if ref.startswith("derived:missing-dimension:") or (
-            gap is not None
-            and gap.get("gap_type") == "deterministic_structural"
+            gap is not None and gap.get("gap_type") == "deterministic_structural"
         ):
             return [], True
         if gap is not None:
@@ -1267,7 +1470,9 @@ def _build_semantic_search_query(
     objective: str,
     fallback: str = "benchmark evidence",
 ) -> str:
-    fragments = _dedupe_terms([term for term in terms if isinstance(term, str) and term.strip()])
+    fragments = _dedupe_terms(
+        [term for term in terms if isinstance(term, str) and term.strip()]
+    )
     if not fragments:
         fragments = [fallback]
 
@@ -1376,7 +1581,9 @@ def network_ref(network: dict[str, Any]) -> dict[str, str]:
 
 def network_reference_index(network: dict[str, Any]) -> dict[str, set[str]]:
     nodes = {
-        str(node.get("node_id")) for node in network["nodes"] if node.get("node_id") is not None
+        str(node.get("node_id"))
+        for node in network["nodes"]
+        if node.get("node_id") is not None
     }
     relations = {
         str(relation.get("relation_id"))
@@ -1384,10 +1591,14 @@ def network_reference_index(network: dict[str, Any]) -> dict[str, set[str]]:
         if relation.get("relation_id") is not None
     }
     gaps = {
-        str(gap.get("gap_id")) for gap in network["gaps"] if gap.get("gap_id") is not None
+        str(gap.get("gap_id"))
+        for gap in network["gaps"]
+        if gap.get("gap_id") is not None
     }
     completion = require_dict(network.get("completion", {}), "network.completion")
-    gate_checks = require_dict(completion.get("gate_checks", {}), "network.completion.gate_checks")
+    gate_checks = require_dict(
+        completion.get("gate_checks", {}), "network.completion.gate_checks"
+    )
     gate_refs = {f"completion.gate_checks.{gate}" for gate in gate_checks}
     return {
         "network_id": {network["network_id"]},
@@ -1411,10 +1622,16 @@ def validate_network_ref(
     return ref
 
 
-def validate_hypothesis_reference(ref_id: str, index: dict[str, set[str]], label: str) -> None:
+def validate_hypothesis_reference(
+    ref_id: str, index: dict[str, set[str]], label: str
+) -> None:
     if ref_id in {f"network:{network_id}" for network_id in index["network_id"]}:
         return
-    if ref_id in index["nodes"] or ref_id in index["relations"] or ref_id in index["gaps"]:
+    if (
+        ref_id in index["nodes"]
+        or ref_id in index["relations"]
+        or ref_id in index["gaps"]
+    ):
         return
     if ref_id.startswith("node:") and ref_id.split(":", 1)[1] in index["nodes"]:
         return
@@ -1490,9 +1707,7 @@ def _candidate_signal_context(
     signal: dict[str, Any], network: dict[str, Any]
 ) -> tuple[str, str, str, str]:
     gap_lookup = {
-        str(gap.get("gap_id")): gap
-        for gap in network["gaps"]
-        if gap.get("gap_id")
+        str(gap.get("gap_id")): gap for gap in network["gaps"] if gap.get("gap_id")
     }
     kind = str(signal.get("kind") or "")
     ref = str(signal.get("refs", [""])[0])
@@ -1658,7 +1873,9 @@ def scan_network(value: Any) -> dict[str, Any]:
     gate_checks = require_dict(
         completion.get("gate_checks", {}), "network.completion.gate_checks"
     )
-    unmet_gates = sorted(key for key, passed in gate_checks.items() if passed is not True)
+    unmet_gates = sorted(
+        key for key, passed in gate_checks.items() if passed is not True
+    )
 
     signals: list[dict[str, Any]] = []
     for gap_id in open_gaps:
@@ -1711,7 +1928,11 @@ def scan_network(value: Any) -> dict[str, Any]:
             "relations": len(network["relations"]),
             "gaps": len(network["gaps"]),
             "node_kinds": dict(
-                sorted(Counter(node.get("kind", "<missing>") for node in nodes.values()).items())
+                sorted(
+                    Counter(
+                        node.get("kind", "<missing>") for node in nodes.values()
+                    ).items()
+                )
             ),
             "predicates": dict(sorted(predicate_counts.items())),
         },
@@ -1776,6 +1997,1424 @@ def signal_hypothesis_signature(signal: dict[str, Any]) -> str:
     if kind == "low_confidence_relation":
         return "low confidence relation"
     return str(signal.get("kind", "candidate"))
+
+
+def _require_string_allow_empty(value: Any, label: str) -> str:
+    if not isinstance(value, str):
+        raise ContractError(f"{label} must be a string")
+    return value
+
+
+def _canonical_own_digest(record: dict[str, Any], digest_field: str) -> str:
+    normalized = copy.deepcopy(record)
+    normalized[digest_field] = ""
+    return sha256_json(normalized)
+
+
+def _require_sorted_unique_strings(
+    value: Any, label: str, *, nonempty: bool = False
+) -> list[str]:
+    values = require_string_list(value, label, nonempty)
+    if values != sorted(set(values)):
+        raise ContractError(f"{label} must be sorted and unique")
+    return values
+
+
+def _validate_semantic_signature(value: Any, label: str) -> dict[str, str]:
+    signature = require_dict(value, label)
+    if set(signature) != SEMANTIC_SIGNATURE_FIELDS:
+        raise ContractError(
+            f"{label} field set must be exactly {sorted(SEMANTIC_SIGNATURE_FIELDS)}"
+        )
+    for field in sorted(SEMANTIC_SIGNATURE_FIELDS):
+        _require_external_query_safe(signature.get(field), f"{label}.{field}")
+    return signature
+
+
+def _validate_appraisal_set_ref(value: Any, label: str) -> dict[str, str]:
+    ref = require_dict(value, label)
+    if set(ref) != {"appraisal_set_id", "appraisal_set_digest"}:
+        raise ContractError(
+            f"{label} must contain exactly appraisal_set_id and appraisal_set_digest"
+        )
+    require_string(ref.get("appraisal_set_id"), f"{label}.appraisal_set_id")
+    ensure_sha256(ref.get("appraisal_set_digest"), f"{label}.appraisal_set_digest")
+    return ref
+
+
+def _validate_adversarial_observation_pair(
+    value: Any,
+    label: str,
+    semantic_signature: dict[str, str],
+) -> dict[str, Any]:
+    pair = require_dict(value, label)
+    if set(pair) != {"target_metric", "comparator", "boundary", "confirm", "refute"}:
+        raise ContractError(
+            f"{label} must contain exactly target_metric, comparator, boundary, "
+            "confirm, and refute"
+        )
+    for field in ("target_metric", "comparator", "boundary"):
+        _require_external_query_safe(pair.get(field), f"{label}.{field}")
+    if pair["comparator"] != semantic_signature["comparator"]:
+        raise ContractError(f"{label}.comparator must match semantic_signature")
+    if pair["boundary"] != semantic_signature["boundary_variable"]:
+        raise ContractError(f"{label}.boundary must match semantic_signature")
+    arms: dict[str, dict[str, str]] = {}
+    for arm_name in ("confirm", "refute"):
+        arm = require_dict(pair.get(arm_name), f"{label}.{arm_name}")
+        if set(arm) != {"operator", "value_or_state", "claim_implication"}:
+            raise ContractError(
+                f"{label}.{arm_name} must contain exactly operator, value_or_state, "
+                "and claim_implication"
+            )
+        operator = require_string(arm.get("operator"), f"{label}.{arm_name}.operator")
+        _require_external_query_safe(
+            arm.get("value_or_state"), f"{label}.{arm_name}.value_or_state"
+        )
+        implication = require_string(
+            arm.get("claim_implication"),
+            f"{label}.{arm_name}.claim_implication",
+        )
+        arms[arm_name] = {
+            "operator": operator,
+            "value_or_state": arm["value_or_state"],
+            "claim_implication": implication,
+        }
+    confirm = arms["confirm"]
+    refute = arms["refute"]
+    if confirm["operator"] not in OBSERVATION_OPERATOR_COMPLEMENTS:
+        raise ContractError(f"{label}.confirm.operator is unsupported")
+    if refute["operator"] != OBSERVATION_OPERATOR_COMPLEMENTS[confirm["operator"]]:
+        raise ContractError(f"{label} operators must be an ordered complementary pair")
+    if " ".join(confirm["value_or_state"].casefold().split()) != " ".join(
+        refute["value_or_state"].casefold().split()
+    ):
+        raise ContractError(
+            f"{label} arms must test the same normalized value_or_state"
+        )
+    if confirm["claim_implication"] != "supports":
+        raise ContractError(f"{label}.confirm.claim_implication must equal supports")
+    if refute["claim_implication"] != "challenges":
+        raise ContractError(f"{label}.refute.claim_implication must equal challenges")
+    return pair
+
+
+def format_adversarial_observation_goal(pair: dict[str, Any], objective: str) -> str:
+    if objective not in {"confirm", "refute"}:
+        raise ContractError("observation goal objective must be confirm or refute")
+    arm = pair[objective]
+    return (
+        f"target_metric={pair['target_metric']}; "
+        f"comparator={pair['comparator']}; "
+        f"boundary={pair['boundary']}; "
+        f"observation={arm['operator']} {arm['value_or_state']}; "
+        f"claim_implication={arm['claim_implication']}"
+    )
+
+
+def _format_producer_observation_goal(pair_value: Any, objective: str) -> str:
+    pair = require_dict(pair_value, "producer adversarial_observation_pair")
+    if set(pair) != {"common", "confirm", "refute"}:
+        raise ContractError(
+            "producer adversarial_observation_pair must contain exactly "
+            "common, confirm, and refute"
+        )
+    common = require_dict(pair.get("common"), "producer observation pair.common")
+    if set(common) != {"target_metric", "comparator", "boundary"}:
+        raise ContractError("producer observation pair.common field set is invalid")
+    arm = require_dict(pair.get(objective), f"producer observation pair.{objective}")
+    if set(arm) != {"operator", "value_or_state", "claim_implication"}:
+        raise ContractError(
+            f"producer observation pair.{objective} field set is invalid"
+        )
+    return (
+        f"target_metric={require_string(common['target_metric'], 'target_metric')}; "
+        f"comparator={require_string(common['comparator'], 'comparator')}; "
+        f"boundary={require_string(common['boundary'], 'boundary')}; "
+        f"observation={require_string(arm['operator'], 'operator')} "
+        f"{require_string(str(arm['value_or_state']), 'value_or_state')}; "
+        f"claim_implication={require_string(arm['claim_implication'], 'claim_implication')}"
+    )
+
+
+def _evidence_appraisal_module() -> Any:
+    module_path = (
+        Path(__file__).resolve().parents[2]
+        / "evidence-appraisal"
+        / "scripts"
+        / "evidence_appraisal.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "_network_gap_evidence_appraisal", module_path
+    )
+    if spec is None or spec.loader is None:
+        raise ContractError("cannot load evidence-appraisal producer adapter")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def validate_evidence_appraisal_package(
+    value: Any,
+    approval: Any | None = None,
+    prepared: Any | None = None,
+    independent_review: Any | None = None,
+    owner_bundle: Any | None = None,
+    *,
+    expected_authority_sha256: str | None = None,
+    lineage: list[Any] | tuple[Any, ...] = (),
+) -> dict[str, Any]:
+    try:
+        package = _evidence_appraisal_module().validate_appraisal_package(
+            copy.deepcopy(value),
+            copy.deepcopy(approval),
+            copy.deepcopy(prepared),
+            copy.deepcopy(independent_review),
+            copy.deepcopy(owner_bundle),
+            expected_authority_sha256=copy.deepcopy(expected_authority_sha256),
+            lineage=copy.deepcopy(lineage),
+        )
+    except (ValueError, TypeError) as exc:
+        raise ContractError(f"invalid EvidenceAppraisalPackage/v1: {exc}") from exc
+    challenges = package["challenges"]
+    needs = package["targeted_evidence_need_set"]["needs"]
+    for label, rows in (("challenge", challenges), ("need", needs)):
+        for index, row in enumerate(rows):
+            for objective, field in (
+                ("confirm", "confirm_goal"),
+                ("refute", "refute_goal"),
+            ):
+                if row[field] != _format_producer_observation_goal(
+                    row["adversarial_observation_pair"], objective
+                ):
+                    raise ContractError(
+                        f"producer {label}[{index}].{field} is not the canonical "
+                        "structured projection"
+                    )
+    return package
+
+
+def dispatch_evidence_appraisal_package(
+    value: Any,
+    approval: Any | None = None,
+    prepared: Any | None = None,
+    independent_review: Any | None = None,
+    owner_bundle: Any | None = None,
+    *,
+    expected_authority_sha256: str | None = None,
+    lineage: list[Any] | tuple[Any, ...] = (),
+) -> dict[str, Any]:
+    package = validate_evidence_appraisal_package(
+        value,
+        approval,
+        prepared,
+        independent_review,
+        owner_bundle,
+        expected_authority_sha256=expected_authority_sha256,
+        lineage=lineage,
+    )
+    need_set = package["targeted_evidence_need_set"]
+    needs = need_set["needs"]
+    scholar_needs = [
+        copy.deepcopy(need) for need in needs if need["route"] == "scholar_discovery"
+    ]
+    if scholar_needs:
+        raise ContractError(
+            "compact EvidenceAppraisalPackage/v1 scholar need lacks the bounded "
+            "claim, scope, evidence-class, and criteria projection required for "
+            "scholar discovery"
+        )
+    return {
+        "schema": APPRAISAL_ROUTE_DISPATCH_SCHEMA,
+        "package_ref": {
+            "schema": package["schema"],
+            "package_digest": package["package_digest"],
+        },
+        "appraisal_set_ref": {
+            "appraisal_set_id": package["appraisal_set"]["appraisal_set_id"],
+            "appraisal_set_digest": package["appraisal_set"]["appraisal_set_digest"],
+        },
+        "need_set_ref": {
+            "schema": need_set["schema"],
+            "need_set_digest": need_set["need_set_digest"],
+        },
+        "routed_needs": copy.deepcopy(needs),
+        "scholar_discovery_needs": [],
+        "mutation_authorized": False,
+    }
+
+
+def _challenge_seed(challenge: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "target": {
+            field: challenge["target"][field]
+            for field in ("claim_id", "claim_digest", "evidence_id", "source_id")
+        },
+        "target_dimension": challenge["target_dimension"],
+        "axis": challenge["axis"],
+        "semantic_signature": copy.deepcopy(challenge["semantic_signature"]),
+        "adversarial_observation_pair": copy.deepcopy(
+            challenge["adversarial_observation_pair"]
+        ),
+    }
+
+
+def validate_evidence_challenge(value: Any) -> dict[str, Any]:
+    challenge = copy.deepcopy(require_dict(value, "evidence challenge"))
+    expected_fields = {
+        "schema",
+        "challenge_id",
+        "challenge_digest",
+        "appraisal_set_ref",
+        "target",
+        "target_dimension",
+        "axis",
+        "severity",
+        "status",
+        "problem_statement",
+        "falsifier",
+        "discriminating_observation",
+        "semantic_signature",
+        "adversarial_observation_pair",
+        "basis_refs",
+        "resolution_route",
+        "effect_on_overall",
+        "supersedes",
+    }
+    if set(challenge) != expected_fields:
+        raise ContractError(
+            f"EvidenceChallenge/v1 field set must be exactly {sorted(expected_fields)}"
+        )
+    if challenge.get("schema") != EVIDENCE_CHALLENGE_SCHEMA:
+        raise ContractError(
+            f"evidence challenge.schema must equal {EVIDENCE_CHALLENGE_SCHEMA}"
+        )
+    _validate_appraisal_set_ref(
+        challenge.get("appraisal_set_ref"), "evidence challenge.appraisal_set_ref"
+    )
+    target = require_dict(challenge.get("target"), "evidence challenge.target")
+    target_fields = {
+        "claim_id",
+        "claim_digest",
+        "evidence_id",
+        "source_id",
+        "appraisal_id",
+        "appraisal_digest",
+    }
+    if set(target) != target_fields:
+        raise ContractError(
+            "evidence challenge.target field set must be exactly "
+            f"{sorted(target_fields)}"
+        )
+    for field in sorted(target_fields):
+        require_string(target.get(field), f"evidence challenge.target.{field}")
+    ensure_sha256(target["claim_digest"], "evidence challenge.target.claim_digest")
+    ensure_sha256(
+        target["appraisal_digest"], "evidence challenge.target.appraisal_digest"
+    )
+    if challenge.get("target_dimension") not in EVIDENCE_TARGET_DIMENSIONS:
+        raise ContractError("evidence challenge.target_dimension is invalid")
+    if challenge.get("axis") not in EVIDENCE_CHALLENGE_AXES:
+        raise ContractError("evidence challenge.axis is invalid")
+    if challenge.get("severity") not in {"critical", "material", "minor"}:
+        raise ContractError("evidence challenge.severity is invalid")
+    if challenge.get("status") not in EVIDENCE_CHALLENGE_STATUSES:
+        raise ContractError("evidence challenge.status is invalid")
+    for field in ("problem_statement", "falsifier", "discriminating_observation"):
+        _require_external_query_safe(
+            challenge.get(field), f"evidence challenge.{field}"
+        )
+    signature = _validate_semantic_signature(
+        challenge.get("semantic_signature"), "evidence challenge.semantic_signature"
+    )
+    _validate_adversarial_observation_pair(
+        challenge.get("adversarial_observation_pair"),
+        "evidence challenge.adversarial_observation_pair",
+        signature,
+    )
+    if challenge.get("resolution_route") not in EVIDENCE_CHALLENGE_ROUTES:
+        raise ContractError("evidence challenge.resolution_route is invalid")
+    if challenge.get("effect_on_overall") not in {
+        "blocks_decisive",
+        "requires_scope_narrowing",
+        "context_only",
+    }:
+        raise ContractError("evidence challenge.effect_on_overall is invalid")
+
+    basis_refs = challenge.get("basis_refs")
+    if not isinstance(basis_refs, list) or not basis_refs:
+        raise ContractError("evidence challenge.basis_refs must be non-empty")
+    for index, raw_ref in enumerate(basis_refs):
+        ref = require_dict(raw_ref, f"evidence challenge.basis_refs[{index}]")
+        if set(ref) != {"kind", "record_id", "record_digest", "locator_id"}:
+            raise ContractError(
+                "evidence challenge basis refs must contain exactly kind, record_id, "
+                "record_digest, and locator_id"
+            )
+        require_string(ref.get("kind"), "evidence challenge basis kind")
+        require_string(ref.get("record_id"), "evidence challenge basis record_id")
+        ensure_sha256(ref.get("record_digest"), "evidence challenge basis digest")
+        _require_string_allow_empty(
+            ref.get("locator_id"), "evidence challenge basis locator_id"
+        )
+    if basis_refs != sorted(basis_refs, key=canonical_bytes) or len(
+        {canonical_bytes(ref) for ref in basis_refs}
+    ) != len(basis_refs):
+        raise ContractError("evidence challenge.basis_refs must be sorted and unique")
+
+    supersedes = challenge.get("supersedes")
+    if not isinstance(supersedes, list):
+        raise ContractError("evidence challenge.supersedes must be a list")
+    for index, raw_ref in enumerate(supersedes):
+        ref = require_dict(raw_ref, f"evidence challenge.supersedes[{index}]")
+        if set(ref) != {"challenge_id", "challenge_digest"}:
+            raise ContractError(
+                "evidence challenge supersedes refs must contain exactly challenge_id "
+                "and challenge_digest"
+            )
+        require_string(ref.get("challenge_id"), "superseded challenge_id")
+        ensure_sha256(ref.get("challenge_digest"), "superseded challenge_digest")
+    if supersedes != sorted(supersedes, key=canonical_bytes) or len(
+        {canonical_bytes(ref) for ref in supersedes}
+    ) != len(supersedes):
+        raise ContractError("evidence challenge.supersedes must be sorted and unique")
+
+    expected_id = "challenge-" + sha256_json(_challenge_seed(challenge))[:16]
+    if challenge.get("challenge_id") != expected_id:
+        raise ContractError("evidence challenge.challenge_id is invalid")
+    digest = ensure_sha256(
+        challenge.get("challenge_digest"), "evidence challenge.challenge_digest"
+    )
+    if digest != _canonical_own_digest(challenge, "challenge_digest"):
+        raise ContractError("evidence challenge.challenge_digest is invalid")
+    return challenge
+
+
+def _validate_closed_ref(
+    value: Any, label: str, id_field: str, digest_field: str
+) -> dict[str, str]:
+    ref = require_dict(value, label)
+    if set(ref) != {id_field, digest_field}:
+        raise ContractError(
+            f"{label} must contain exactly {id_field} and {digest_field}"
+        )
+    require_string(ref.get(id_field), f"{label}.{id_field}")
+    ensure_sha256(ref.get(digest_field), f"{label}.{digest_field}")
+    return ref
+
+
+def _need_seed(need: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "challenge_ids": [ref["challenge_id"] for ref in need["challenge_refs"]],
+        "claim_ref": copy.deepcopy(need["claim_ref"]),
+        "route": need["route"],
+        "target_scope": need["target_scope"],
+        "required_evidence_class": need["required_evidence_class"],
+        "semantic_signature": copy.deepcopy(need["semantic_signature"]),
+        "adversarial_observation_pair": copy.deepcopy(
+            need["adversarial_observation_pair"]
+        ),
+        "domain_anchors": copy.deepcopy(need["domain_anchors"]),
+    }
+
+
+def _validate_domain_anchors(value: Any, route: str, label: str) -> list[str]:
+    if not isinstance(value, list):
+        raise ContractError(f"{label} must be a list")
+    anchors: list[str] = []
+    for index, raw_anchor in enumerate(value):
+        anchor = require_string(raw_anchor, f"{label}[{index}]")
+        normalized = " ".join(anchor.casefold().split())
+        if anchor != normalized:
+            raise ContractError(f"{label}[{index}] must be a normalized phrase")
+        token_count = len(anchor.split())
+        if not 1 <= token_count <= 4:
+            raise ContractError(f"{label}[{index}] must contain 1 to 4 tokens")
+        _require_external_query_safe(anchor, f"{label}[{index}]")
+        anchors.append(anchor)
+    if anchors != list(dict.fromkeys(anchors)):
+        raise ContractError(f"{label} must preserve order and contain no duplicates")
+    if route == "scholar_discovery":
+        if not 2 <= len(anchors) <= 6:
+            raise ContractError(
+                f"{label} must contain 2 to 6 phrases for scholar_discovery"
+            )
+    elif anchors:
+        raise ContractError(f"{label} must be empty for non-scholar routes")
+    return anchors
+
+
+def validate_targeted_evidence_need_set(value: Any) -> dict[str, Any]:
+    document = copy.deepcopy(require_dict(value, "targeted evidence need set"))
+    expected_fields = {
+        "schema",
+        "need_set_id",
+        "need_set_digest",
+        "appraisal_set_ref",
+        "needs",
+    }
+    if set(document) != expected_fields:
+        raise ContractError(
+            "TargetedEvidenceNeedSet/v1 field set must be exactly "
+            f"{sorted(expected_fields)}"
+        )
+    if document.get("schema") != TARGETED_EVIDENCE_NEED_SET_SCHEMA:
+        raise ContractError(
+            "targeted evidence need set.schema must equal "
+            f"{TARGETED_EVIDENCE_NEED_SET_SCHEMA}"
+        )
+    appraisal_set_ref = _validate_appraisal_set_ref(
+        document.get("appraisal_set_ref"), "need set.appraisal_set_ref"
+    )
+    needs = document.get("needs")
+    if not isinstance(needs, list) or not needs:
+        raise ContractError("targeted evidence need set.needs must be non-empty")
+    if len(needs) > 64:
+        raise ContractError(
+            "targeted evidence need set exceeds the bounded limit of 64"
+        )
+
+    seen_ids: set[str] = set()
+    for index, raw_need in enumerate(needs):
+        label = f"targeted evidence need set.needs[{index}]"
+        need = require_dict(raw_need, label)
+        expected_need_fields = {
+            "need_id",
+            "need_digest",
+            "challenge_refs",
+            "claim_ref",
+            "appraisal_ref",
+            "route",
+            "status",
+            "paper_need",
+            "target_scope",
+            "required_evidence_class",
+            "must_criteria",
+            "should_criteria",
+            "must_not_criteria",
+            "confirm_goal",
+            "refute_goal",
+            "falsifier",
+            "semantic_signature",
+            "adversarial_observation_pair",
+            "domain_anchors",
+            "acceptance_criterion",
+            "exclusion_criterion",
+            "decision_impact",
+            "mutation_authorized",
+            "supersedes",
+        }
+        if set(need) != expected_need_fields:
+            raise ContractError(
+                f"{label} field set must be exactly {sorted(expected_need_fields)}"
+            )
+        challenge_refs = need.get("challenge_refs")
+        if not isinstance(challenge_refs, list) or not challenge_refs:
+            raise ContractError(f"{label}.challenge_refs must be non-empty")
+        for ref_index, ref in enumerate(challenge_refs):
+            _validate_closed_ref(
+                ref,
+                f"{label}.challenge_refs[{ref_index}]",
+                "challenge_id",
+                "challenge_digest",
+            )
+        if challenge_refs != sorted(challenge_refs, key=canonical_bytes) or len(
+            {canonical_bytes(ref) for ref in challenge_refs}
+        ) != len(challenge_refs):
+            raise ContractError(f"{label}.challenge_refs must be sorted and unique")
+        _validate_closed_ref(
+            need.get("claim_ref"), f"{label}.claim_ref", "claim_id", "claim_digest"
+        )
+        _validate_closed_ref(
+            need.get("appraisal_ref"),
+            f"{label}.appraisal_ref",
+            "appraisal_id",
+            "appraisal_digest",
+        )
+        if need.get("route") not in EVIDENCE_NEED_ROUTES:
+            raise ContractError(f"{label}.route is invalid")
+        if need.get("status") not in EVIDENCE_NEED_STATUSES:
+            raise ContractError(f"{label}.status is invalid")
+        for field in (
+            "paper_need",
+            "target_scope",
+            "required_evidence_class",
+            "falsifier",
+            "acceptance_criterion",
+            "exclusion_criterion",
+        ):
+            _require_external_query_safe(need.get(field), f"{label}.{field}")
+        require_string(need.get("confirm_goal"), f"{label}.confirm_goal")
+        require_string(need.get("refute_goal"), f"{label}.refute_goal")
+        if " ".join(need["confirm_goal"].casefold().split()) == " ".join(
+            need["refute_goal"].casefold().split()
+        ):
+            raise ContractError(f"{label} confirm_goal and refute_goal must differ")
+        signature = _validate_semantic_signature(
+            need.get("semantic_signature"), f"{label}.semantic_signature"
+        )
+        if signature["target_scope"] != need["target_scope"]:
+            raise ContractError(f"{label}.target_scope must match semantic_signature")
+        if signature["evidence_class"] != need["required_evidence_class"]:
+            raise ContractError(
+                f"{label}.required_evidence_class must match semantic_signature"
+            )
+        _validate_adversarial_observation_pair(
+            need.get("adversarial_observation_pair"),
+            f"{label}.adversarial_observation_pair",
+            signature,
+        )
+        _validate_domain_anchors(
+            need.get("domain_anchors"), need["route"], f"{label}.domain_anchors"
+        )
+        pair = need["adversarial_observation_pair"]
+        for objective, field in (
+            ("confirm", "confirm_goal"),
+            ("refute", "refute_goal"),
+        ):
+            if need[field] != format_adversarial_observation_goal(pair, objective):
+                raise ContractError(
+                    f"{label}.{field} must equal the deterministic structured "
+                    "observation projection"
+                )
+        for field in ("must_criteria", "should_criteria", "must_not_criteria"):
+            values = _require_sorted_unique_strings(
+                need.get(field), f"{label}.{field}", nonempty=field == "must_criteria"
+            )
+            for term_index, term in enumerate(values):
+                _require_external_query_safe(term, f"{label}.{field}[{term_index}]")
+        if need.get("decision_impact") not in LEVELS:
+            raise ContractError(f"{label}.decision_impact is invalid")
+        if need.get("mutation_authorized") is not False:
+            raise ContractError(f"{label}.mutation_authorized must be false")
+        supersedes = need.get("supersedes")
+        if not isinstance(supersedes, list):
+            raise ContractError(f"{label}.supersedes must be a list")
+        for ref_index, ref in enumerate(supersedes):
+            _validate_closed_ref(
+                ref,
+                f"{label}.supersedes[{ref_index}]",
+                "need_id",
+                "need_digest",
+            )
+        if supersedes != sorted(supersedes, key=canonical_bytes) or len(
+            {canonical_bytes(ref) for ref in supersedes}
+        ) != len(supersedes):
+            raise ContractError(f"{label}.supersedes must be sorted and unique")
+
+        expected_id = "need-" + sha256_json(_need_seed(need))[:16]
+        if need.get("need_id") != expected_id:
+            raise ContractError(f"{label}.need_id is invalid")
+        digest = ensure_sha256(need.get("need_digest"), f"{label}.need_digest")
+        if digest != _canonical_own_digest(need, "need_digest"):
+            raise ContractError(f"{label}.need_digest is invalid")
+        if need["need_id"] in seen_ids:
+            raise ContractError("targeted evidence need IDs must be unique")
+        seen_ids.add(need["need_id"])
+    if [need["need_id"] for need in needs] != sorted(seen_ids):
+        raise ContractError(
+            "targeted evidence need set.needs must be sorted by need_id"
+        )
+
+    seed = {
+        "appraisal_set_ref": copy.deepcopy(appraisal_set_ref),
+        "need_ids": [need["need_id"] for need in needs],
+    }
+    expected_set_id = "need-set-" + sha256_json(seed)[:16]
+    if document.get("need_set_id") != expected_set_id:
+        raise ContractError("targeted evidence need set.need_set_id is invalid")
+    digest = ensure_sha256(
+        document.get("need_set_digest"), "targeted evidence need set.need_set_digest"
+    )
+    if digest != _canonical_own_digest(document, "need_set_digest"):
+        raise ContractError("targeted evidence need set.need_set_digest is invalid")
+    return document
+
+
+def validate_reviewed_history_authority(value: Any) -> dict[str, Any]:
+    try:
+        return _scholar_discovery_module().validate_reviewed_history_authority(value)
+    except ValueError as exc:
+        raise ContractError(f"invalid ReviewedHistoryAuthority/v1: {exc}") from exc
+
+
+def validate_history_authority_manifest(
+    value: Any, reviewed_authority: Any
+) -> dict[str, Any]:
+    try:
+        return _scholar_discovery_module().validate_history_authority_manifest(
+            value, reviewed_authority
+        )
+    except ValueError as exc:
+        raise ContractError(f"invalid HistoryAuthorityManifest/v1: {exc}") from exc
+
+
+def validate_search_history_index(
+    value: Any,
+    authority_manifest: Any,
+    reviewed_authority: Any,
+    *,
+    execution_authority_contexts: dict[str, dict[str, Any]] | None = None,
+    artifact_file_sha256s: list[str] | None = None,
+) -> dict[str, Any]:
+    document = copy.deepcopy(value) if isinstance(value, dict) else value
+    if artifact_file_sha256s is None:
+        if isinstance(document, dict):
+            raw_hashes = document.get("artifact_file_sha256s")
+            if "artifact_file_sha256s" in document:
+                document = copy.deepcopy(document)
+                document.pop("artifact_file_sha256s", None)
+            if raw_hashes is not None:
+                artifact_file_sha256s = (
+                    list(raw_hashes) if isinstance(raw_hashes, list) else None
+                )
+        else:
+            raw_hashes = None
+    else:
+        if isinstance(document, dict) and "artifact_file_sha256s" in document:
+            document = copy.deepcopy(document)
+            document.pop("artifact_file_sha256s", None)
+    try:
+        return _scholar_discovery_module().validate_search_history_index(
+            document,
+            authority_manifest,
+            reviewed_authority,
+            execution_authority_contexts=execution_authority_contexts,
+            artifact_file_sha256s=artifact_file_sha256s,
+        )
+    except ValueError as exc:
+        raise ContractError(f"invalid SearchHistoryIndex: {exc}") from exc
+
+
+def _semantic_terms(value: str) -> list[str]:
+    try:
+        return _scholar_discovery_module().canonical_semantic_terms(value)
+    except ValueError as exc:
+        raise ContractError(f"cannot derive semantic signature: {exc}") from exc
+
+
+def _semantic_term_signature(terms: list[str]) -> str:
+    try:
+        return _scholar_discovery_module().semantic_signature_from_terms(terms)
+    except ValueError as exc:
+        raise ContractError(f"cannot derive semantic signature: {exc}") from exc
+
+
+def _objective_terms(need: dict[str, Any], objective: str) -> list[str]:
+    signature = need["semantic_signature"]
+    pair = need["adversarial_observation_pair"]
+    observation = pair[objective]
+    common_context = " ".join(
+        [
+            need["target_scope"],
+            signature["comparator"],
+            signature["boundary_variable"],
+            signature["evidence_class"],
+            signature["independence_requirement"],
+            pair["target_metric"],
+            OBSERVATION_OPERATOR_QUERY_TEXT[observation["operator"]],
+            observation["value_or_state"],
+            observation["claim_implication"],
+        ]
+    )
+    return _semantic_terms(
+        f"{common_context} {format_adversarial_observation_goal(pair, objective)}"
+    )
+
+
+def _structured_query_slot_terms(value: str, label: str) -> list[str]:
+    text = require_string(value, label)
+    terms = [term for term in _semantic_terms(text) if term not in {"under"}]
+    numeric_terms = re.findall(r"(?<![\w])\d+(?:\.\d+)?(?![\w])", text.casefold())
+    normalized = list(dict.fromkeys([*terms, *numeric_terms]))
+    if not normalized:
+        raise ContractError(f"{label} has no query-preservable terms")
+    return normalized
+
+
+def _normalized_contiguous_phrase(value: str, label: str) -> str:
+    """Normalize a human phrase without reducing it to a concept bag."""
+    text = require_string(value, label)
+    phrase = " ".join(re.findall(r"[^\W_]+", text.casefold(), flags=re.UNICODE))
+    if not phrase:
+        raise ContractError(f"{label} has no phrase-preservable terms")
+    return phrase
+
+
+def _structured_query_slot_phrase(value: str, label: str) -> str:
+    return _normalized_contiguous_phrase(value, label)
+
+
+def _contains_contiguous_phrase(text: str, phrase: str) -> bool:
+    """Match whole normalized phrases, never an unordered token collection."""
+    return f" {phrase} " in f" {text} "
+
+
+def _has_structured_slot_prefix(text: str, slot_phrases: list[str]) -> bool:
+    """Require every ordered structural slot occurrence, including duplicates."""
+    prefix = " ".join(slot_phrases)
+    return text == prefix or text.startswith(f"{prefix} ")
+
+
+def _structured_appraisal_query_core(
+    need: dict[str, Any], objective: str
+) -> tuple[list[str], dict[str, list[str]]]:
+    pair = need["adversarial_observation_pair"]
+    observation = pair[objective]
+    slots = {
+        "target_metric": pair["target_metric"],
+        "comparator": pair["comparator"],
+        "boundary": pair["boundary"],
+        "operator": OBSERVATION_OPERATOR_QUERY_TEXT[observation["operator"]],
+        "value_or_state": observation["value_or_state"],
+    }
+    slot_terms = {
+        field: _structured_query_slot_terms(
+            value, f"{objective} structured query slot {field}"
+        )
+        for field, value in slots.items()
+    }
+    core_terms = [
+        term
+        for field in (
+            "target_metric",
+            "comparator",
+            "boundary",
+            "operator",
+            "value_or_state",
+        )
+        for term in slot_terms[field]
+    ]
+    if len(core_terms) > SEMANTIC_QUERY_MAX_WORDS:
+        raise ContractError(
+            f"{objective} structured observation core exceeds the "
+            f"{SEMANTIC_QUERY_MAX_WORDS}-term query budget"
+        )
+    return core_terms, slot_terms
+
+
+def _appraisal_queries(need: dict[str, Any]) -> list[dict[str, str]]:
+    raw_semantic_fields = [
+        need["paper_need"],
+        need["target_scope"],
+        need["required_evidence_class"],
+        need["confirm_goal"],
+        need["refute_goal"],
+        need["falsifier"],
+        *need["must_criteria"],
+        *need["should_criteria"],
+        *need["must_not_criteria"],
+        *need["domain_anchors"],
+    ]
+    if any(
+        pattern.search(value)
+        for value in raw_semantic_fields
+        for pattern in STRUCTURAL_APPRAISAL_PATTERNS
+    ):
+        raise ContractError(
+            "appraisal need contains a structural placeholder rather than evidence semantics"
+        )
+    confirm_goal_terms = _semantic_terms(need["confirm_goal"])
+    refute_goal_terms = _semantic_terms(need["refute_goal"])
+    if not confirm_goal_terms or not refute_goal_terms:
+        raise ContractError("appraisal goals must contain semantic concepts")
+    confirm_signature = _semantic_term_signature(confirm_goal_terms)
+    refute_signature = _semantic_term_signature(refute_goal_terms)
+    if confirm_signature == refute_signature:
+        raise ContractError(
+            "confirm/refute semantic signatures are identical; polarity-only or "
+            "synonym-only rewrites are not adversarially orthogonal"
+        )
+    output: list[dict[str, str]] = []
+    for objective in ("confirm", "refute"):
+        terms = _objective_terms(need, objective)
+        _, _ = _structured_appraisal_query_core(need, objective)
+        anchor_phrases = [
+            _normalized_contiguous_phrase(
+                anchor, f"{objective} domain anchor {anchor_index}"
+            )
+            for anchor_index, anchor in enumerate(need["domain_anchors"])
+        ]
+        pair = need["adversarial_observation_pair"]
+        observation = pair[objective]
+        slot_phrases = {
+            "target_metric": _structured_query_slot_phrase(
+                pair["target_metric"],
+                f"{objective} structured query slot target_metric",
+            ),
+            "comparator": _structured_query_slot_phrase(
+                pair["comparator"], f"{objective} structured query slot comparator"
+            ),
+            "boundary": _structured_query_slot_phrase(
+                pair["boundary"], f"{objective} structured query slot boundary"
+            ),
+            "operator": _structured_query_slot_phrase(
+                OBSERVATION_OPERATOR_QUERY_TEXT[observation["operator"]],
+                f"{objective} structured query slot operator",
+            ),
+            "value_or_state": _structured_query_slot_phrase(
+                observation["value_or_state"],
+                f"{objective} structured query slot value_or_state",
+            ),
+        }
+        mandatory_fragments = [
+            slot_phrases[field]
+            for field in (
+                "target_metric",
+                "comparator",
+                "boundary",
+                "operator",
+                "value_or_state",
+            )
+        ]
+        mandatory_fragments.extend(anchor_phrases)
+        mandatory_term_count = sum(
+            len(fragment.split()) for fragment in mandatory_fragments
+        )
+        if mandatory_term_count > SEMANTIC_QUERY_MAX_WORDS:
+            raise ContractError(
+                f"{objective} structured observation and domain-anchor core exceeds "
+                f"the {SEMANTIC_QUERY_MAX_WORDS}-term query budget"
+            )
+        goal = need["confirm_goal"] if objective == "confirm" else need["refute_goal"]
+        free_terms = _semantic_terms(goal)
+        if objective == "refute":
+            falsifier_terms = _semantic_terms(need["falsifier"])
+            terms = sorted(set(terms) | set(falsifier_terms))
+            free_terms = sorted(set(free_terms) | set(falsifier_terms))
+        free_terms = list(dict.fromkeys([*free_terms, *terms]))
+        if len(terms) < 3:
+            raise ContractError(
+                f"{objective} goal is too structural or broad for targeted discovery"
+            )
+        remaining_budget = SEMANTIC_QUERY_MAX_WORDS - mandatory_term_count
+        free_terms = [
+            term for term in free_terms if term not in APPRAISAL_QUERY_LABEL_TERMS
+        ]
+        query = " ".join([*mandatory_fragments, *free_terms[:remaining_budget]])
+        operator_state_phrase = (
+            f"{slot_phrases['operator']} {slot_phrases['value_or_state']}"
+        ).strip()
+        normalized_query_phrase = _normalized_contiguous_phrase(
+            query, f"{objective} normalized query"
+        )
+        if len(normalized_query_phrase.split()) > SEMANTIC_QUERY_MAX_WORDS:
+            raise ContractError(
+                f"{objective} final query exceeds the "
+                f"{SEMANTIC_QUERY_MAX_WORDS}-term query budget"
+            )
+        if not _has_structured_slot_prefix(
+            normalized_query_phrase, mandatory_fragments
+        ):
+            raise ContractError(
+                f"{objective} normalized query does not preserve each ordered "
+                "structured slot occurrence"
+            )
+        for required_field in (
+            "target_metric",
+            "comparator",
+            "boundary",
+            "operator",
+            "value_or_state",
+            "operator-state",
+        ):
+            phrase = (
+                operator_state_phrase
+                if required_field == "operator-state"
+                else slot_phrases[required_field]
+            )
+            if not _contains_contiguous_phrase(normalized_query_phrase, phrase):
+                raise ContractError(
+                    f"{objective} normalized query does not preserve structured "
+                    f"{required_field} terms"
+                )
+        for anchor_index, anchor_phrase in enumerate(anchor_phrases):
+            if not _contains_contiguous_phrase(normalized_query_phrase, anchor_phrase):
+                raise ContractError(
+                    f"{objective} normalized query does not preserve domain anchor "
+                    f"{anchor_index}"
+                )
+        if any(pattern.search(query) for pattern in STRUCTURAL_APPRAISAL_PATTERNS):
+            raise ContractError(
+                f"{objective} query contains a structural placeholder rather than evidence semantics"
+            )
+        output.append(
+            {
+                "objective": objective,
+                "query": query,
+                "semantic_signature": _semantic_term_signature(terms),
+            }
+        )
+    if output[0]["semantic_signature"] == output[1]["semantic_signature"]:
+        raise ContractError(
+            "compiled confirm/refute queries are not semantically orthogonal"
+        )
+    return output
+
+
+def _semantic_overlap(left: list[str], right: list[str]) -> tuple[float, float, int]:
+    left_set = set(left)
+    right_set = set(right)
+    intersection = len(left_set & right_set)
+    if not left_set or not right_set:
+        return 0.0, 0.0, intersection
+    containment = intersection / min(len(left_set), len(right_set))
+    union = len(left_set | right_set)
+    return containment, intersection / union, intersection
+
+
+def _history_duplicate_matches(
+    need: dict[str, Any], history_index: dict[str, Any]
+) -> list[dict[str, Any]]:
+    matches: list[dict[str, Any]] = []
+    for objective in ("confirm", "refute"):
+        terms = _objective_terms(need, objective)
+        signature = _semantic_term_signature(terms)
+        for entry in history_index["entries"]:
+            containment, jaccard, shared = _semantic_overlap(
+                terms, entry["canonical_terms"]
+            )
+            if signature == entry["semantic_signature"] or (
+                shared >= 4 and containment >= 0.75 and jaccard >= 0.5
+            ):
+                matches.append(
+                    {
+                        "objective": objective,
+                        "history_objective": entry["objective"],
+                        "history_state": entry["state"],
+                        "history_signature": entry["semantic_signature"],
+                    }
+                )
+    return matches
+
+
+def _validate_need_challenge_binding(
+    need: dict[str, Any], challenges: dict[str, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    bound: list[dict[str, Any]] = []
+    for ref in need["challenge_refs"]:
+        challenge = challenges.get(ref["challenge_id"])
+        if (
+            challenge is None
+            or challenge["challenge_digest"] != ref["challenge_digest"]
+        ):
+            raise ContractError(
+                f"need {need['need_id']} references an absent or digest-mismatched challenge"
+            )
+        if challenge["status"] != "open":
+            raise ContractError("compile-appraisal-needs consumes only open challenges")
+        if challenge["resolution_route"] != "targeted_evidence_need":
+            raise ContractError(
+                "a targeted need may only bind a challenge routed to targeted_evidence_need"
+            )
+        if need["claim_ref"] != {
+            "claim_id": challenge["target"]["claim_id"],
+            "claim_digest": challenge["target"]["claim_digest"],
+        }:
+            raise ContractError("targeted need claim_ref does not match its challenge")
+        if need["appraisal_ref"] != {
+            "appraisal_id": challenge["target"]["appraisal_id"],
+            "appraisal_digest": challenge["target"]["appraisal_digest"],
+        }:
+            raise ContractError(
+                "targeted need appraisal_ref does not match its challenge"
+            )
+        if need["semantic_signature"] != challenge["semantic_signature"]:
+            raise ContractError(
+                "targeted need semantic_signature does not match its challenge"
+            )
+        if (
+            need["adversarial_observation_pair"]
+            != challenge["adversarial_observation_pair"]
+        ):
+            raise ContractError(
+                "targeted need adversarial_observation_pair does not match its challenge"
+            )
+        if need["falsifier"] != challenge["falsifier"]:
+            raise ContractError("targeted need falsifier does not match its challenge")
+
+        axis_field = CHALLENGE_AXIS_SIGNATURE_FIELD[challenge["axis"]]
+        axis_terms = set(_semantic_terms(challenge["semantic_signature"][axis_field]))
+        for objective in ("confirm", "refute"):
+            if not axis_terms.intersection(_objective_terms(need, objective)):
+                raise ContractError(
+                    f"{objective} goal does not bind challenge axis {challenge['axis']}"
+                )
+        bound.append(challenge)
+    return bound
+
+
+def _appraisal_origin(need_set: dict[str, Any], need: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": APPRAISAL_ORIGIN_SCHEMA,
+        "appraisal_set_ref": copy.deepcopy(need_set["appraisal_set_ref"]),
+        "need_set_ref": {
+            "need_set_id": need_set["need_set_id"],
+            "need_set_digest": need_set["need_set_digest"],
+        },
+        "need_ref": {
+            "need_id": need["need_id"],
+            "need_digest": need["need_digest"],
+            "route": need["route"],
+        },
+        "challenge_refs": copy.deepcopy(need["challenge_refs"]),
+        "claim_ref": copy.deepcopy(need["claim_ref"]),
+        "appraisal_ref": copy.deepcopy(need["appraisal_ref"]),
+    }
+
+
+def _validate_appraisal_origin(value: Any, label: str) -> dict[str, Any]:
+    origin = require_dict(value, label)
+    expected = {
+        "schema",
+        "need_set_ref",
+        "need_ref",
+        "challenge_refs",
+        "claim_ref",
+        "appraisal_ref",
+        "appraisal_set_ref",
+    }
+    if set(origin) != expected or origin.get("schema") != APPRAISAL_ORIGIN_SCHEMA:
+        raise ContractError(f"{label} is not a closed {APPRAISAL_ORIGIN_SCHEMA}")
+    _validate_appraisal_set_ref(
+        origin.get("appraisal_set_ref"), f"{label}.appraisal_set_ref"
+    )
+    _validate_closed_ref(
+        origin.get("need_set_ref"),
+        f"{label}.need_set_ref",
+        "need_set_id",
+        "need_set_digest",
+    )
+    need_ref = require_dict(origin.get("need_ref"), f"{label}.need_ref")
+    if set(need_ref) != {"need_id", "need_digest", "route"}:
+        raise ContractError(f"{label}.need_ref has an invalid field set")
+    require_string(need_ref.get("need_id"), f"{label}.need_ref.need_id")
+    ensure_sha256(need_ref.get("need_digest"), f"{label}.need_ref.need_digest")
+    if need_ref.get("route") != "scholar_discovery":
+        raise ContractError(f"{label}.need_ref.route must equal scholar_discovery")
+    refs = origin.get("challenge_refs")
+    if not isinstance(refs, list) or not refs:
+        raise ContractError(f"{label}.challenge_refs must be non-empty")
+    for index, ref in enumerate(refs):
+        _validate_closed_ref(
+            ref, f"{label}.challenge_refs[{index}]", "challenge_id", "challenge_digest"
+        )
+    if refs != sorted(refs, key=canonical_bytes) or len(
+        {canonical_bytes(ref) for ref in refs}
+    ) != len(refs):
+        raise ContractError(f"{label}.challenge_refs must be sorted and unique")
+    _validate_closed_ref(
+        origin.get("claim_ref"), f"{label}.claim_ref", "claim_id", "claim_digest"
+    )
+    _validate_closed_ref(
+        origin.get("appraisal_ref"),
+        f"{label}.appraisal_ref",
+        "appraisal_id",
+        "appraisal_digest",
+    )
+    return origin
+
+
+def _hypothesis_from_appraisal_need(
+    need_set: dict[str, Any],
+    need: dict[str, Any],
+    challenges: list[dict[str, Any]],
+    network: dict[str, Any],
+) -> dict[str, Any]:
+    queries = _appraisal_queries(need)
+    target_terms = _semantic_terms(" ".join(need["semantic_signature"].values()))
+    source_tier = (
+        "explicit_high_impact" if need["decision_impact"] == "high" else "explicit"
+    )
+    return {
+        "hypothesis_id": f"KGH-APP-{need['need_digest'][:12]}",
+        "gap_type": "implicit_candidate",
+        "target_kind": "evidence",
+        "target_signature": " ".join(target_terms[:8]),
+        "scope_and_time_bounds": need["target_scope"],
+        "semantic_label": need["paper_need"],
+        "hypothesis": need["confirm_goal"],
+        "grounds": [
+            {
+                "ref_id": f"network:{network['network_id']}",
+                "statement": challenges[0]["problem_statement"],
+            }
+        ],
+        "warrant": " ".join(challenge["problem_statement"] for challenge in challenges),
+        "backing": [
+            {
+                "ref_id": f"network:{network['network_id']}",
+                "locator": "EvidenceChallenge/v1 and TargetedEvidenceNeedSet/v1",
+            }
+        ],
+        "qualifier": "bounded targeted need; absence is not novelty or nonexistence",
+        "defeaters": sorted(set([need["falsifier"], need["refute_goal"]])),
+        "search_test": {
+            "queries": queries,
+            "route_families": [
+                "openalex",
+                "semantic_scholar",
+                "crossref",
+                "google_scholar",
+            ],
+            "expected_confirming_observation": need["confirm_goal"],
+            "expected_disconfirming_observation": need["falsifier"],
+            "acceptance_criteria": need["acceptance_criterion"],
+            "criteria": {
+                "must": copy.deepcopy(need["must_criteria"]),
+                "should": copy.deepcopy(need["should_criteria"]),
+                "must_not": copy.deepcopy(need["must_not_criteria"]),
+            },
+            "metadata_filters": {},
+            "seeds": {"titles": [], "arxiv": []},
+        },
+        "expected_information_gain": "resolves a specific appraisal challenge",
+        "decision_impact": need["decision_impact"],
+        "uncertainty": "high",
+        "searchability": "high",
+        "cross_branch_blocking": need["decision_impact"] == "high",
+        "source_signal_kind": "appraisal_targeted_need",
+        "source_signal_tier": source_tier,
+        "source_priority": "P0" if need["decision_impact"] == "high" else "P1",
+        "dependencies": [ref["challenge_id"] for ref in need["challenge_refs"]],
+        "status": "proposed",
+        "status_basis": [],
+        "novelty_claimed": False,
+        "structural_only": False,
+        "next_action": "scholar_discovery",
+        "appraisal_origin": _appraisal_origin(need_set, need),
+        "domain_anchors": copy.deepcopy(need["domain_anchors"]),
+    }
+
+
+def compile_appraisal_needs(
+    need_set_value: Any,
+    challenge_values: list[Any],
+    history_index_value: Any,
+    history_authority_value: Any,
+    history_authority_review_value: Any,
+    network_value: Any,
+    *,
+    round_id: str,
+    execution_authority_contexts: dict[str, dict[str, Any]] | None = None,
+    artifact_file_sha256s: list[str] | None = None,
+) -> dict[str, Any]:
+    network = validate_network(network_value)
+    need_set = validate_targeted_evidence_need_set(need_set_value)
+    history_authority_review = validate_reviewed_history_authority(
+        history_authority_review_value
+    )
+    history_authority = validate_history_authority_manifest(
+        history_authority_value, history_authority_review
+    )
+    history_index = validate_search_history_index(
+        history_index_value,
+        history_authority,
+        history_authority_review,
+        execution_authority_contexts=execution_authority_contexts,
+        artifact_file_sha256s=artifact_file_sha256s,
+    )
+    require_string(round_id, "compile-appraisal-needs round_id")
+    if not isinstance(challenge_values, list) or not challenge_values:
+        raise ContractError(
+            "compile-appraisal-needs requires EvidenceChallenge/v1 inputs"
+        )
+    challenges_list = sorted(
+        [validate_evidence_challenge(value) for value in challenge_values],
+        key=lambda row: row["challenge_id"],
+    )
+    challenges = {row["challenge_id"]: row for row in challenges_list}
+    if len(challenges) != len(challenges_list):
+        raise ContractError("compile-appraisal-needs challenge IDs must be unique")
+    if any(
+        challenge["appraisal_set_ref"] != need_set["appraisal_set_ref"]
+        for challenge in challenges_list
+    ):
+        raise ContractError(
+            "compile-appraisal-needs appraisal_set_ref mismatch across inputs"
+        )
+
+    referenced_challenge_ids = {
+        ref["challenge_id"]
+        for need in need_set["needs"]
+        for ref in need["challenge_refs"]
+    }
+    if referenced_challenge_ids != set(challenges):
+        raise ContractError(
+            "compile-appraisal-needs challenges must exactly match need challenge_refs"
+        )
+
+    hypotheses: list[dict[str, Any]] = []
+    routed_needs: list[dict[str, Any]] = []
+    repeated_needs: list[dict[str, Any]] = []
+    scholar_count = 0
+    for need in need_set["needs"]:
+        if need["status"] != "proposed":
+            raise ContractError("compile-appraisal-needs consumes only proposed needs")
+        bound_challenges = _validate_need_challenge_binding(need, challenges)
+        if need["route"] != "scholar_discovery":
+            routed_needs.append(copy.deepcopy(need))
+            continue
+        scholar_count += 1
+        _appraisal_queries(need)
+        matches = _history_duplicate_matches(need, history_index)
+        if matches:
+            repeated_needs.append({"need_id": need["need_id"], "matches": matches})
+            continue
+        hypotheses.append(
+            _hypothesis_from_appraisal_need(need_set, need, bound_challenges, network)
+        )
+
+    if repeated_needs:
+        ratio = len(repeated_needs) / max(1, scholar_count)
+        prefix = (
+            "Round-style 9/10 history reuse" if ratio >= 0.9 else "search-history reuse"
+        )
+        raise ContractError(
+            f"{prefix} rejected: {len(repeated_needs)}/{scholar_count} scholar needs "
+            "repeat canonical, selection-leak, failed, partial, result, or candidate semantics"
+        )
+
+    output = {
+        "schema": HYPOTHESES_SCHEMA,
+        "network_ref": network_ref(network),
+        "round_id": round_id,
+        "generated_at": timestamp_now(),
+        "method_families": [
+            "adversarial_countercheck",
+            "evidence_appraisal",
+            "targeted_missing_content",
+        ],
+        "hypotheses": hypotheses,
+        "appraisal_compilation": {
+            "schema": APPRAISAL_COMPILATION_SCHEMA,
+            "need_set": copy.deepcopy(need_set),
+            "challenges": copy.deepcopy(challenges_list),
+            "history_authority": copy.deepcopy(history_authority),
+            "history_authority_review": copy.deepcopy(history_authority_review),
+            "history_index": copy.deepcopy(history_index),
+        },
+        "routed_needs": routed_needs,
+    }
+    return validate_hypotheses(
+        output,
+        network,
+        execution_authority_contexts=execution_authority_contexts,
+        history_artifact_file_sha256s=artifact_file_sha256s,
+    )
+
+
+def _validate_appraisal_projection(
+    document: dict[str, Any],
+    network: dict[str, Any] | None,
+    *,
+    execution_authority_contexts: dict[str, dict[str, Any]] | None = None,
+    history_artifact_file_sha256s: list[str] | None = None,
+) -> None:
+    compilation = require_dict(
+        document.get("appraisal_compilation"), "hypotheses.appraisal_compilation"
+    )
+    if set(compilation) != {
+        "schema",
+        "need_set",
+        "challenges",
+        "history_authority",
+        "history_authority_review",
+        "history_index",
+    }:
+        raise ContractError("hypotheses.appraisal_compilation has an invalid field set")
+    if compilation.get("schema") != APPRAISAL_COMPILATION_SCHEMA:
+        raise ContractError("hypotheses.appraisal_compilation.schema is invalid")
+    need_set = validate_targeted_evidence_need_set(compilation.get("need_set"))
+    history_authority_review = validate_reviewed_history_authority(
+        compilation.get("history_authority_review")
+    )
+    history_authority = validate_history_authority_manifest(
+        compilation.get("history_authority"), history_authority_review
+    )
+    history_index = validate_search_history_index(
+        compilation.get("history_index"),
+        history_authority,
+        history_authority_review,
+        execution_authority_contexts=execution_authority_contexts,
+        artifact_file_sha256s=history_artifact_file_sha256s,
+    )
+    raw_challenges = compilation.get("challenges")
+    if not isinstance(raw_challenges, list) or not raw_challenges:
+        raise ContractError(
+            "hypotheses.appraisal_compilation.challenges must be non-empty"
+        )
+    challenges_list = [validate_evidence_challenge(value) for value in raw_challenges]
+    if challenges_list != sorted(challenges_list, key=lambda row: row["challenge_id"]):
+        raise ContractError("appraisal compilation challenges must be sorted")
+    challenges = {row["challenge_id"]: row for row in challenges_list}
+    if len(challenges) != len(challenges_list):
+        raise ContractError("appraisal compilation challenges must be unique")
+    if any(
+        challenge["appraisal_set_ref"] != need_set["appraisal_set_ref"]
+        for challenge in challenges_list
+    ):
+        raise ContractError("appraisal compilation appraisal_set_ref mismatch")
+
+    scholar_needs = [
+        need for need in need_set["needs"] if need["route"] == "scholar_discovery"
+    ]
+    routed_needs = [
+        need for need in need_set["needs"] if need["route"] != "scholar_discovery"
+    ]
+    if document.get("routed_needs") != routed_needs:
+        raise ContractError(
+            "non-scholar appraisal needs must be preserved exactly in routed_needs"
+        )
+    by_need_id = {need["need_id"]: need for need in scholar_needs}
+    observed_need_ids: list[str] = []
+    for hypothesis in document["hypotheses"]:
+        origin = _validate_appraisal_origin(
+            hypothesis.get("appraisal_origin"),
+            f"hypothesis {hypothesis.get('hypothesis_id')}.appraisal_origin",
+        )
+        need_id = origin["need_ref"]["need_id"]
+        need = by_need_id.get(need_id)
+        if need is None:
+            raise ContractError(
+                "only scholar_discovery appraisal needs may enter hypothesis selection"
+            )
+        _validate_need_challenge_binding(need, challenges)
+        if origin != _appraisal_origin(need_set, need):
+            raise ContractError(
+                "appraisal hypothesis origin does not match its exact need"
+            )
+        if hypothesis.get("next_action") != "scholar_discovery":
+            raise ContractError(
+                "appraisal hypothesis next_action must be scholar_discovery"
+            )
+        if hypothesis.get("search_test", {}).get("queries") != _appraisal_queries(need):
+            raise ContractError(
+                "appraisal hypothesis queries do not match the exact need"
+            )
+        if hypothesis.get("semantic_label") != need["paper_need"]:
+            raise ContractError(
+                "appraisal hypothesis paper_need projection was mutated"
+            )
+        if hypothesis.get("scope_and_time_bounds") != need["target_scope"]:
+            raise ContractError(
+                "appraisal hypothesis target_scope projection was mutated"
+            )
+        if hypothesis.get("domain_anchors") != need["domain_anchors"]:
+            raise ContractError(
+                "appraisal hypothesis domain_anchors projection was mutated"
+            )
+        if _history_duplicate_matches(need, history_index):
+            raise ContractError(
+                "appraisal hypothesis repeats SearchHistoryIndex semantics"
+            )
+        observed_need_ids.append(need_id)
+    if observed_need_ids != [need["need_id"] for need in scholar_needs]:
+        raise ContractError(
+            "appraisal hypotheses must be the complete ordered scholar_discovery projection"
+        )
+    if network is not None and document.get("network_ref") != network_ref(network):
+        raise ContractError("appraisal compilation network_ref mismatch")
 
 
 def generate_hypotheses_from_probe(
@@ -1871,7 +3510,12 @@ def generate_hypotheses_from_probe(
                         "query": _build_semantic_search_query(search_terms, "refute"),
                     },
                 ],
-                "route_families": ["openalex", "semantic_scholar", "crossref", "google_scholar"],
+                "route_families": [
+                    "openalex",
+                    "semantic_scholar",
+                    "crossref",
+                    "google_scholar",
+                ],
                 "expected_confirming_observation": (
                     "a primary source with bounded comparison to the same network objects"
                 ),
@@ -1904,7 +3548,9 @@ def generate_hypotheses_from_probe(
             "status_basis": [],
             "novelty_claimed": False,
             "structural_only": structural_only,
-            "next_action": "scholar_discovery" if not structural_only else "structural_only",
+            "next_action": "scholar_discovery"
+            if not structural_only
+            else "structural_only",
         }
         validate_hypothesis_reference(grounds_ref, index, "hypothesis.grounds")
         hypothesis["backing"][0]["ref_id"] = f"network:{network['network_id']}"
@@ -1915,7 +3561,11 @@ def generate_hypotheses_from_probe(
         "network_ref": network_ref(network),
         "round_id": round_id or timestamp_now(),
         "generated_at": timestamp_now(),
-        "method_families": ["competency_coverage", "abc_bridge", "counterevidence_boundary"],
+        "method_families": [
+            "competency_coverage",
+            "abc_bridge",
+            "counterevidence_boundary",
+        ],
         "candidate_budget": {
             "max_total": CANDIDATE_SIGNAL_MAX_TOTAL,
             "tier_budgets": dict(CANDIDATE_SIGNAL_TIER_BUDGETS),
@@ -1926,7 +3576,11 @@ def generate_hypotheses_from_probe(
 
 
 def validate_hypotheses(
-    value: Any, network: dict[str, Any] | None = None
+    value: Any,
+    network: dict[str, Any] | None = None,
+    *,
+    execution_authority_contexts: dict[str, dict[str, Any]] | None = None,
+    history_artifact_file_sha256s: list[str] | None = None,
 ) -> dict[str, Any]:
     document = require_dict(value, "hypotheses")
     if document.get("schema") != HYPOTHESES_SCHEMA:
@@ -1934,8 +3588,14 @@ def validate_hypotheses(
     validate_network_ref(document.get("network_ref"), "hypotheses.network_ref", network)
     require_string(document.get("round_id"), "hypotheses.round_id")
     require_timestamp(document.get("generated_at"), "hypotheses.generated_at")
-    require_string_list(document.get("method_families"), "hypotheses.method_families", True)
-    index = network_reference_index(validate_network(network)) if network is not None else None
+    require_string_list(
+        document.get("method_families"), "hypotheses.method_families", True
+    )
+    index = (
+        network_reference_index(validate_network(network))
+        if network is not None
+        else None
+    )
 
     hypotheses = document.get("hypotheses")
     if not isinstance(hypotheses, list):
@@ -1944,7 +3604,9 @@ def validate_hypotheses(
     for index_h, hypothesis in enumerate(hypotheses):
         label = f"hypotheses.hypotheses[{index_h}]"
         item = require_dict(hypothesis, label)
-        hypothesis_id = require_string(item.get("hypothesis_id"), f"{label}.hypothesis_id")
+        hypothesis_id = require_string(
+            item.get("hypothesis_id"), f"{label}.hypothesis_id"
+        )
         if hypothesis_id in seen:
             raise ContractError(f"duplicate hypothesis_id: {hypothesis_id}")
         seen.add(hypothesis_id)
@@ -1967,12 +3629,16 @@ def validate_hypotheses(
             raise ContractError(f"{label}.grounds must be non-empty")
         for ground_index, ground in enumerate(grounds):
             entry = require_dict(ground, f"{label}.grounds[{ground_index}]")
-            ref_id = require_string(entry.get("ref_id"), f"{label}.grounds[{ground_index}].ref_id")
+            ref_id = require_string(
+                entry.get("ref_id"), f"{label}.grounds[{ground_index}].ref_id"
+            )
             require_string(
                 entry.get("statement"), f"{label}.grounds[{ground_index}].statement"
             )
             if index is not None:
-                validate_hypothesis_reference(ref_id, index, f"{label}.grounds[{ground_index}].ref_id")
+                validate_hypothesis_reference(
+                    ref_id, index, f"{label}.grounds[{ground_index}].ref_id"
+                )
 
         backing = item.get("backing")
         if not isinstance(backing, list) or not backing:
@@ -1982,7 +3648,9 @@ def validate_hypotheses(
             ref_id = require_string(
                 entry.get("ref_id"), f"{label}.backing[{backing_index}].ref_id"
             )
-            require_string(entry.get("locator"), f"{label}.backing[{backing_index}].locator")
+            require_string(
+                entry.get("locator"), f"{label}.backing[{backing_index}].locator"
+            )
             if index is not None:
                 validate_hypothesis_reference(
                     ref_id, index, f"{label}.backing[{backing_index}].ref_id"
@@ -2002,14 +3670,16 @@ def validate_hypotheses(
         ):
             raise ContractError(f"{label}.source_signal_tier is invalid")
         needs_semantic_enrichment = item.get("needs_semantic_enrichment")
-        if (
-            needs_semantic_enrichment is not None
-            and needs_semantic_enrichment not in {True, False}
-        ):
+        if needs_semantic_enrichment is not None and needs_semantic_enrichment not in {
+            True,
+            False,
+        }:
             raise ContractError(
                 f"{label}.needs_semantic_enrichment must be boolean if present"
             )
-        skip_semantic_validation = bool(structural_only) or bool(needs_semantic_enrichment)
+        skip_semantic_validation = bool(structural_only) or bool(
+            needs_semantic_enrichment
+        )
         for field in ("decision_impact", "uncertainty", "searchability"):
             if item.get(field) not in LEVELS:
                 raise ContractError(f"{label}.{field} is invalid")
@@ -2027,7 +3697,9 @@ def validate_hypotheses(
         if (not skip_semantic_validation) and len(queries) < 2:
             raise ContractError(f"{label}.search_test needs confirm and refute queries")
         objectives: set[str] = set()
-        criteria = require_dict(search_test.get("criteria"), f"{label}.search_test.criteria")
+        criteria = require_dict(
+            search_test.get("criteria"), f"{label}.search_test.criteria"
+        )
         required_terms = criteria.get("must", [])
         for query_index, query in enumerate(queries):
             entry = require_dict(query, f"{label}.search_test.queries[{query_index}]")
@@ -2070,7 +3742,9 @@ def validate_hypotheses(
             "already_covered",
         }:
             if not item["status_basis"]:
-                raise ContractError(f"{label}.status_basis required for evidence states")
+                raise ContractError(
+                    f"{label}.status_basis required for evidence states"
+                )
             groups = set()
             has_full_text = False
             for basis_index, basis in enumerate(item["status_basis"]):
@@ -2115,6 +3789,17 @@ def validate_hypotheses(
                 raise ContractError(
                     f"{label} high-impact evidence states need two groups and full text"
                 )
+    if "appraisal_compilation" in document:
+        _validate_appraisal_projection(
+            document,
+            network,
+            execution_authority_contexts=execution_authority_contexts,
+            history_artifact_file_sha256s=history_artifact_file_sha256s,
+        )
+    elif "routed_needs" in document:
+        raise ContractError(
+            "hypotheses.routed_needs requires a closed appraisal_compilation"
+        )
     return document
 
 
@@ -2147,20 +3832,41 @@ def priority_components(hypothesis: dict[str, Any]) -> dict[str, int]:
             "P3": 0,
             "low": 0,
         }.get(str(hypothesis.get("source_priority")), 0),
-        "terminal_status_penalty": -100 if hypothesis["status"] not in ACTIVE_STATUSES else 0,
+        "terminal_status_penalty": -100
+        if hypothesis["status"] not in ACTIVE_STATUSES
+        else 0,
     }
 
 
 def _is_search_request_candidate(hypothesis: dict[str, Any]) -> bool:
+    appraisal_origin = hypothesis.get("appraisal_origin")
+    appraisal_route_ok = True
+    if appraisal_origin is not None:
+        appraisal_route_ok = (
+            _validate_appraisal_origin(appraisal_origin, "hypothesis.appraisal_origin")[
+                "need_ref"
+            ]["route"]
+            == "scholar_discovery"
+        )
     return (
         hypothesis["status"] in ACTIVE_STATUSES
         and not hypothesis.get("structural_only")
         and not hypothesis.get("needs_semantic_enrichment")
+        and appraisal_route_ok
     )
 
 
-def prioritize(value: Any, network: dict[str, Any] | None = None) -> dict[str, Any]:
-    document = validate_hypotheses(value, network)
+def prioritize(
+    value: Any,
+    network: dict[str, Any] | None = None,
+    *,
+    execution_authority_contexts: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    document = validate_hypotheses(
+        value,
+        network,
+        execution_authority_contexts=execution_authority_contexts,
+    )
     output = json.loads(json.dumps(document))
     for hypothesis in output["hypotheses"]:
         components = priority_components(hypothesis)
@@ -2205,10 +3911,17 @@ def validate_scholar_discovery_request(value: Any) -> dict[str, Any]:
     request = require_dict(value, "request")
     if request.get("schema") != REQUEST_SCHEMA:
         raise ContractError(f"request.schema must equal {REQUEST_SCHEMA}")
-    require_string(request.get("request_id"), "request.request_id")
+    request_id = require_string(request.get("request_id"), "request.request_id")
     require_string(request.get("paper_need"), "request.paper_need")
     intent = request.get("intent")
-    if intent not in {"auto", "known_item", "topic_set", "author", "citation_graph", "update"}:
+    if intent not in {
+        "auto",
+        "known_item",
+        "topic_set",
+        "author",
+        "citation_graph",
+        "update",
+    }:
         raise ContractError("request.intent is invalid")
     if request.get("effort") not in {"fast", "diligent"}:
         raise ContractError("request.effort must be one of fast or diligent")
@@ -2233,7 +3946,9 @@ def validate_scholar_discovery_request(value: Any) -> dict[str, Any]:
     for key in ("authors", "venues", "languages", "work_types"):
         require_string_list(filters.get(key, []), f"request.metadata_filters.{key}")
     if filters.get("open_access") not in {None, True, False}:
-        raise ContractError("request.metadata_filters.open_access must be true, false, or null")
+        raise ContractError(
+            "request.metadata_filters.open_access must be true, false, or null"
+        )
 
     seeds = require_dict(request.get("seeds"), "request.seeds")
     for key in ("doi", "arxiv", "pmid", "openalex", "semantic_scholar", "titles"):
@@ -2246,7 +3961,11 @@ def validate_scholar_discovery_request(value: Any) -> dict[str, Any]:
         raise ContractError(f"unsupported automatic providers: {sorted(unknown)}")
     if "google_scholar" in automatic:
         raise ContractError("Google Scholar must never be an automatic provider")
-    if routes.get("google_scholar") not in {"disabled", "manual_optional", "manual_required"}:
+    if routes.get("google_scholar") not in {
+        "disabled",
+        "manual_optional",
+        "manual_required",
+    }:
         raise ContractError("request.routes.google_scholar must be valid policy")
 
     budgets = require_dict(request.get("budgets"), "request.budgets")
@@ -2269,6 +3988,20 @@ def validate_scholar_discovery_request(value: Any) -> dict[str, Any]:
     if not {"confirm", "refute"}.issubset(objectives):
         raise ContractError("request.query_seeds must include confirm and refute")
 
+    has_appraisal_origin = "appraisal_origin" in request
+    if has_appraisal_origin:
+        _validate_appraisal_origin(
+            request.get("appraisal_origin"), "request.appraisal_origin"
+        )
+        if not request_id.startswith(APPRAISAL_REQUEST_ID_PREFIX):
+            raise ContractError(
+                "request with appraisal_origin must use the ASDR- appraisal request ID"
+            )
+    elif request_id.startswith(APPRAISAL_REQUEST_ID_PREFIX):
+        raise ContractError(
+            "request without appraisal_origin must not use the ASDR- appraisal request ID"
+        )
+
     return request
 
 
@@ -2289,8 +4022,7 @@ def validate_reviewed_gap_selection(
     }
     if set(selection) != expected_fields:
         raise ContractError(
-            "reviewed selection field set must be exactly "
-            f"{sorted(expected_fields)}"
+            f"reviewed selection field set must be exactly {sorted(expected_fields)}"
         )
     if selection.get("schema") != REVIEWED_GAP_SELECTION_SCHEMA:
         raise ContractError(
@@ -2299,9 +4031,7 @@ def validate_reviewed_gap_selection(
     if selection.get("review_status") != "approved":
         raise ContractError("reviewed selection review_status must be approved")
 
-    input_ref = require_dict(
-        selection.get("input_ref"), "reviewed selection.input_ref"
-    )
+    input_ref = require_dict(selection.get("input_ref"), "reviewed selection.input_ref")
     if set(input_ref) != {"schema", "sha256"}:
         raise ContractError(
             "reviewed selection.input_ref field set must be exactly schema and sha256"
@@ -2331,7 +4061,10 @@ def validate_reviewed_gap_selection(
 
 
 def validate_unmodified_prioritize_output(
-    document: dict[str, Any], network: dict[str, Any] | None
+    document: dict[str, Any],
+    network: dict[str, Any] | None,
+    *,
+    execution_authority_contexts: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     if "reviewed_selection_ref" in document:
         raise ContractError(
@@ -2348,7 +4081,11 @@ def validate_unmodified_prioritize_output(
     unscheduled.pop("selection_summary", None)
     for hypothesis in unscheduled["hypotheses"]:
         hypothesis["status"] = "proposed"
-    expected = prioritize(unscheduled, network)
+    expected = prioritize(
+        unscheduled,
+        network,
+        execution_authority_contexts=execution_authority_contexts,
+    )
 
     observed_state = [
         (hypothesis["hypothesis_id"], hypothesis["status"])
@@ -2373,21 +4110,28 @@ def select_hypotheses(
     value: Any,
     reviewed_selection: Any,
     network: dict[str, Any] | None = None,
+    *,
+    execution_authority_contexts: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    document = validate_hypotheses(value, network)
-    validate_unmodified_prioritize_output(document, network)
+    document = validate_hypotheses(
+        value,
+        network,
+        execution_authority_contexts=execution_authority_contexts,
+    )
+    validate_unmodified_prioritize_output(
+        document,
+        network,
+        execution_authority_contexts=execution_authority_contexts,
+    )
     selection = validate_reviewed_gap_selection(reviewed_selection, document)
     selected_ids = selection["selected_hypothesis_ids"]
     selected_set = set(selected_ids)
 
     by_id = {
-        hypothesis["hypothesis_id"]: hypothesis
-        for hypothesis in document["hypotheses"]
+        hypothesis["hypothesis_id"]: hypothesis for hypothesis in document["hypotheses"]
     }
     unknown_ids = [
-        hypothesis_id
-        for hypothesis_id in selected_ids
-        if hypothesis_id not in by_id
+        hypothesis_id for hypothesis_id in selected_ids if hypothesis_id not in by_id
     ]
     if unknown_ids:
         raise ContractError(
@@ -2427,10 +4171,12 @@ def select_hypotheses(
         "selected_hypothesis_ids": list(selected_ids),
         "review_status": "approved",
     }
-    output = _apply_reviewed_selection_projection(
-        document, selected_ids, reviewed_ref
+    output = _apply_reviewed_selection_projection(document, selected_ids, reviewed_ref)
+    validate_hypotheses(
+        output,
+        network,
+        execution_authority_contexts=execution_authority_contexts,
     )
-    validate_hypotheses(output, network)
     selected_hypotheses_for_emission(output)
     reviewed_selection_ref_for_emission(output, selected_ids, network)
     return output
@@ -2495,7 +4241,9 @@ def _reconstruct_prioritized_selection_baseline(
 
 
 def selected_hypotheses_for_emission(document: dict[str, Any]) -> list[dict[str, Any]]:
-    summary = require_dict(document.get("selection_summary"), "hypotheses.selection_summary")
+    summary = require_dict(
+        document.get("selection_summary"), "hypotheses.selection_summary"
+    )
     selected_count = summary.get("selected_count")
     if (
         isinstance(selected_count, bool)
@@ -2518,7 +4266,9 @@ def selected_hypotheses_for_emission(document: dict[str, Any]) -> list[dict[str,
         for hypothesis in document["hypotheses"]
         if hypothesis["status"] == "selected"
     ]
-    actual_selected_ids = [hypothesis["hypothesis_id"] for hypothesis in actual_selected]
+    actual_selected_ids = [
+        hypothesis["hypothesis_id"] for hypothesis in actual_selected
+    ]
     if selected_count != len(selected_ids):
         raise ContractError(
             "hypotheses.selection_summary.selected_count must equal the selected ID count"
@@ -2640,7 +4390,9 @@ def reviewed_selection_ref_for_emission(
     )
     if document != expected_projection:
         observed_ids = [row.get("hypothesis_id") for row in document["hypotheses"]]
-        expected_ids = [row["hypothesis_id"] for row in expected_projection["hypotheses"]]
+        expected_ids = [
+            row["hypothesis_id"] for row in expected_projection["hypotheses"]
+        ]
         if observed_ids != expected_ids:
             raise ContractError(
                 "reviewed selection projection must preserve every baseline hypothesis "
@@ -2653,17 +4405,155 @@ def reviewed_selection_ref_for_emission(
     return ref
 
 
+def validate_request_projection_profile(value: Any) -> dict[str, Any]:
+    profile = copy.deepcopy(require_dict(value, "request projection profile"))
+    expected = {"schema", "max_rounds", "max_candidates", "timeout_seconds"}
+    if set(profile) != expected:
+        raise ContractError(
+            f"request projection profile field set must be exactly {sorted(expected)}"
+        )
+    if profile.get("schema") != REQUEST_PROJECTION_PROFILE_SCHEMA:
+        raise ContractError(
+            "request projection profile.schema must equal "
+            f"{REQUEST_PROJECTION_PROFILE_SCHEMA}"
+        )
+    limits = {
+        "max_rounds": (1, 20),
+        "max_candidates": (1, 1000),
+        "timeout_seconds": (1, 86400),
+    }
+    for field, (minimum, maximum) in limits.items():
+        raw = profile.get(field)
+        if type(raw) is not int or not minimum <= raw <= maximum:
+            raise ContractError(
+                f"request projection profile.{field} must be an integer in "
+                f"[{minimum}, {maximum}]"
+            )
+    return profile
+
+
+def project_scholar_request(
+    hypothesis: dict[str, Any],
+    document: dict[str, Any],
+    network_ref_value: dict[str, Any],
+    google_scholar_policy: str,
+    request_profile_value: Any | None = None,
+) -> dict[str, Any]:
+    request_profile = validate_request_projection_profile(
+        request_profile_value
+        or {
+            "schema": REQUEST_PROJECTION_PROFILE_SCHEMA,
+            "max_rounds": 3,
+            "max_candidates": 100,
+            "timeout_seconds": 900,
+        }
+    )
+    search_test = hypothesis["search_test"]
+    criteria = search_test.get("criteria", {})
+    filters = search_test.get("metadata_filters", {})
+    seeds = search_test.get("seeds", {})
+    route_families = list(dict.fromkeys(search_test["route_families"]))
+    automatic = [route for route in route_families if route in AUTOMATIC_PROVIDERS]
+    if not automatic:
+        automatic = ["openalex", "semantic_scholar", "crossref"]
+    years = filters.get("years", {}) if isinstance(filters, dict) else {}
+    google_scholar_route = (
+        google_scholar_policy if "google_scholar" in route_families else "disabled"
+    )
+    paper_need = _semantic_paper_need(
+        hypothesis.get("semantic_label", hypothesis["hypothesis"]),
+        optional_list(criteria.get("must")),
+        independent_evidence=(
+            hypothesis.get("source_signal_kind") == "low_confidence_relation"
+        ),
+    )
+    request = {
+        "schema": REQUEST_SCHEMA,
+        "request_id": (
+            APPRAISAL_REQUEST_ID_PREFIX
+            if "appraisal_origin" in hypothesis
+            else GENERIC_REQUEST_ID_PREFIX
+        )
+        + hypothesis["hypothesis_id"],
+        "paper_need": paper_need,
+        "intent": "topic_set",
+        "effort": "diligent" if hypothesis["decision_impact"] == "high" else "fast",
+        "criteria": {
+            "must": optional_list(criteria.get("must")),
+            "should": optional_list(criteria.get("should")),
+            "must_not": optional_list(criteria.get("must_not")),
+        },
+        "metadata_filters": {
+            "years": {"from": years.get("from"), "to": years.get("to")},
+            "authors": optional_list(filters.get("authors")),
+            "venues": optional_list(filters.get("venues")),
+            "languages": optional_list(filters.get("languages")),
+            "work_types": optional_list(filters.get("work_types")),
+            "open_access": filters.get("open_access"),
+        },
+        "seeds": {
+            key: optional_list(seeds.get(key))
+            for key in (
+                "doi",
+                "arxiv",
+                "pmid",
+                "openalex",
+                "semantic_scholar",
+                "titles",
+            )
+        },
+        "routes": {
+            "automatic": automatic,
+            "google_scholar": google_scholar_route,
+        },
+        "budgets": {
+            "max_rounds": request_profile["max_rounds"],
+            "max_queries": min(
+                30, max(6, len(search_test["queries"]) * len(automatic))
+            ),
+            "max_candidates": request_profile["max_candidates"],
+            "timeout_seconds": request_profile["timeout_seconds"],
+        },
+        "query_seeds": copy.deepcopy(search_test["queries"]),
+        "as_of": document["generated_at"],
+        "gap_ref": {
+            "gap_id": hypothesis["hypothesis_id"],
+            "network_id": network_ref_value["network_id"],
+        },
+        "gap_hypothesis_id": hypothesis["hypothesis_id"],
+    }
+    if "appraisal_origin" in hypothesis:
+        request["appraisal_origin"] = copy.deepcopy(hypothesis["appraisal_origin"])
+    return validate_scholar_discovery_request(request)
+
+
 def emit_search_requests(
     value: Any,
     network: dict[str, Any] | None = None,
     *,
     google_scholar_policy: str = "manual_optional",
+    max_rounds: int = 3,
+    max_candidates: int = 100,
+    timeout_seconds: int = 900,
+    execution_authority_contexts: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if google_scholar_policy not in {"disabled", "manual_optional", "manual_required"}:
         raise ContractError(
             "google_scholar_policy must be disabled, manual_optional, or manual_required"
         )
-    document = validate_hypotheses(value, network)
+    document = validate_hypotheses(
+        value,
+        network,
+        execution_authority_contexts=execution_authority_contexts,
+    )
+    request_profile = validate_request_projection_profile(
+        {
+            "schema": REQUEST_PROJECTION_PROFILE_SCHEMA,
+            "max_rounds": max_rounds,
+            "max_candidates": max_candidates,
+            "timeout_seconds": timeout_seconds,
+        }
+    )
     selected_hypotheses = selected_hypotheses_for_emission(document)
     selected_ids = [row["hypothesis_id"] for row in selected_hypotheses]
     reviewed_selection_ref = reviewed_selection_ref_for_emission(
@@ -2679,76 +4569,17 @@ def emit_search_requests(
     requests: list[dict[str, Any]] = []
     seen_request_ids: set[str] = set()
     for hypothesis in selected_hypotheses:
-        search_test = hypothesis["search_test"]
-        criteria = search_test.get("criteria", {})
-        filters = search_test.get("metadata_filters", {})
-        seeds = search_test.get("seeds", {})
-        route_families = list(dict.fromkeys(search_test["route_families"]))
-        automatic = [route for route in route_families if route in AUTOMATIC_PROVIDERS]
-        if not automatic:
-            automatic = ["openalex", "semantic_scholar", "crossref"]
-        years = filters.get("years", {}) if isinstance(filters, dict) else {}
-        request_id = "SDR-" + hypothesis["hypothesis_id"]
+        request = project_scholar_request(
+            hypothesis,
+            document,
+            network_ref_value,
+            google_scholar_policy,
+            request_profile,
+        )
+        request_id = request["request_id"]
         if request_id in seen_request_ids:
             raise ContractError(f"duplicate request_id {request_id}")
         seen_request_ids.add(request_id)
-        google_scholar_route = (
-            google_scholar_policy
-            if "google_scholar" in route_families
-            else "disabled"
-        )
-        paper_need = _semantic_paper_need(
-            hypothesis.get("semantic_label", hypothesis["hypothesis"]),
-            optional_list(criteria.get("must")),
-            independent_evidence=(
-                hypothesis.get("source_signal_kind") == "low_confidence_relation"
-            ),
-        )
-
-        request = {
-            "schema": REQUEST_SCHEMA,
-            "request_id": request_id,
-            "paper_need": paper_need,
-            "intent": "topic_set",
-            "effort": "diligent" if hypothesis["decision_impact"] == "high" else "fast",
-            "criteria": {
-                "must": optional_list(criteria.get("must")),
-                "should": optional_list(criteria.get("should")),
-                "must_not": optional_list(criteria.get("must_not")),
-            },
-            "metadata_filters": {
-                "years": {"from": years.get("from"), "to": years.get("to")},
-                "authors": optional_list(filters.get("authors")),
-                "venues": optional_list(filters.get("venues")),
-                "languages": optional_list(filters.get("languages")),
-                "work_types": optional_list(filters.get("work_types")),
-                "open_access": filters.get("open_access"),
-            },
-            "seeds": {
-                key: optional_list(seeds.get(key))
-                for key in ("doi", "arxiv", "pmid", "openalex", "semantic_scholar", "titles")
-            },
-            "routes": {
-                "automatic": automatic,
-                "google_scholar": google_scholar_route,
-            },
-            "budgets": {
-                "max_rounds": 3,
-                "max_queries": min(
-                    30, max(6, len(search_test["queries"]) * len(automatic))
-                ),
-                "max_candidates": 100,
-                "timeout_seconds": 900,
-            },
-            "query_seeds": search_test["queries"],
-            "as_of": document["generated_at"],
-            "gap_ref": {
-                "gap_id": hypothesis["hypothesis_id"],
-                "network_id": network_ref_value["network_id"],
-            },
-            "gap_hypothesis_id": hypothesis["hypothesis_id"],
-        }
-        validate_scholar_discovery_request(request)
         requests.append(request)
 
     set_payload: dict[str, Any] = {
@@ -2756,28 +4587,46 @@ def emit_search_requests(
         "network_id": network_ref_value["network_id"],
         "network_snapshot_sha256": network_ref_value["sha256"],
         "generated_at": document["generated_at"],
-        "schema": REQUEST_SET_SCHEMA,
+        "schema": (
+            APPRAISAL_REQUEST_SET_SCHEMA
+            if "appraisal_compilation" in document
+            else REQUEST_SET_SCHEMA
+        ),
         "network_ref": network_ref_value,
         "reviewed_selection_ref": copy.deepcopy(reviewed_selection_ref),
         "selected_hypothesis_ids": selected_ids,
         "selected_hypotheses_sha256": sha256_json(document),
+        "selected_hypotheses": copy.deepcopy(document),
+        "google_scholar_policy": google_scholar_policy,
+        "request_profile": copy.deepcopy(request_profile),
         "requests": requests,
     }
     set_payload["request_set_digest"] = canonical_request_set_digest(set_payload)
     set_payload["request_set_id"] = (
         REQUEST_SET_ID_PREFIX + set_payload["request_set_digest"][:16]
     )
-    validate_request_set(set_payload)
+    validate_request_set(
+        set_payload,
+        execution_authority_contexts=execution_authority_contexts,
+    )
     return set_payload
 
 
-def validate_request_set(value: Any, *, network: dict[str, Any] | None = None) -> dict[str, Any]:
+def validate_request_set(
+    value: Any,
+    *,
+    network: dict[str, Any] | None = None,
+    execution_authority_contexts: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     document = require_dict(value, "request set")
-    if document.get("schema") != REQUEST_SET_SCHEMA:
-        raise ContractError(f"request set schema must equal {REQUEST_SET_SCHEMA}")
-    require_string(
-        document.get("schema_version"), "request set.schema_version"
-    )
+    if document.get("schema") not in {
+        REQUEST_SET_SCHEMA,
+        APPRAISAL_REQUEST_SET_SCHEMA,
+    }:
+        raise ContractError(
+            "request set schema must be a supported generic or appraisal schema"
+        )
+    require_string(document.get("schema_version"), "request set.schema_version")
     if document["schema_version"] != REQUEST_SET_SCHEMA_VERSION:
         raise ContractError("request set.schema_version must be v1")
     require_string(document.get("network_id"), "request set.network_id")
@@ -2792,7 +4641,9 @@ def validate_request_set(value: Any, *, network: dict[str, Any] | None = None) -
         document.get("network_ref"), "request set.network_ref"
     )
     if network_ref_value["network_id"] != document["network_id"]:
-        raise ContractError("request set network_id does not match request set network_ref")
+        raise ContractError(
+            "request set network_id does not match request set network_ref"
+        )
     if network_ref_value["sha256"] != document["network_snapshot_sha256"]:
         raise ContractError(
             "request set snapshot digest does not match request set network_ref"
@@ -2808,20 +4659,130 @@ def validate_request_set(value: Any, *, network: dict[str, Any] | None = None) -
         if request_id in request_ids:
             raise ContractError("request_set duplicate request_id")
         request_ids.add(request_id)
+
+    is_appraisal_set = document.get("schema") == APPRAISAL_REQUEST_SET_SCHEMA
+    for request in requests:
+        has_appraisal_origin = "appraisal_origin" in request
+        if is_appraisal_set and not has_appraisal_origin:
+            raise ContractError(
+                "appraisal request set requires appraisal_origin on every request"
+            )
+        if not is_appraisal_set and has_appraisal_origin:
+            raise ContractError("generic request set must not contain appraisal_origin")
+
+    projection_fields = {
+        "reviewed_selection_ref",
+        "selected_hypothesis_ids",
+        "selected_hypotheses_sha256",
+        "selected_hypotheses",
+        "google_scholar_policy",
+        "request_profile",
+    }
+    present_projection_fields = projection_fields.intersection(document)
+    origin_profile_present = any(
+        isinstance(request, dict) and "appraisal_origin" in request
+        for request in requests
+    )
+    strict_projection_present = bool(
+        present_projection_fields
+        or origin_profile_present
+        or document.get("schema") == APPRAISAL_REQUEST_SET_SCHEMA
+    )
+    if strict_projection_present and present_projection_fields != projection_fields:
+        raise ContractError(
+            "reviewed request set must contain the complete selected projection fields"
+        )
+    if strict_projection_present:
+        selected_document = validate_hypotheses(
+            copy.deepcopy(document["selected_hypotheses"]),
+            network,
+            execution_authority_contexts=execution_authority_contexts,
+        )
+        selected_rows = selected_hypotheses_for_emission(selected_document)
+        appraisal_projection = "appraisal_compilation" in selected_document or any(
+            "appraisal_origin" in row for row in selected_rows
+        )
+        if (
+            appraisal_projection
+            and document.get("schema") != APPRAISAL_REQUEST_SET_SCHEMA
+        ):
+            raise ContractError(
+                "appraisal projection requires AppraisalScholarDiscoveryRequestSet/v1"
+            )
+        if (
+            document.get("schema") == APPRAISAL_REQUEST_SET_SCHEMA
+            and not appraisal_projection
+        ):
+            raise ContractError(
+                "appraisal request-set schema requires an appraisal selection projection"
+            )
+        selected_ids = [row["hypothesis_id"] for row in selected_rows]
+        reviewed_ref = reviewed_selection_ref_for_emission(
+            selected_document, selected_ids, network
+        )
+        if document["reviewed_selection_ref"] != reviewed_ref:
+            raise ContractError(
+                "request set reviewed_selection_ref does not match selected hypotheses"
+            )
+        if document["selected_hypothesis_ids"] != selected_ids:
+            raise ContractError(
+                "request set selected_hypothesis_ids must exactly match selected hypotheses"
+            )
+        selected_digest = ensure_sha256(
+            document["selected_hypotheses_sha256"],
+            "request set.selected_hypotheses_sha256",
+        )
+        if selected_digest != sha256_json(selected_document):
+            raise ContractError(
+                "request set selected_hypotheses_sha256 does not bind selected hypotheses"
+            )
+        policy = require_string(
+            document["google_scholar_policy"],
+            "request set.google_scholar_policy",
+        )
+        if policy not in {"disabled", "manual_optional", "manual_required"}:
+            raise ContractError("request set.google_scholar_policy is invalid")
+        request_profile = validate_request_projection_profile(
+            copy.deepcopy(document["request_profile"])
+        )
+        if selected_document["network_ref"] != network_ref_value:
+            raise ContractError(
+                "request set selected hypotheses network_ref does not match request set"
+            )
+        expected_requests = [
+            project_scholar_request(
+                row,
+                selected_document,
+                network_ref_value,
+                policy,
+                request_profile,
+            )
+            for row in selected_rows
+        ]
+        if document["requests"] != expected_requests:
+            raise ContractError(
+                "request set requests are not the exact owner-replayed selected projection"
+            )
     request_set_digest = document["request_set_digest"]
     expected_digest = canonical_request_set_digest(document)
     if request_set_digest != expected_digest:
-        raise ContractError("request set.request_set_digest does not match request set content")
+        raise ContractError(
+            "request set.request_set_digest does not match request set content"
+        )
     expected_id = REQUEST_SET_ID_PREFIX + request_set_digest[:16]
     if document.get("request_set_id") != expected_id:
         raise ContractError("request set.request_set_id must match request set digest")
     if network is not None:
         if document.get("network_id") != network["network_id"]:
-            raise ContractError("request set network_id does not match supplied network")
+            raise ContractError(
+                "request set network_id does not match supplied network"
+            )
         if document.get("network_snapshot_sha256") != network_ref(network)["sha256"]:
             raise ContractError("request set snapshot digest mismatch")
         if network_ref_value["snapshot_id"] != network_ref(network)["snapshot_id"]:
-            raise ContractError("request set network_ref snapshot_id does not match network")
+            raise ContractError(
+                "request set network_ref snapshot_id does not match network"
+            )
     return document
 
 
@@ -2840,7 +4801,10 @@ def validate_scholar_discovery_result(value: Any) -> dict[str, Any]:
         raise ContractError("result.ranked_candidates must be a list")
     for candidate_index, candidate in enumerate(candidates):
         item = require_dict(candidate, f"result.ranked_candidates[{candidate_index}]")
-        require_string(item.get("candidate_id"), f"result.ranked_candidates[{candidate_index}].candidate_id")
+        require_string(
+            item.get("candidate_id"),
+            f"result.ranked_candidates[{candidate_index}].candidate_id",
+        )
         for optional_field in ("url", "doi", "exact_locator"):
             if item.get(optional_field) is not None:
                 require_string(
@@ -2848,9 +4812,19 @@ def validate_scholar_discovery_result(value: Any) -> dict[str, Any]:
                     f"result.ranked_candidates[{candidate_index}].{optional_field}",
                 )
         screening = require_dict(item.get("screening"), "result.screening")
-        if screening.get("decision") not in {"include", "exclude", "maybe", "unscreened"}:
-            raise ContractError("result.ranked_candidates[].screening.decision is invalid")
-        require_string(item.get("access_level"), f"result.ranked_candidates[{candidate_index}].access_level")
+        if screening.get("decision") not in {
+            "include",
+            "exclude",
+            "maybe",
+            "unscreened",
+        }:
+            raise ContractError(
+                "result.ranked_candidates[].screening.decision is invalid"
+            )
+        require_string(
+            item.get("access_level"),
+            f"result.ranked_candidates[{candidate_index}].access_level",
+        )
         has_source_id = item.get("source_id") is not None
         has_source_digest = item.get("source_digest") is not None
         if has_source_id != has_source_digest:
@@ -2874,10 +4848,7 @@ def validate_scholar_discovery_result(value: Any) -> dict[str, Any]:
         not isinstance(unresolved_query_ids, list)
         or not all(
             isinstance(item, str)
-            or (
-                isinstance(item, dict)
-                and isinstance(item.get("provider"), str)
-            )
+            or (isinstance(item, dict) and isinstance(item.get("provider"), str))
             for item in unresolved_query_ids
         )
     ):
@@ -2892,30 +4863,81 @@ def validate_scholar_discovery_result_set(
     *,
     request_set: dict[str, Any] | None = None,
     network: dict[str, Any] | None = None,
+    execution_authority_contexts: dict[str, dict[str, Any]] | None = None,
+    request_set_file_sha256: str | None = None,
 ) -> dict[str, Any]:
-    document = require_dict(value, "result set")
-    if document.get("schema") != RESULT_SET_SCHEMA:
+    document = copy.deepcopy(require_dict(value, "result set"))
+    schema = document.get("schema")
+    if schema not in {RESULT_SET_SCHEMA, RESULT_SET_V2_SCHEMA}:
         raise ContractError(
-            f"result set schema must equal {RESULT_SET_SCHEMA}"
+            "result set schema must equal ScholarDiscoveryResultSet/v1 or "
+            "ScholarDiscoveryResultSet/v2"
+        )
+    if schema == RESULT_SET_V2_SCHEMA:
+        if request_set is None or request_set_file_sha256 is None:
+            raise ContractError(
+                "ScholarDiscoveryResultSet/v2 requires its exact request set and "
+                "request-set file SHA-256"
+            )
+        ref = require_dict(
+            document.get("execution_authorization_ref"),
+            "result_set.execution_authorization_ref",
+        )
+        authorization_id = require_string(
+            ref.get("authorization_id"),
+            "result_set.execution_authorization_ref.authorization_id",
+        )
+        context = (execution_authority_contexts or {}).get(authorization_id)
+        if context is None:
+            raise ContractError(
+                "ScholarDiscoveryResultSet/v2 requires an external execution "
+                "authorization context"
+            )
+        try:
+            document = _scholar_discovery_module().validate_result_set(
+                document,
+                request_set_value=request_set,
+                execution_authority=context.get("authorization"),
+                expected_execution_authority_sha256=context.get(
+                    "expected_execution_authority_sha256"
+                ),
+                execution_authority_file_sha256=context.get(
+                    "execution_authority_file_sha256"
+                ),
+                request_set_file_sha256=request_set_file_sha256,
+            )
+        except ValueError as exc:
+            raise ContractError(
+                f"ScholarDiscoveryResultSet/v2 owner replay failed: {exc}"
+            ) from exc
+    request_set_id = require_string(
+        document.get("request_set_id"), "result_set.request_set_id"
     )
-    request_set_id = require_string(document.get("request_set_id"), "result_set.request_set_id")
     request_set_digest = require_string(
         document.get("request_set_digest"), "result_set.request_set_digest"
     )
     ensure_sha256(document.get("request_set_digest"), "result_set.request_set_digest")
     if request_set is not None:
-        expected = require_string(request_set.get("request_set_id"), "request set.request_set_id")
+        expected = require_string(
+            request_set.get("request_set_id"), "request set.request_set_id"
+        )
         if request_set_id != expected:
             raise ContractError("result_set.request_set_id does not match request set")
         expected_digest = require_string(
             request_set.get("request_set_digest"), "request set.request_set_digest"
         )
         if request_set_digest != expected_digest:
-            raise ContractError("result_set.request_set_digest does not match request set")
+            raise ContractError(
+                "result_set.request_set_digest does not match request set"
+            )
     require_string(document.get("network_id"), "result_set.network_id")
-    network_ref_value = validate_network_ref(document.get("network_ref"), "result_set.network_ref")
+    network_ref_value = validate_network_ref(
+        document.get("network_ref"), "result_set.network_ref"
+    )
     if network_ref_value["network_id"] != document.get("network_id"):
-        raise ContractError("result_set.network_id does not match result_set.network_ref")
+        raise ContractError(
+            "result_set.network_id does not match result_set.network_ref"
+        )
     if network_ref_value["sha256"] != document.get("network_snapshot_sha256"):
         raise ContractError(
             "result_set.network_snapshot_sha256 does not match result_set.network_ref"
@@ -2937,8 +4959,13 @@ def validate_scholar_discovery_result_set(
         raise ContractError("result_set.results must be a list")
     normalized_results = [validate_scholar_discovery_result(item) for item in results]
     if request_set is not None:
-        request_ids = {request["request_id"] for request in request_set.get("requests", [])}
-        request_by_id = {request["request_id"]: request for request in request_set.get("requests", [])}
+        request_ids = {
+            request["request_id"] for request in request_set.get("requests", [])
+        }
+        request_by_id = {
+            request["request_id"]: request
+            for request in request_set.get("requests", [])
+        }
         for result in normalized_results:
             if result["request_id"] not in request_ids:
                 raise ContractError("result_set includes unknown request_id")
@@ -2948,10 +4975,12 @@ def validate_scholar_discovery_result_set(
                 raise ContractError(
                     f"result.request_digest mismatch for request_id {result['request_id']}"
                 )
-            if normalize_hypothesis_id(result["hypothesis_id"]) != normalize_hypothesis_id(
-                request.get("gap_hypothesis_id", "")
-            ):
-                raise ContractError("result.hypothesis_id does not match request gap hypothesis")
+            if normalize_hypothesis_id(
+                result["hypothesis_id"]
+            ) != normalize_hypothesis_id(request.get("gap_hypothesis_id", "")):
+                raise ContractError(
+                    "result.hypothesis_id does not match request gap hypothesis"
+                )
     validated = dict(document)
     validated["results"] = normalized_results
     return validated
@@ -2962,66 +4991,29 @@ def normalize_result_set(
     *,
     request_set: dict[str, Any] | None = None,
     network: dict[str, Any] | None = None,
+    execution_authority_contexts: dict[str, dict[str, Any]] | None = None,
+    request_set_file_sha256: str | None = None,
 ) -> list[dict[str, Any]]:
     # Result-set normalizer for consume-results.
     payload = require_dict(value, "result input")
     if payload.get("schema") == RESULT_SCHEMA:
         raise ContractError(
-            "consume-results expects ScholarDiscoveryResultSet/v1 payloads only"
+            "consume-results expects ScholarDiscoveryResultSet payloads only"
         )
-    if payload.get("schema") != RESULT_SET_SCHEMA:
+    if payload.get("schema") not in {RESULT_SET_SCHEMA, RESULT_SET_V2_SCHEMA}:
         raise ContractError(f"unsupported result schema: {payload.get('schema')!r}")
-
-    request_set_id = require_string(payload.get("request_set_id"), "result_set.request_set_id")
-    request_set_digest = require_string(
-        payload.get("request_set_digest"), "result_set.request_set_digest"
-    )
-    ensure_sha256(payload.get("request_set_digest"), "result_set.request_set_digest")
-    if request_set is not None:
-        expected = require_string(request_set.get("request_set_id"), "request set.request_set_id")
-        if request_set_id != expected:
-            raise ContractError("result_set.request_set_id does not match request set")
-        expected_digest = require_string(
-            request_set.get("request_set_digest"), "request set.request_set_digest"
-        )
-        if request_set_digest != expected_digest:
-            raise ContractError("result_set.request_set_digest does not match request set")
-    require_string(payload.get("network_id"), "result_set.network_id")
-    network_ref_value = validate_network_ref(payload.get("network_ref"), "result_set.network_ref")
-    if network_ref_value["network_id"] != payload.get("network_id"):
-        raise ContractError("result_set.network_id does not match result_set.network_ref")
-    if network_ref_value["sha256"] != payload.get("network_snapshot_sha256"):
+    if payload.get("schema") != RESULT_SET_V2_SCHEMA:
         raise ContractError(
-            "result_set.network_snapshot_sha256 does not match result_set.network_ref"
+            "consume-results requires ScholarDiscoveryResultSet/v2 with execution "
+            "authorization replay; v1 is legacy display-only"
         )
-    ensure_sha256(payload.get("network_snapshot_sha256"), "result_set.network_snapshot_sha256")
-    require_timestamp(payload.get("generated_at"), "result_set.generated_at")
-    if network is not None:
-        if payload.get("network_id") != network_ref(network)["network_id"]:
-            raise ContractError("result_set.network_id does not match supplied network")
-        if payload.get("network_snapshot_sha256") != network_ref(network)["sha256"]:
-            raise ContractError(
-                "result_set.network_snapshot_sha256 does not match supplied network"
-            )
-
-    results = payload.get("results")
-    if not isinstance(results, list):
-        raise ContractError("result_set.results must be a list")
-    normalized = [
-        validate_scholar_discovery_result(item)
-        for item in results
-    ]
-    if request_set is not None:
-        request_by_id = {request["request_id"]: request for request in request_set.get("requests", [])}
-        for item in normalized:
-            request = request_by_id.get(item["request_id"])
-            if request is None:
-                raise ContractError("result_set includes unknown request_id")
-            if normalize_hypothesis_id(item["hypothesis_id"]) != normalize_hypothesis_id(
-                request.get("gap_hypothesis_id", "")
-            ):
-                raise ContractError("result.hypothesis_id does not match request gap hypothesis")
-    return normalized
+    return validate_scholar_discovery_result_set(
+        payload,
+        request_set=request_set,
+        network=network,
+        execution_authority_contexts=execution_authority_contexts,
+        request_set_file_sha256=request_set_file_sha256,
+    )["results"]
 
 
 def validate_learn_from_papers_request(value: Any) -> dict[str, Any]:
@@ -3042,7 +5034,9 @@ def validate_learn_from_papers_request(value: Any) -> dict[str, Any]:
         require_string(
             entry.get("source_id"), f"review request.sources[{index}].source_id"
         )
-        ensure_sha256(entry.get("source_digest"), f"review request.sources[{index}].source_digest")
+        ensure_sha256(
+            entry.get("source_digest"), f"review request.sources[{index}].source_digest"
+        )
         require_string(
             entry.get("source_ref"), f"review request.sources[{index}].source_ref"
         )
@@ -3062,9 +5056,7 @@ def validate_learn_from_papers_request(value: Any) -> dict[str, Any]:
             entry.get("read_depth"), f"review request.sources[{index}].read_depth"
         )
         if read_depth not in READ_DEPTHS:
-            raise ContractError(
-                f"review request.sources[{index}].read_depth invalid"
-            )
+            raise ContractError(f"review request.sources[{index}].read_depth invalid")
         required_read_depth = require_string(
             entry.get("required_read_depth"),
             f"review request.sources[{index}].required_read_depth",
@@ -3155,10 +5147,13 @@ def validate_epistemic_task(value: Any) -> dict[str, Any]:
         raise ContractError(
             "review request.epistemic_task.required_inspection_depth has invalid fields"
         )
-    if require_string(
-        depth.get("minimum"),
-        "review request.epistemic_task.required_inspection_depth.minimum",
-    ) != "full_text":
+    if (
+        require_string(
+            depth.get("minimum"),
+            "review request.epistemic_task.required_inspection_depth.minimum",
+        )
+        != "full_text"
+    ):
         raise ContractError(
             "review request.epistemic_task requires full_text inspection"
         )
@@ -3238,8 +5233,12 @@ def validate_learn_from_papers_request_set(
             f"review request set schema must equal {LEARN_FROM_PAPERS_REQUEST_SET_SCHEMA}"
         )
     require_string(document.get("request_set_id"), "review request set.request_set_id")
-    require_string(document.get("request_set_digest"), "review request set.request_set_digest")
-    ensure_sha256(document.get("request_set_digest"), "review request set.request_set_digest")
+    require_string(
+        document.get("request_set_digest"), "review request set.request_set_digest"
+    )
+    ensure_sha256(
+        document.get("request_set_digest"), "review request set.request_set_digest"
+    )
     expected_digest = canonical_request_set_digest(document)
     if document.get("request_set_digest") != expected_digest:
         raise ContractError(
@@ -3247,7 +5246,9 @@ def validate_learn_from_papers_request_set(
         )
     expected_id = LEARN_REQUEST_SET_ID_PREFIX + expected_digest[:16]
     if document.get("request_set_id") != expected_id:
-        raise ContractError("review request set.request_set_id must match request set digest")
+        raise ContractError(
+            "review request set.request_set_id must match request set digest"
+        )
     require_string(document.get("network_id"), "review request set.network_id")
     validate_network_ref(document.get("network_ref"), "review request set.network_ref")
     ensure_sha256(
@@ -3293,12 +5294,16 @@ def validate_learn_from_papers_request_set(
 
 def _is_unacceptable_locator(value: str) -> bool:
     lowered = value.lower()
-    return lowered.startswith("http://") or lowered.startswith("https://") or bool(
-        re.fullmatch(r"10\.[0-9]+/.+", value)
+    return (
+        lowered.startswith("http://")
+        or lowered.startswith("https://")
+        or bool(re.fullmatch(r"10\.[0-9]+/.+", value))
     )
 
 
-def validate_evidence_passage(value: Any, *, report_id: str | None = None) -> dict[str, Any]:
+def validate_evidence_passage(
+    value: Any, *, report_id: str | None = None
+) -> dict[str, Any]:
     passage = require_dict(value, "paper reading report passage")
     if report_id is not None:
         pass_label = f"paper reading report {report_id} passage"
@@ -3356,18 +5361,28 @@ def validate_paper_reading_report(
     require_string(report.get("report_id"), "paper reading report.report_id")
     require_string(report.get("report_digest"), "paper reading report.report_digest")
     ensure_sha256(report.get("report_digest"), "paper reading report.report_digest")
-    require_string(report.get("review_request_id"), "paper reading report.review_request_id")
-    require_string(report.get("review_request_digest"), "paper reading report.review_request_digest")
+    require_string(
+        report.get("review_request_id"), "paper reading report.review_request_id"
+    )
+    require_string(
+        report.get("review_request_digest"),
+        "paper reading report.review_request_digest",
+    )
     ensure_sha256(
-        report.get("review_request_digest"), "paper reading report.review_request_digest"
+        report.get("review_request_digest"),
+        "paper reading report.review_request_digest",
     )
     require_string(report.get("source_id"), "paper reading report.source_id")
     require_string(report.get("source_digest"), "paper reading report.source_digest")
     ensure_sha256(report.get("source_digest"), "paper reading report.source_digest")
     require_string(report.get("source_ref"), "paper reading report.source_ref")
     if report.get("exact_locator") is not None:
-        require_string(report.get("exact_locator"), "paper reading report.exact_locator")
-    read_depth = require_string(report.get("read_depth"), "paper reading report.read_depth")
+        require_string(
+            report.get("exact_locator"), "paper reading report.exact_locator"
+        )
+    read_depth = require_string(
+        report.get("read_depth"), "paper reading report.read_depth"
+    )
     if read_depth != READING_DEPTH_ONLY_FULL_TEXT:
         raise ContractError("paper reading report.read_depth must be full_text")
     if report.get("producer") is not None and report.get("producer") != READER_PRODUCER:
@@ -3378,24 +5393,35 @@ def validate_paper_reading_report(
         )
         if protocol_version != READING_REPORT_PROTOCOL:
             raise ContractError("paper reading report.protocol_version must be 1.0")
-    ensure_sha256(report.get("source_artifact_sha256"), "paper reading report.source_artifact_sha256")
+    ensure_sha256(
+        report.get("source_artifact_sha256"),
+        "paper reading report.source_artifact_sha256",
+    )
     if "passages" in report:
         raise ContractError("paper reading report.passages is deprecated")
     passages = report.get("evidence_passages")
     if not isinstance(passages, list) or not passages:
-        raise ContractError("paper reading report.evidence_passages must be a non-empty list")
+        raise ContractError(
+            "paper reading report.evidence_passages must be a non-empty list"
+        )
     source_artifact = report.get("source_artifact_sha256")
     for index, passage in enumerate(passages):
-        valid_passage = validate_evidence_passage(passage, report_id=report.get("report_id", ""))
+        valid_passage = validate_evidence_passage(
+            passage, report_id=report.get("report_id", "")
+        )
         if source_artifact is None:
-            raise ContractError("paper reading report.source_artifact_sha256 is required")
+            raise ContractError(
+                "paper reading report.source_artifact_sha256 is required"
+            )
         if source_artifact != report.get("source_artifact_sha256"):
             raise ContractError("paper reading report source_artifact_sha256 mismatch")
         passages[index] = valid_passage
 
     expected_digest = canonical_reading_report_digest(report)
     if report.get("report_digest") != expected_digest:
-        raise ContractError("paper reading report.report_digest does not match report content")
+        raise ContractError(
+            "paper reading report.report_digest does not match report content"
+        )
     expected_id = READING_REPORT_ID_PREFIX + expected_digest[:16]
     if report.get("report_id") != expected_id:
         raise ContractError("paper reading report.report_id must match report digest")
@@ -3415,11 +5441,11 @@ def validate_paper_reading_report_set(
         raise ContractError(
             f"paper reading report set schema must equal {PAPER_READING_REPORT_SET_SCHEMA}"
         )
-    require_string(document.get("schema_version"), "paper reading report set.schema_version")
+    require_string(
+        document.get("schema_version"), "paper reading report set.schema_version"
+    )
     if document["schema_version"] != PAPER_READING_REPORT_SET_SCHEMA_VERSION:
-        raise ContractError(
-            "paper reading report set.schema_version must be v1"
-        )
+        raise ContractError("paper reading report set.schema_version must be v1")
     require_string(
         document.get("review_request_set_id"),
         "paper reading report set.review_request_set_id",
@@ -3432,7 +5458,9 @@ def validate_paper_reading_report_set(
         document.get("review_request_set_digest"),
         "paper reading report set.review_request_set_digest",
     )
-    require_string(document.get("report_set_id"), "paper reading report set.report_set_id")
+    require_string(
+        document.get("report_set_id"), "paper reading report set.report_set_id"
+    )
     require_string(
         document.get("report_set_digest"), "paper reading report set.report_set_digest"
     )
@@ -3446,18 +5474,30 @@ def validate_paper_reading_report_set(
         )
     require_string(document.get("producer"), "paper reading report set.producer")
     if document.get("producer") != READER_PRODUCER:
-        raise ContractError("paper reading report set.producer must be learn-from-papers")
-    require_string(document.get("protocol_version"), "paper reading report set.protocol_version")
-    require_timestamp(document.get("generated_at"), "paper reading report set.generated_at")
-    validate_network_ref(document.get("network_ref"), "paper reading report set.network_ref")
+        raise ContractError(
+            "paper reading report set.producer must be learn-from-papers"
+        )
+    require_string(
+        document.get("protocol_version"), "paper reading report set.protocol_version"
+    )
+    require_timestamp(
+        document.get("generated_at"), "paper reading report set.generated_at"
+    )
+    validate_network_ref(
+        document.get("network_ref"), "paper reading report set.network_ref"
+    )
     network_ref_value = document.get("network_ref")
     if not isinstance(network_ref_value, dict):
         raise ContractError("paper reading report set.network_ref must be an object")
-    if document.get("network_id") is not None and network_ref_value.get("network_id") != document.get("network_id"):
+    if document.get("network_id") is not None and network_ref_value.get(
+        "network_id"
+    ) != document.get("network_id"):
         raise ContractError(
             "paper reading report set network_id does not match network_ref"
         )
-    if document.get("network_snapshot_sha256") is not None and network_ref_value.get("sha256") != document.get("network_snapshot_sha256"):
+    if document.get("network_snapshot_sha256") is not None and network_ref_value.get(
+        "sha256"
+    ) != document.get("network_snapshot_sha256"):
         raise ContractError(
             "paper reading report set snapshot digest does not match network_ref"
         )
@@ -3472,16 +5512,28 @@ def validate_paper_reading_report_set(
             network=network,
         )
         reports[index] = valid_report
-        if valid_report.get("review_request_set_id") is not None and valid_report["review_request_set_id"] != document["review_request_set_id"]:
+        if (
+            valid_report.get("review_request_set_id") is not None
+            and valid_report["review_request_set_id"]
+            != document["review_request_set_id"]
+        ):
             raise ContractError(
                 "paper reading report set.review_request_set_id mismatch"
             )
-        if valid_report.get("review_request_set_digest") is not None and valid_report["review_request_set_digest"] != document["review_request_set_digest"]:
+        if (
+            valid_report.get("review_request_set_digest") is not None
+            and valid_report["review_request_set_digest"]
+            != document["review_request_set_digest"]
+        ):
             raise ContractError(
                 "paper reading report set.review_request_set_digest mismatch"
             )
-        if document.get("source_artifact_sha256") is not None and valid_report["source_artifact_sha256"] != document.get("source_artifact_sha256"):
-            raise ContractError("paper reading report set.source_artifact_sha256 mismatch")
+        if document.get("source_artifact_sha256") is not None and valid_report[
+            "source_artifact_sha256"
+        ] != document.get("source_artifact_sha256"):
+            raise ContractError(
+                "paper reading report set.source_artifact_sha256 mismatch"
+            )
         if valid_report["report_id"] in report_ids:
             raise ContractError("paper reading report set duplicate report_id")
         report_ids.add(valid_report["report_id"])
@@ -3497,9 +5549,7 @@ def validate_paper_reading_report_set(
         if network_ref_value.get("network_id") != network_ref(network)["network_id"]:
             raise ContractError("paper reading report set network_id mismatch")
         if network_ref_value.get("sha256") != network_ref(network)["sha256"]:
-            raise ContractError(
-                "paper reading report set snapshot digest mismatch"
-            )
+            raise ContractError("paper reading report set snapshot digest mismatch")
     return document
 
 
@@ -3534,15 +5584,21 @@ def validate_paper_reading_report_set_v2(
 def validate_reviewed_evidence(value: Any) -> dict[str, Any]:
     item = require_dict(value, "reviewed evidence")
     if item.get("schema") != REVIEWED_EVIDENCE_SCHEMA:
-        raise ContractError(f"reviewed evidence.schema must equal {REVIEWED_EVIDENCE_SCHEMA}")
+        raise ContractError(
+            f"reviewed evidence.schema must equal {REVIEWED_EVIDENCE_SCHEMA}"
+        )
     require_string(item.get("request_set_id"), "reviewed evidence.request_set_id")
     require_string(item.get("reading_report_id"), "reviewed evidence.reading_report_id")
     if not item["reading_report_id"].startswith(READING_REPORT_ID_PREFIX):
         raise ContractError(
             "reviewed evidence.reading_report_id must start with reading-report-"
         )
-    require_string(item.get("reading_report_digest"), "reviewed evidence.reading_report_digest")
-    ensure_sha256(item.get("reading_report_digest"), "reviewed evidence.reading_report_digest")
+    require_string(
+        item.get("reading_report_digest"), "reviewed evidence.reading_report_digest"
+    )
+    ensure_sha256(
+        item.get("reading_report_digest"), "reviewed evidence.reading_report_digest"
+    )
     is_v2 = item["reading_report_id"].startswith(V2_READING_REPORT_ID_PREFIX)
     if is_v2:
         require_string(item.get("evidence_id"), "reviewed evidence.evidence_id")
@@ -3580,9 +5636,13 @@ def validate_reviewed_evidence(value: Any) -> dict[str, Any]:
         require_string(item.get("passage_digest"), "reviewed evidence.passage_digest")
         ensure_sha256(item.get("passage_digest"), "reviewed evidence.passage_digest")
     require_string(item.get("review_request_id"), "reviewed evidence.review_request_id")
-    require_string(item.get("review_request_digest"), "reviewed evidence.review_request_digest")
+    require_string(
+        item.get("review_request_digest"), "reviewed evidence.review_request_digest"
+    )
     require_string(item.get("source_id"), "reviewed evidence.source_id")
-    ensure_sha256(item.get("review_request_digest"), "reviewed evidence.review_request_digest")
+    ensure_sha256(
+        item.get("review_request_digest"), "reviewed evidence.review_request_digest"
+    )
     ensure_sha256(item.get("source_digest"), "reviewed evidence.source_digest")
     require_string(item.get("request_id"), "reviewed evidence.request_id")
     require_string(item.get("hypothesis_id"), "reviewed evidence.hypothesis_id")
@@ -3592,7 +5652,9 @@ def validate_reviewed_evidence(value: Any) -> dict[str, Any]:
         raise ContractError("reviewed evidence must include doi or url")
     read_depth = require_string(item.get("read_depth"), "reviewed evidence.read_depth")
     if read_depth not in READ_DEPTHS:
-        raise ContractError("reviewed evidence.read_depth must be full_text or evidence")
+        raise ContractError(
+            "reviewed evidence.read_depth must be full_text or evidence"
+        )
     if item.get("review_completed") is not True:
         raise ContractError("reviewed evidence.review_completed must be true")
 
@@ -3618,19 +5680,33 @@ def validate_reviewed_evidence_set(
         raise ContractError(
             f"reviewed evidence set schema must equal {REVIEWED_EVIDENCE_SET_SCHEMA}"
         )
-    require_string(document.get("schema_version"), "reviewed evidence set.schema_version")
-    require_string(document.get("request_set_id"), "reviewed evidence set.request_set_id")
-    require_string(document.get("request_set_digest"), "reviewed evidence set.request_set_digest")
-    ensure_sha256(document.get("request_set_digest"), "reviewed evidence set.request_set_digest")
-    require_string(document.get("evidence_set_digest"), "reviewed evidence set.evidence_set_digest")
-    ensure_sha256(document.get("evidence_set_digest"), "reviewed evidence set.evidence_set_digest")
+    require_string(
+        document.get("schema_version"), "reviewed evidence set.schema_version"
+    )
+    require_string(
+        document.get("request_set_id"), "reviewed evidence set.request_set_id"
+    )
+    require_string(
+        document.get("request_set_digest"), "reviewed evidence set.request_set_digest"
+    )
+    ensure_sha256(
+        document.get("request_set_digest"), "reviewed evidence set.request_set_digest"
+    )
+    require_string(
+        document.get("evidence_set_digest"), "reviewed evidence set.evidence_set_digest"
+    )
+    ensure_sha256(
+        document.get("evidence_set_digest"), "reviewed evidence set.evidence_set_digest"
+    )
     expected_evidence_set_digest = canonical_evidence_set_digest(document)
     if document["evidence_set_digest"] != expected_evidence_set_digest:
         raise ContractError(
             "reviewed evidence set.evidence_set_digest does not match reviewed evidence set content"
         )
     require_string(document.get("network_id"), "reviewed evidence set.network_id")
-    validate_network_ref(document.get("network_ref"), "reviewed evidence set.network_ref")
+    validate_network_ref(
+        document.get("network_ref"), "reviewed evidence set.network_ref"
+    )
     ensure_sha256(
         document.get("network_snapshot_sha256"),
         "reviewed evidence set.network_snapshot_sha256",
@@ -3644,7 +5720,9 @@ def validate_reviewed_evidence_set(
         raise ContractError(
             "reviewed evidence set snapshot digest does not match reviewed evidence set network_ref"
         )
-    require_timestamp(document.get("generated_at"), "reviewed evidence set.generated_at")
+    require_timestamp(
+        document.get("generated_at"), "reviewed evidence set.generated_at"
+    )
 
     evidence_items = document.get("evidence")
     if not isinstance(evidence_items, list):
@@ -3652,7 +5730,9 @@ def validate_reviewed_evidence_set(
     for item in evidence_items:
         item = validate_reviewed_evidence(item)
         if item["request_set_id"] != document["request_set_id"]:
-            raise ContractError("reviewed evidence item request_set_id does not match set")
+            raise ContractError(
+                "reviewed evidence item request_set_id does not match set"
+            )
 
     if network is not None:
         if document.get("network_id") != network_ref(network)["network_id"]:
@@ -3881,6 +5961,37 @@ def _execution_state_entry(
     return entry
 
 
+def _candidate_matches_domain_anchor(
+    candidate: dict[str, Any], anchors: list[str]
+) -> bool:
+    searchable_parts: list[str] = []
+    for field in ("title", "venue", "work_type"):
+        value = candidate.get(field)
+        if isinstance(value, str) and value.strip():
+            searchable_parts.append(value)
+    authors = candidate.get("authors")
+    if isinstance(authors, list):
+        searchable_parts.extend(
+            author for author in authors if isinstance(author, str) and author.strip()
+        )
+    if not searchable_parts:
+        return False
+    candidate_phrases = [
+        _normalized_contiguous_phrase(part, "candidate searchable text")
+        for part in searchable_parts
+    ]
+    return all(
+        any(
+            _contains_contiguous_phrase(candidate_phrase, anchor_phrase)
+            for candidate_phrase in candidate_phrases
+        )
+        for anchor in anchors
+        for anchor_phrase in [
+            _normalized_contiguous_phrase(anchor, "candidate domain anchor")
+        ]
+    )
+
+
 def consume_results(
     hypotheses_value: Any,
     network: dict[str, Any],
@@ -3888,30 +5999,64 @@ def consume_results(
     result_values: list[Any],
     *,
     round_id: str | None = None,
+    execution_authority_contexts: dict[str, dict[str, Any]] | None = None,
+    request_set_file_sha256: str | None = None,
 ) -> dict[str, Any]:
-    hypotheses_doc = validate_hypotheses(hypotheses_value, network)
-    request_set = validate_request_set(request_set_value, network=network)
+    hypotheses_doc = validate_hypotheses(
+        hypotheses_value,
+        network,
+        execution_authority_contexts=execution_authority_contexts,
+    )
+    expected_request_schema = (
+        APPRAISAL_REQUEST_SET_SCHEMA
+        if "appraisal_compilation" in hypotheses_doc
+        else REQUEST_SET_SCHEMA
+    )
+    raw_request_set = require_dict(request_set_value, "request set")
+    if raw_request_set.get("schema") != expected_request_schema:
+        raise ContractError(
+            "request set schema does not match the generic/appraisal execution route"
+        )
+    request_set = validate_request_set(
+        request_set_value,
+        network=network,
+        execution_authority_contexts=execution_authority_contexts,
+    )
     request_map: dict[str, dict[str, Any]] = {}
+    request_by_hypothesis: dict[str, dict[str, Any]] = {}
     for request in request_set["requests"]:
         request_map[request["request_id"]] = request
-        gap_ref = request.get("gap_hypothesis_id")
-        if gap_ref:
-            request_map["SDR-" + gap_ref] = request
+        hypothesis_id = request.get("gap_hypothesis_id")
+        if hypothesis_id in request_by_hypothesis:
+            raise ContractError(
+                "request set contains multiple requests for one gap hypothesis"
+            )
+        request_by_hypothesis[hypothesis_id] = request
 
     request_ids = set(request_map)
     result_map: dict[str, dict[str, Any]] = {}
     for result in result_values:
-        parsed = normalize_result_set(result, request_set=request_set, network=network)
+        parsed = normalize_result_set(
+            result,
+            request_set=request_set,
+            network=network,
+            execution_authority_contexts=execution_authority_contexts,
+            request_set_file_sha256=request_set_file_sha256,
+        )
         for item in parsed:
             request_id = item["request_id"]
             if request_id not in request_ids:
-                raise ContractError(f"result.request_id {request_id} not in request set")
+                raise ContractError(
+                    f"result.request_id {request_id} not in request set"
+                )
             expected = request_digest(request_map[request_id])
             if item["request_digest"] != expected:
                 raise ContractError(
                     f"result.request_digest mismatch for request_id {request_id}"
                 )
-            if normalize_hypothesis_id(item["hypothesis_id"]) != normalize_hypothesis_id(
+            if normalize_hypothesis_id(
+                item["hypothesis_id"]
+            ) != normalize_hypothesis_id(
                 request_map[request_id].get("gap_hypothesis_id", "")
             ):
                 raise ContractError(
@@ -3967,8 +6112,17 @@ def consume_results(
     for hypothesis in hypotheses_doc["hypotheses"]:
         hypothesis = json.loads(json.dumps(hypothesis))
         hypothesis_id = hypothesis["hypothesis_id"]
-        request_id = f"SDR-{hypothesis_id}"
-        request = request_map.get(request_id)
+        request = request_by_hypothesis.get(hypothesis_id)
+        request_id = (
+            request["request_id"]
+            if request is not None
+            else (
+                APPRAISAL_REQUEST_ID_PREFIX
+                if expected_request_schema == APPRAISAL_REQUEST_SET_SCHEMA
+                else GENERIC_REQUEST_ID_PREFIX
+            )
+            + hypothesis_id
+        )
         result = result_map.get(request_id)
         previous_status = hypothesis["status"]
         if hypothesis.get("structural_only"):
@@ -3991,7 +6145,10 @@ def consume_results(
             continue
 
         if result is None:
-            if request and request.get("routes", {}).get("google_scholar") == "manual_required":
+            if (
+                request
+                and request.get("routes", {}).get("google_scholar") == "manual_required"
+            ):
                 hypothesis["status"] = "awaiting"
                 manual_pending = True
                 cycle_state["awaiting_results"] += 1
@@ -4014,6 +6171,30 @@ def consume_results(
                     _execution_state_entry(request_id, "not_executed")
                 ]
                 hypothesis["next_action"] = "scholar_discovery"
+        elif (
+            hypothesis.get("appraisal_origin")
+            and result.get("ranked_candidates")
+            and not all(
+                _candidate_matches_domain_anchor(
+                    candidate, hypothesis["domain_anchors"]
+                )
+                for candidate in result["ranked_candidates"]
+            )
+        ):
+            hypothesis["status"] = "unresolved"
+            hypothesis["status_basis"] = [
+                _execution_state_entry(
+                    request_id,
+                    "query_precision_failed",
+                    {
+                        "discovery_status": result["discovery_status"],
+                        "domain_anchors": copy.deepcopy(hypothesis["domain_anchors"]),
+                        "candidate_count": len(result["ranked_candidates"]),
+                    },
+                )
+            ]
+            hypothesis["next_action"] = "scholar_discovery"
+            provider_pending = True
         elif _result_is_pending(result):
             ranked_candidates = result.get("ranked_candidates") or []
             has_ranked_candidates = bool(ranked_candidates)
@@ -4052,8 +6233,13 @@ def consume_results(
                 has_google_scholar_provider = _has_provider_marker(
                     result.get("unresolved_query_ids"),
                     "google_scholar",
-                ) or _has_provider_marker(result.get("provider_failures"), "google_scholar")
-                if google_scholar_route == "manual_required" and has_google_scholar_provider:
+                ) or _has_provider_marker(
+                    result.get("provider_failures"), "google_scholar"
+                )
+                if (
+                    google_scholar_route == "manual_required"
+                    and has_google_scholar_provider
+                ):
                     is_manual_required = True
                     manual_pending = True
                 hypothesis["status"] = "awaiting"
@@ -4061,7 +6247,9 @@ def consume_results(
                     "discovery_status": result["discovery_status"],
                 }
                 if result.get("unresolved_query_ids"):
-                    status_basis["unresolved_query_ids"] = result["unresolved_query_ids"]
+                    status_basis["unresolved_query_ids"] = result[
+                        "unresolved_query_ids"
+                    ]
                 if result.get("provider_failures"):
                     status_basis["provider_failures"] = result["provider_failures"]
                 hypothesis["status_basis"] = [
@@ -4073,18 +6261,33 @@ def consume_results(
                 ]
                 if is_manual_required:
                     if google_scholar_route == "manual_required":
-                        hypothesis["status_basis"][0]["google_scholar_route"] = "manual_required"
+                        hypothesis["status_basis"][0]["google_scholar_route"] = (
+                            "manual_required"
+                        )
                     hypothesis["next_action"] = "manual_scholar_export"
                 else:
                     provider_pending = True
                     hypothesis["next_action"] = "scholar_discovery"
                 cycle_state["awaiting_results"] += 1
         elif not result.get("ranked_candidates"):
-            hypothesis["status"] = "no_signal"
-            hypothesis["status_basis"] = []
-            hypothesis["next_action"] = "scholar_discovery"
+            if hypothesis.get("appraisal_origin"):
+                hypothesis["status"] = "unresolved"
+                hypothesis["status_basis"] = [
+                    _execution_state_entry(
+                        request_id,
+                        "bounded_no_candidate_not_novelty",
+                        {"discovery_status": result["discovery_status"]},
+                    )
+                ]
+                hypothesis["next_action"] = "scholar_discovery"
+            else:
+                hypothesis["status"] = "no_signal"
+                hypothesis["status_basis"] = []
+                hypothesis["next_action"] = "scholar_discovery"
         else:
-            sources = _collect_candidate_sources(request_id, result.get("ranked_candidates", []))
+            sources = _collect_candidate_sources(
+                request_id, result.get("ranked_candidates", [])
+            )
             if sources:
                 hypothesis["status"] = "results"
                 hypothesis["status_basis"] = []
@@ -4095,9 +6298,7 @@ def consume_results(
                         "request_id": f"LFR-{request_id}",
                         "source_request_id": request_id,
                         "hypothesis_id": hypothesis_id,
-                        "epistemic_task": _epistemic_task_from_hypothesis(
-                            hypothesis
-                        ),
+                        "epistemic_task": _epistemic_task_from_hypothesis(hypothesis),
                         "sources": sources,
                     }
                 )
@@ -4109,8 +6310,17 @@ def consume_results(
         if hypothesis["status"] != previous_status:
             has_progress = True
 
-        if hypothesis["status"] in {"content_found", "supported_gap", "contested", "refuted", "already_covered"}:
-            validate_hypotheses({**hypotheses_doc, "hypotheses": [hypothesis]})
+        if hypothesis["status"] in {
+            "content_found",
+            "supported_gap",
+            "contested",
+            "refuted",
+            "already_covered",
+        }:
+            validate_hypotheses(
+                {**hypotheses_doc, "hypotheses": [hypothesis]},
+                execution_authority_contexts=execution_authority_contexts,
+            )
 
         if hypothesis["status"] == "results":
             cycle_state["results_consumed"] += 1
@@ -4170,10 +6380,7 @@ def consume_results(
         result_values
         and not manual_pending
         and not awaiting_review
-        and all(
-            item["status"] in SATURATION_TERMINAL_STATUSES
-            for item in updated
-        )
+        and all(item["status"] in SATURATION_TERMINAL_STATUSES for item in updated)
     )
 
     if (
@@ -4223,6 +6430,9 @@ def consume_results(
     }
     if review_request_set is not None:
         output["review_requests"] = review_request_set
+    for preserved_field in ("appraisal_compilation", "routed_needs"):
+        if preserved_field in hypotheses_doc:
+            output[preserved_field] = copy.deepcopy(hypotheses_doc[preserved_field])
     return output
 
 
@@ -4303,7 +6513,9 @@ def _safe_attestation_path(root: str | Path, artifact_ref: str) -> Path:
     for part in relative.parts:
         current = current / part
         if current.is_symlink():
-            raise ContractError("verification attestation path must not traverse symlinks")
+            raise ContractError(
+                "verification attestation path must not traverse symlinks"
+            )
     resolved_root = root_path.resolve()
     resolved = current.resolve()
     if resolved_root not in resolved.parents:
@@ -4353,9 +6565,7 @@ def _validate_attestation(
     if subject_digest != expected_subject:
         raise ContractError("report.verification.subject_digest mismatch")
 
-    expected_artifact_ref = (
-        "verification-attestations/" + artifact_sha256 + ".json"
-    )
+    expected_artifact_ref = "verification-attestations/" + artifact_sha256 + ".json"
     if verification["artifact_ref"] != expected_artifact_ref:
         raise ContractError(
             "verification attestation artifact_ref is not the canonical content address"
@@ -4370,7 +6580,9 @@ def _validate_attestation(
         raise ContractError("verification attestation must be UTF-8 JSON") from exc
     expected_bytes = canonical_bytes(attestation) + b"\n"
     if raw != expected_bytes:
-        raise ContractError("verification attestation must use canonical JSON plus newline")
+        raise ContractError(
+            "verification attestation must use canonical JSON plus newline"
+        )
     attestation = require_dict(attestation, "verification attestation")
     expected_keys = {
         "schema",
@@ -4592,20 +6804,16 @@ def _verify_reading_artifacts(
         raise ContractError(
             "reading report set metadata must equal strict dossier projection"
         )
-    projected_reports = {
-        report["claim_id"]: report for report in projected["reports"]
-    }
-    supplied_reports = {
-        report["claim_id"]: report for report in report_set["reports"]
-    }
+    projected_reports = {report["claim_id"]: report for report in projected["reports"]}
+    supplied_reports = {report["claim_id"]: report for report in report_set["reports"]}
     if set(projected_reports) != set(supplied_reports):
         raise ContractError(
             "reading report claims must equal strict dossier projection"
         )
     for claim_id, supplied_report in supplied_reports.items():
-        if canonical_report_subject_digest(supplied_report) != canonical_report_subject_digest(
-            projected_reports[claim_id]
-        ):
+        if canonical_report_subject_digest(
+            supplied_report
+        ) != canonical_report_subject_digest(projected_reports[claim_id]):
             raise ContractError(
                 "reading report subject must equal strict dossier projection"
             )
@@ -4865,8 +7073,13 @@ def consume_reviewed_evidence(
     source_artifact_path: str | Path,
     verification_root: str | Path,
     round_id: str | None = None,
+    execution_authority_contexts: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    hypotheses_doc = validate_hypotheses(hypotheses_value, network)
+    hypotheses_doc = validate_hypotheses(
+        hypotheses_value,
+        network,
+        execution_authority_contexts=execution_authority_contexts,
+    )
     (
         review_requests,
         report_set,
@@ -4901,9 +7114,9 @@ def consume_reviewed_evidence(
     for record in records:
         record["report_set_id"] = report_set["report_set_id"]
         record["report_set_digest"] = report_set["report_set_digest"]
-        records_by_hypothesis.setdefault(
-            record["report"]["hypothesis_id"], []
-        ).append(record)
+        records_by_hypothesis.setdefault(record["report"]["hypothesis_id"], []).append(
+            record
+        )
 
     previous_round = previous_cycle.get("discovery_round", 0)
     previous_round = previous_round if isinstance(previous_round, int) else 0
@@ -4984,8 +7197,12 @@ def consume_reviewed_evidence(
         "consecutive_no_progress_rounds": 0 if consumed else 1,
         "max_rounds": max_rounds,
         "phase": "onboarding" if onboarding_terminal else "discover",
-        "next_actions": ["onboarding_required"] if onboarding_terminal else ["discover"],
-        "stop_reason": "onboarding_required" if onboarding_terminal else "provider_pending",
+        "next_actions": ["onboarding_required"]
+        if onboarding_terminal
+        else ["discover"],
+        "stop_reason": "onboarding_required"
+        if onboarding_terminal
+        else "provider_pending",
         "pending_reason": (
             "onboarding_required:" + ",".join(onboarding_source_ids)
             if onboarding_terminal
@@ -5064,7 +7281,11 @@ def _basis_row(record: dict[str, Any]) -> dict[str, Any]:
         },
     }
     row["basis_digest"] = sha256_json(
-        {key: value for key, value in row.items() if key not in {"basis_id", "basis_digest"}}
+        {
+            key: value
+            for key, value in row.items()
+            if key not in {"basis_id", "basis_digest"}
+        }
     )
     row["basis_id"] = "network-patch-basis-" + row["basis_digest"][:16]
     return row
@@ -5081,8 +7302,7 @@ def _patch_action_apply_eligible(
     if target_kind == "evidence":
         return (
             len(reviewed_evidence) == 1
-            and target_signature["signature"]
-            == reviewed_evidence[0]["evidence_id"]
+            and target_signature["signature"] == reviewed_evidence[0]["evidence_id"]
         )
     return False
 
@@ -5244,9 +7464,7 @@ def _validate_patch_target_claim(
         "coverage_dimensions",
         "benchmark_profiles",
     ):
-        values = require_string_list(
-            scope[field], f"patch target_claim scope.{field}"
-        )
+        values = require_string_list(scope[field], f"patch target_claim scope.{field}")
         if len(values) != len(set(values)):
             raise ContractError(
                 f"patch target_claim scope.{field} values must be unique"
@@ -5262,7 +7480,9 @@ def _validate_patch_target_claim(
         raise ContractError("patch target_claim hypothesis binding mismatch")
     if target["target_signature"] != action["target_signature"]:
         raise ContractError("patch target_claim target signature mismatch")
-    ensure_sha256(target["report_claim_digest"], "patch target_claim report_claim_digest")
+    ensure_sha256(
+        target["report_claim_digest"], "patch target_claim report_claim_digest"
+    )
     matches = [
         row
         for row in rows
@@ -5316,8 +7536,13 @@ def propose_patch(
     source_bundle_path: str | Path,
     source_artifact_path: str | Path,
     verification_root: str | Path,
+    execution_authority_contexts: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    document = validate_hypotheses(document, network)
+    document = validate_hypotheses(
+        document,
+        network,
+        execution_authority_contexts=execution_authority_contexts,
+    )
     (
         review_requests,
         report_set,
@@ -5465,9 +7690,7 @@ def propose_patch(
             if key not in {"proposal_id", "proposal_digest"}
         }
     )
-    patch["proposal_id"] = (
-        "network-patch-proposal-" + patch["proposal_digest"][:16]
-    )
+    patch["proposal_id"] = "network-patch-proposal-" + patch["proposal_digest"][:16]
     return validate_patch_v2(patch, network)
 
 
@@ -5545,7 +7768,9 @@ def validate_patch_v2(
             raise ContractError("patch action status invalid")
         require_string(action["hypothesis_id"], "patch action hypothesis_id")
         require_string(action["hypothesis"], "patch action hypothesis")
-        target = require_dict(action["target_signature"], "patch action target_signature")
+        target = require_dict(
+            action["target_signature"], "patch action target_signature"
+        )
         if set(target) != {"target_kind", "signature"}:
             raise ContractError("patch action target_signature fields invalid")
         target_kind = target["target_kind"]
@@ -5565,7 +7790,10 @@ def validate_patch_v2(
             raise ContractError("patch action_digest mismatch")
         if action["action_id"] != "network-patch-action-" + expected_action_digest[:16]:
             raise ContractError("patch action_id mismatch")
-        if action["action_id"] in action_ids or action["hypothesis_id"] in hypothesis_ids:
+        if (
+            action["action_id"] in action_ids
+            or action["hypothesis_id"] in hypothesis_ids
+        ):
             raise ContractError("patch duplicate action or hypothesis identity")
         action_ids.add(action["action_id"])
         hypothesis_ids.add(action["hypothesis_id"])
@@ -5575,28 +7803,63 @@ def validate_patch_v2(
         basis_ids = set()
         for row in rows:
             if set(row) != {
-                "basis_id", "basis_digest", "review_request_id",
-                "review_request_digest", "report_set_id", "report_set_digest",
-                "dossier_id", "dossier_digest", "reading_report_id",
-                "reading_report_digest", "source_bundle_id", "source_bundle_digest",
-                "source_artifact_sha256", "source_id", "source_digest", "claim_id",
-                "claim_digest", "evidence_id", "evidence_digest", "span_id",
-                "span_hash", "source_ref", "acquisition_locator", "evidence_locator",
-                "relation", "access_level", "inspection_depth",
-                "claim_support_eligible", "projection_status", "verification",
+                "basis_id",
+                "basis_digest",
+                "review_request_id",
+                "review_request_digest",
+                "report_set_id",
+                "report_set_digest",
+                "dossier_id",
+                "dossier_digest",
+                "reading_report_id",
+                "reading_report_digest",
+                "source_bundle_id",
+                "source_bundle_digest",
+                "source_artifact_sha256",
+                "source_id",
+                "source_digest",
+                "claim_id",
+                "claim_digest",
+                "evidence_id",
+                "evidence_digest",
+                "span_id",
+                "span_hash",
+                "source_ref",
+                "acquisition_locator",
+                "evidence_locator",
+                "relation",
+                "access_level",
+                "inspection_depth",
+                "claim_support_eligible",
+                "projection_status",
+                "verification",
             }:
                 raise ContractError("patch reviewed_evidence field set invalid")
             for field in (
-                "review_request_digest", "report_set_digest", "dossier_digest",
-                "reading_report_digest", "source_bundle_digest",
-                "source_artifact_sha256", "source_digest", "claim_digest",
-                "evidence_digest", "span_hash",
+                "review_request_digest",
+                "report_set_digest",
+                "dossier_digest",
+                "reading_report_digest",
+                "source_bundle_digest",
+                "source_artifact_sha256",
+                "source_digest",
+                "claim_digest",
+                "evidence_digest",
+                "span_hash",
             ):
                 ensure_sha256(row[field], f"patch basis {field}")
             for field in (
-                "review_request_id", "report_set_id", "dossier_id",
-                "reading_report_id", "source_bundle_id", "source_id", "claim_id",
-                "evidence_id", "span_id", "source_ref", "acquisition_locator",
+                "review_request_id",
+                "report_set_id",
+                "dossier_id",
+                "reading_report_id",
+                "source_bundle_id",
+                "source_id",
+                "claim_id",
+                "evidence_id",
+                "span_id",
+                "source_ref",
+                "acquisition_locator",
                 "evidence_locator",
             ):
                 require_string(row[field], f"patch basis {field}")
@@ -5609,7 +7872,8 @@ def validate_patch_v2(
             if set(verification) != {"mode", "verifier_id", "artifact_sha256"}:
                 raise ContractError("patch basis verification fields invalid")
             if verification["mode"] not in {
-                "independent_source_check", "expert_review"
+                "independent_source_check",
+                "expert_review",
             }:
                 raise ContractError("patch basis verification mode ineligible")
             require_string(verification["verifier_id"], "patch verifier_id")
@@ -5659,7 +7923,6 @@ def validate_patch_v2(
 
 
 def validate_patch_v1(
-
     value: Any, network: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     patch = require_dict(value, "patch")
@@ -5687,15 +7950,15 @@ def validate_patch_v1(
             item = require_dict(row, f"patch.{collection}[{index}]")
             provenance = item.get("provenance")
             if not isinstance(provenance, list) or not provenance:
-                raise ContractError(f"patch.{collection}[{index}].provenance is required")
+                raise ContractError(
+                    f"patch.{collection}[{index}].provenance is required"
+                )
             for source in provenance:
                 entry = require_dict(source, "patch provenance")
                 require_string(entry.get("source_ref"), "patch provenance source_ref")
                 require_string(entry.get("locator"), "patch provenance locator")
                 if "source_id" in entry:
-                    require_string(
-                        entry.get("source_id"), "patch provenance source_id"
-                    )
+                    require_string(entry.get("source_id"), "patch provenance source_id")
                 if "source_digest" in entry:
                     ensure_sha256(
                         entry.get("source_digest"), "patch provenance source_digest"
@@ -5704,29 +7967,48 @@ def validate_patch_v1(
                     entry.get("read_depth"), "patch provenance read_depth"
                 )
                 if read_depth not in READ_DEPTHS:
-                    raise ContractError("patch provenance needs full_text or evidence depth")
+                    raise ContractError(
+                        "patch provenance needs full_text or evidence depth"
+                    )
     return patch
 
 
-def validate_any(value: Any, network: dict[str, Any] | None = None) -> dict[str, Any]:
+def validate_any(
+    value: Any,
+    network: dict[str, Any] | None = None,
+    *,
+    history_authority: Any | None = None,
+    history_authority_review: Any | None = None,
+    execution_authority_contexts: dict[str, dict[str, Any]] | None = None,
+    history_artifact_file_sha256s: list[str] | None = None,
+) -> dict[str, Any]:
     schema = value.get("schema") if isinstance(value, dict) else None
     if schema == NETWORK_SCHEMA:
         return validate_network(value)
     if schema == PROBE_SCHEMA:
         return validate_probe(value)
     if schema == HYPOTHESES_SCHEMA:
-        return validate_hypotheses(value, network)
+        return validate_hypotheses(
+            value,
+            network,
+            execution_authority_contexts=execution_authority_contexts,
+            history_artifact_file_sha256s=history_artifact_file_sha256s,
+        )
     if schema == PATCH_SCHEMA:
         return validate_patch_v2(value, network)
     if schema == PATCH_V1_SCHEMA:
         return validate_patch_v1(value, network)
-    if schema == REQUEST_SET_SCHEMA:
-        return validate_request_set(value, network=network)
+    if schema in {REQUEST_SET_SCHEMA, APPRAISAL_REQUEST_SET_SCHEMA}:
+        return validate_request_set(
+            value,
+            network=network,
+            execution_authority_contexts=execution_authority_contexts,
+        )
     if schema == REQUEST_SCHEMA:
         return validate_scholar_discovery_request(value)
     if schema == RESULT_SCHEMA:
         return validate_scholar_discovery_result(value)
-    if schema == RESULT_SET_SCHEMA:
+    if schema in {RESULT_SET_SCHEMA, RESULT_SET_V2_SCHEMA}:
         return validate_scholar_discovery_result_set(value, network=network)
     if schema == LEARN_FROM_PAPERS_REQUEST_SCHEMA:
         return validate_learn_from_papers_request(value)
@@ -5744,12 +8026,39 @@ def validate_any(value: Any, network: dict[str, Any] | None = None) -> dict[str,
         return validate_paper_reading_report_set_v2(value, network=network)
     if schema == PAPER_UNDERSTANDING_GAP_SCHEMA:
         return validate_paper_understanding_gap(value)
+    if schema == EVIDENCE_CHALLENGE_SCHEMA:
+        return validate_evidence_challenge(value)
+    if schema == TARGETED_EVIDENCE_NEED_SET_SCHEMA:
+        return validate_targeted_evidence_need_set(value)
+    if schema == "EvidenceAppraisalPackage/v1":
+        return validate_evidence_appraisal_package(value)
+    if schema == REVIEWED_HISTORY_AUTHORITY_SCHEMA:
+        return validate_reviewed_history_authority(value)
+    if schema == HISTORY_AUTHORITY_MANIFEST_SCHEMA:
+        if history_authority_review is None:
+            raise ContractError(
+                "HistoryAuthorityManifest/v1 validation requires "
+                "--history-authority-review"
+            )
+        return validate_history_authority_manifest(value, history_authority_review)
+    if schema in {SEARCH_HISTORY_INDEX_SCHEMA, SEARCH_HISTORY_INDEX_V2_SCHEMA}:
+        if history_authority is None or history_authority_review is None:
+            raise ContractError(
+                "SearchHistoryIndex validation requires --history-authority "
+                "and --history-authority-review"
+            )
+        return validate_search_history_index(
+            value,
+            history_authority,
+            history_authority_review,
+            execution_authority_contexts=execution_authority_contexts,
+            artifact_file_sha256s=history_artifact_file_sha256s,
+        )
     raise ContractError(f"unsupported schema: {schema!r}")
 
 
 NETWORK_INPUT_HELP = (
-    "Path to exported KnowledgeNetwork/v1 JSON; do not pass "
-    "networks/<id>/network.json"
+    "Path to exported KnowledgeNetwork/v1 JSON; do not pass networks/<id>/network.json"
 )
 
 
@@ -5759,11 +8068,7 @@ def load_exported_knowledge_network(path_value: str | Path) -> dict[str, Any]:
         raise ContractError("network must be a KnowledgeNetwork/v1 object")
     if value.get("schema") == NETWORK_SCHEMA:
         return validate_network(value)
-    if (
-        "schema" not in value
-        and "schema_version" in value
-        and "network_id" in value
-    ):
+    if "schema" not in value and "schema_version" in value and "network_id" in value:
         raise ContractError(
             "--network requires an exported KnowledgeNetwork/v1 JSON, not the "
             "RKN storage network.json/NetworkManifest; run the "
@@ -5781,11 +8086,44 @@ def parser() -> argparse.ArgumentParser:
     scan.add_argument("--output", required=True)
 
     generate = subcommands.add_parser(
-        "generate-hypotheses", help="emit deterministic gap hypotheses from network scan"
+        "generate-hypotheses",
+        help="emit deterministic gap hypotheses from network scan",
     )
     generate.add_argument("--network", required=True, help=NETWORK_INPUT_HELP)
     generate.add_argument("--round-id")
     generate.add_argument("--output", required=True)
+
+    compile_needs = subcommands.add_parser(
+        "compile-appraisal-needs",
+        help=(
+            "compile finalized appraisal challenges and targeted needs into "
+            "searchable hypotheses plus explicit non-search routes"
+        ),
+    )
+    compile_needs.add_argument("--needs", required=True)
+    compile_needs.add_argument("--challenge", action="append", required=True)
+    compile_needs.add_argument("--history-index", required=True)
+    compile_needs.add_argument("--history-authority", required=True)
+    compile_needs.add_argument("--history-authority-review", required=True)
+    compile_needs.add_argument("--execution-authority", action="append", default=[])
+    compile_needs.add_argument(
+        "--expected-execution-authority-sha256", action="append", default=[]
+    )
+    compile_needs.add_argument("--network", required=True, help=NETWORK_INPUT_HELP)
+    compile_needs.add_argument("--round-id", required=True)
+    compile_needs.add_argument("--output", required=True)
+
+    dispatch_package = subcommands.add_parser(
+        "dispatch-appraisal-package",
+        help="validate a producer package and route compact non-search needs",
+    )
+    dispatch_package.add_argument("--package", required=True)
+    dispatch_package.add_argument("--approval", required=True)
+    dispatch_package.add_argument("--prepared", required=True)
+    dispatch_package.add_argument("--review", required=True)
+    dispatch_package.add_argument("--expected-authority-sha256", required=True)
+    dispatch_package.add_argument("--lineage", action="append", default=[])
+    dispatch_package.add_argument("--output", required=True)
 
     rank = subcommands.add_parser("prioritize", help="rank gap hypotheses")
     rank.add_argument("--input", required=True)
@@ -5811,6 +8149,9 @@ def parser() -> argparse.ArgumentParser:
         choices=["manual_optional", "manual_required", "disabled"],
         default="manual_optional",
     )
+    emit.add_argument("--max-rounds", type=int, default=3)
+    emit.add_argument("--max-candidates", type=int, default=100)
+    emit.add_argument("--timeout-seconds", type=int, default=900)
 
     consume = subcommands.add_parser(
         "consume-results", help="consume result set and transition hypothesis status"
@@ -5819,11 +8160,16 @@ def parser() -> argparse.ArgumentParser:
     consume.add_argument("--network", required=True, help=NETWORK_INPUT_HELP)
     consume.add_argument("--requests", required=True)
     consume.add_argument("--result", action="append", default=[], required=True)
+    consume.add_argument("--execution-authority", action="append", default=[])
+    consume.add_argument(
+        "--expected-execution-authority-sha256", action="append", default=[]
+    )
     consume.add_argument("--output", required=True)
     consume.add_argument("--round-id")
 
     consume_review = subcommands.add_parser(
-        "consume-reviewed-evidence", help="consume reviewed evidence and transition hypothesis status"
+        "consume-reviewed-evidence",
+        help="consume reviewed evidence and transition hypothesis status",
     )
     consume_review.add_argument("--hypotheses", required=True)
     consume_review.add_argument("--network", required=True, help=NETWORK_INPUT_HELP)
@@ -5852,6 +8198,12 @@ def parser() -> argparse.ArgumentParser:
     validate = subcommands.add_parser("validate", help="validate one contract")
     validate.add_argument("--input", required=True)
     validate.add_argument("--network", help=NETWORK_INPUT_HELP)
+    validate.add_argument("--history-authority")
+    validate.add_argument("--history-authority-review")
+    validate.add_argument("--execution-authority", action="append", default=[])
+    validate.add_argument(
+        "--expected-execution-authority-sha256", action="append", default=[]
+    )
 
     cycle = subcommands.add_parser("cycle", help="run bounded discovery cycle")
     cycle.add_argument("--network", required=True, help=NETWORK_INPUT_HELP)
@@ -5870,7 +8222,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
         if args.command == "scan":
-            write_json(args.output, scan_network(load_exported_knowledge_network(args.network)))
+            write_json(
+                args.output, scan_network(load_exported_knowledge_network(args.network))
+            )
 
         elif args.command == "generate-hypotheses":
             network = load_exported_knowledge_network(args.network)
@@ -5885,8 +8239,51 @@ def main(argv: list[str] | None = None) -> int:
                 ),
             )
 
+        elif args.command == "compile-appraisal-needs":
+            network = load_exported_knowledge_network(args.network)
+            scholar = _scholar_discovery_module()
+            execution_contexts = scholar.load_execution_authority_contexts(
+                args.execution_authority,
+                args.expected_execution_authority_sha256,
+            )
+            history_index = load_json(args.history_index)
+            history_artifact_file_sha256s = None
+            if isinstance(history_index, dict):
+                raw_hashes = history_index.get("artifact_file_sha256s")
+                if isinstance(raw_hashes, list):
+                    history_artifact_file_sha256s = raw_hashes
+            write_json(
+                args.output,
+                compile_appraisal_needs(
+                    load_json(args.needs),
+                    [load_json(path) for path in args.challenge],
+                    history_index,
+                    load_json(args.history_authority),
+                    load_json(args.history_authority_review),
+                    network,
+                    round_id=args.round_id,
+                    execution_authority_contexts=execution_contexts,
+                    artifact_file_sha256s=history_artifact_file_sha256s,
+                ),
+            )
+
+        elif args.command == "dispatch-appraisal-package":
+            write_json(
+                args.output,
+                dispatch_evidence_appraisal_package(
+                    load_json(args.package),
+                    load_json(args.approval),
+                    load_json(args.prepared),
+                    load_json(args.review),
+                    expected_authority_sha256=args.expected_authority_sha256,
+                    lineage=[load_json(path) for path in args.lineage],
+                ),
+            )
+
         elif args.command == "prioritize":
-            network = load_exported_knowledge_network(args.network) if args.network else None
+            network = (
+                load_exported_knowledge_network(args.network) if args.network else None
+            )
             write_json(args.output, prioritize(load_json(args.input), network))
 
         elif args.command == "select":
@@ -5910,6 +8307,9 @@ def main(argv: list[str] | None = None) -> int:
                     load_json(args.input),
                     network,
                     google_scholar_policy=args.google_scholar_policy,
+                    max_rounds=args.max_rounds,
+                    max_candidates=args.max_candidates,
+                    timeout_seconds=args.timeout_seconds,
                 ),
             )
 
@@ -5917,7 +8317,14 @@ def main(argv: list[str] | None = None) -> int:
             network = load_exported_knowledge_network(args.network)
             validate_network(network)
             hypotheses = load_json(args.hypotheses)
-            request_set = load_json(args.requests)
+            scholar = _scholar_discovery_module()
+            request_set, request_set_file_sha256 = (
+                scholar.load_request_set_artifact_file(args.requests)
+            )
+            execution_contexts = scholar.load_execution_authority_contexts(
+                args.execution_authority,
+                args.expected_execution_authority_sha256,
+            )
             result_inputs = [load_json(path) for path in args.result]
             output = consume_results(
                 hypotheses,
@@ -5925,6 +8332,8 @@ def main(argv: list[str] | None = None) -> int:
                 request_set,
                 result_inputs,
                 round_id=args.round_id,
+                execution_authority_contexts=execution_contexts,
+                request_set_file_sha256=request_set_file_sha256,
             )
             write_json(args.output, output)
 
@@ -5976,12 +8385,49 @@ def main(argv: list[str] | None = None) -> int:
             write_json(args.requests_output, request_set)
 
         else:
-            network = load_exported_knowledge_network(args.network) if args.network else None
-            output = validate_any(load_json(args.input), network)
-            print(json.dumps({"valid": True, "schema": output["schema"]}, sort_keys=True))
+            network = (
+                load_exported_knowledge_network(args.network) if args.network else None
+            )
+            scholar = _scholar_discovery_module()
+            execution_contexts = scholar.load_execution_authority_contexts(
+                args.execution_authority,
+                args.expected_execution_authority_sha256,
+            )
+            input_value = load_json(args.input)
+            history_artifact_file_sha256s = None
+            if isinstance(input_value, dict):
+                raw_hashes = input_value.get("artifact_file_sha256s")
+                if isinstance(raw_hashes, list):
+                    history_artifact_file_sha256s = raw_hashes
+            output = validate_any(
+                input_value,
+                network,
+                history_authority=(
+                    load_json(args.history_authority)
+                    if args.history_authority
+                    else None
+                ),
+                history_authority_review=(
+                    load_json(args.history_authority_review)
+                    if args.history_authority_review
+                    else None
+                ),
+                execution_authority_contexts=execution_contexts,
+                history_artifact_file_sha256s=history_artifact_file_sha256s,
+            )
+            print(
+                json.dumps({"valid": True, "schema": output["schema"]}, sort_keys=True)
+            )
         return 0
 
-    except (ContractError, json.JSONDecodeError, OSError, ValueError, TypeError, re.error) as exc:
+    except (
+        ContractError,
+        json.JSONDecodeError,
+        OSError,
+        ValueError,
+        TypeError,
+        re.error,
+    ) as exc:
         print(f"network-gap-discovery validation failed: {exc}", file=sys.stderr)
         return 2
 

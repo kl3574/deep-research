@@ -54,3 +54,55 @@ This skill does not browse, query Google Scholar, deep-read papers, adjudicate
 claims, write Zotero, or merge the network. Route those actions to
 `$scholar-discovery`, `$learn-from-papers`, `$curate-research-to-zotero`, and
 `$research-knowledge-network` respectively.
+
+## Evidence-appraisal and missing-content route
+
+Use `compile-appraisal-needs` for finalized `EvidenceChallenge/v1` and
+`TargetedEvidenceNeedSet/v1`. Supply every referenced challenge, the exported
+live network, scholar-discovery's `SearchHistoryIndex/v1`, and its separately
+approved immutable `HistoryAuthorityManifest/v1` plus the exact
+`ReviewedHistoryAuthority/v1` approval it references. Only proposed
+needs with `route: scholar_discovery` become hypotheses. Acquisition, full-text,
+code/data, experiment, and version routes remain exact records in
+`routed_needs`; they never masquerade as paper searches.
+
+Confirm and refute goals must have different semantic concept signatures and
+must both bind the referenced challenge axis. Mutual exclusion comes only from
+the closed `adversarial_observation_pair`: a shared target metric, comparator,
+boundary, and value/state plus an ordered complementary operator pair and
+`supports`/`challenges` implications. Free-text polarity, negation scope,
+same-direction outcomes, and synonymous rewrites are not orthogonal. Canonical or paraphrased reuse from requested,
+selection-leaked, failed, partial, result, or candidate history fails closed.
+Partial-provider and empty-result outcomes leave appraisal needs unresolved;
+absence is never novelty or nonexistence.
+
+The readable `confirm_goal` and `refute_goal` are not free-form inputs. Each
+must byte-match the frozen formatter
+`target_metric=...; comparator=...; boundary=...; observation=<operator> <value_or_state>; claim_implication=...`.
+Provider query terms are regenerated from that structured pair. The target
+metric, comparator, boundary, objective-specific operator, and value/state are
+non-truncatable slots: they are placed before any free keywords. Only remaining
+budget may contain free context. If the structured core itself exceeds the
+12-term query budget, compilation fails closed rather than dropping the
+adversarial observation.
+
+The compiler preserves need-set, challenge, claim, appraisal, route, and
+history digests through prioritize, reviewed selection, and selected-only emit.
+History entries are never trusted as a self-report: the complete embedded
+artifact universe is owner-validated and replayed. Appraisal request sets embed
+the full reviewed selected document, and both skills reconstruct every request;
+origin deletion and unreviewed append therefore fail even after rehashing.
+
+Appraisal-origin emission uses only
+`AppraisalScholarDiscoveryRequestSet/v1`. Generic request sets cannot enter
+appraisal consume/execute even if every projection and origin is deleted and
+the payload is rehashed.
+
+For the producer's compact `EvidenceAppraisalPackage/v1` profile, use
+`dispatch-appraisal-package`. It requires the actual detached approval,
+prepared request, independent review, and the caller-held
+`expected_authority_sha256`; that external pin is passed to the producer's
+public package validator. It preserves non-search needs exactly. A compact
+`scholar_discovery` need fails closed
+because that profile lacks the bounded claim/scope/evidence criteria required
+to create a paper search; use the rich finalized need adapter instead.

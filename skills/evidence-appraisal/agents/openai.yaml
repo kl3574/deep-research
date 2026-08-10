@@ -1,0 +1,4 @@
+interface:
+  display_name: "Evidence Appraisal"
+  short_description: "Challenge and adjudicate scoped research evidence"
+  default_prompt: "Use $evidence-appraisal to appraise selected claim-evidence relations, expose adversarial challenges, and compile targeted evidence needs without searching."

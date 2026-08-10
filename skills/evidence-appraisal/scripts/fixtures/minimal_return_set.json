@@ -1,0 +1,1 @@
+{"schema":"EvidenceAppraisalReturnSet/v1","appraisal_set_id":"set-minimal","prior_cycle_ref":{"appraisal_set_id":"set-minimal","appraisal_set_digest":"20987bce3f42ccb2cab28080e27221712c18136bc9af3ca94e78d23e6e0f3fc7","cycle":0},"relation_keys":[{"claim_ref":"claim-1","evidence_ref":"evidence-1"}]}

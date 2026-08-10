@@ -83,11 +83,37 @@ def load_deep_research_run():
     return module
 
 
-def invoke(root: Path, network_id: str, arguments: list[str]):
+def invoke(
+    root: Path,
+    network_id: str,
+    arguments: list[str],
+    *,
+    enforce_appraisal_gate: bool = False,
+):
     stdout = io.StringIO()
     stderr = io.StringIO()
     all_args = ["--root", str(root), "--network-id", network_id, *arguments]
-    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+    scientific = bool(arguments) and arguments[0] in {
+        "add-claim",
+        "add-evidence",
+        "add-relation",
+        "transition-gap",
+    }
+    legacy_append = lambda paths, records, ledger, record_id, payload, **_: (  # noqa: E731
+        MODULE._append_candidate(paths, records, ledger, record_id, payload)
+    )
+    gate_context = (
+        contextlib.nullcontext()
+        if enforce_appraisal_gate or not scientific
+        else mock.patch.object(
+            MODULE,
+            "_append_scientific_candidate",
+            side_effect=legacy_append,
+        )
+    )
+    with gate_context, contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(
+        stderr
+    ):
         code = MODULE.main(all_args)
     return code, stdout.getvalue(), stderr.getvalue()
 
@@ -3749,26 +3775,128 @@ class KnowledgeNetworkTest(unittest.TestCase):
         self.assertIn("must reference the gap claim", rejected[2])
         self.assertEqual(ledger.read_bytes(), before)
 
-    def test_initial_resolved_gap_requires_evidence_before_append(self):
+    def test_initial_terminal_or_resolution_gap_is_rejected_without_any_append(self):
         self.init_network(self.network_id)
+        self.add_source(self.network_id, "source-initial-gap")
+        self.add_entity(self.network_id)
+        self.add_claim(self.network_id, "claim-initial-gap", impact="high")
+        evidence = self.add_evidence(
+            self.network_id,
+            "claim-initial-gap",
+            "source-initial-gap",
+            evidence_id="evidence-initial-gap",
+        )
+        self.assertEqual(evidence[0], 0, evidence[2])
         ledger = self.root / "networks" / self.network_id / "gaps.jsonl"
-        before = ledger.read_bytes()
-        rejected = invoke(
+        events = self.root / "networks" / self.network_id / "events.jsonl"
+        before = {
+            path: (path.stat().st_ino, path.read_bytes()) for path in (ledger, events)
+        }
+        attempts = (
+            (
+                "resolved",
+                [
+                    "--status",
+                    "resolved",
+                    "--resolution-evidence-ref",
+                    "evidence-initial-gap",
+                ],
+                "invalid choice",
+            ),
+            ("blocked", ["--status", "blocked"], "invalid choice"),
+            (
+                "open-with-evidence",
+                [
+                    "--status",
+                    "open",
+                    "--resolution-evidence-ref",
+                    "evidence-initial-gap",
+                ],
+                "cannot contain resolution references",
+            ),
+            (
+                "open-with-source",
+                ["--status", "open", "--resolution-source", "reviewer-resolution"],
+                "cannot contain resolution references",
+            ),
+        )
+        for label, extra, message in attempts:
+            with self.subTest(case=label):
+                rejected = invoke(
+                    self.root,
+                    self.network_id,
+                    [
+                        "record-gap",
+                        "--gap-id",
+                        "gap-invalid-resolution",
+                        "--gap-type",
+                        "explicit",
+                        "--claim-id",
+                        "claim-initial-gap",
+                        "--impact",
+                        "medium",
+                        *extra,
+                        "--source",
+                        "reviewer",
+                        "--description",
+                        "initial resolution bypass",
+                    ],
+                )
+                self.assertNotEqual(rejected[0], 0, rejected[2])
+                self.assertIn(message, rejected[2])
+                for path in (ledger, events):
+                    self.assertEqual(path.stat().st_ino, before[path][0])
+                    self.assertEqual(path.read_bytes(), before[path][1])
+        event_rows = [
+            json.loads(line)
+            for line in events.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertFalse(
+            any(row.get("event_type") == "appraised_mutation" for row in event_rows)
+        )
+
+    def test_validator_rejects_forged_initial_resolved_gap(self):
+        self.init_network(self.network_id)
+        recorded = invoke(
             self.root,
             self.network_id,
             [
                 "record-gap",
-                "--gap-id", "gap-invalid-resolution",
-                "--gap-type", "explicit",
-                "--impact", "medium",
-                "--status", "resolved",
-                "--source", "reviewer",
-                "--description", "unsupported initial resolution",
+                "--gap-id",
+                "gap-forged-initial-resolution",
+                "--gap-type",
+                "explicit",
+                "--impact",
+                "medium",
+                "--status",
+                "open",
+                "--source",
+                "reviewer",
+                "--description",
+                "open before forged rewrite",
             ],
         )
-        self.assertEqual(rejected[0], 1, rejected[2])
-        self.assertIn("requires evidence references", rejected[2])
-        self.assertEqual(ledger.read_bytes(), before)
+        self.assertEqual(recorded[0], 0, recorded[2])
+        ledger = self.root / "networks" / self.network_id / "gaps.jsonl"
+        rows = [
+            json.loads(line)
+            for line in ledger.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        rows[0]["status"] = "resolved"
+        rows[0]["resolution_source"] = "forged-initial-resolution"
+        rows[0]["transition_from_record_id"] = None
+        ledger.write_text(
+            "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+            encoding="utf-8",
+        )
+        rejected = invoke(self.root, self.network_id, ["validate"])
+        self.assertEqual(rejected[0], 1)
+        diagnostic = rejected[1] + rejected[2]
+        self.assertIn("initial record must be open", diagnostic)
+        self.assertIn("initial record cannot contain a resolution source", diagnostic)
+        self.assertIn("transition_from_record_id must be a non-empty string", diagnostic)
 
     def test_coverage_unmet_blocks_completion(self):
         self.init_network(self.network_id, ["coverage-dim"], ["profile-x"])

@@ -204,7 +204,14 @@ caller's umask.
 
 ```bash
 python scripts/scholar_discovery.py plan --request request.json --output plan.json
+python scripts/scholar_discovery.py authorize-request-set \
+  --request-set request-set.json --reviewer-id reviewer-2 \
+  --reviewer-role independent-execution-reviewer \
+  --reviewed-at 2026-08-09T08:00:00Z --attest-independent-reviewer \
+  --output reviewed-execution-authorization.json
 python scripts/scholar_discovery.py execute --request-set request-set.json \
+  --execution-authority reviewed-execution-authorization.json \
+  --expected-execution-authority-sha256 "$EXPECTED_EXECUTION_AUTHORITY_SHA256" \
   --output discovery-result-set.json
 python scripts/scholar_discovery.py handoff --request request.json \
   --plan plan.json --batch openalex.json --output discovery-result.json
@@ -227,3 +234,110 @@ continue through official APIs. If Scholar is mandatory, obtain a user-performed
 export and normalize it as a manual batch for `handoff`; an unavailable mandatory
 export is a terminal discovery limitation, not permission to scrape, bypass a
 CAPTCHA, or silently widen the coverage claim.
+
+## `SearchHistoryIndex/v1`
+
+`HistoryAuthorityCandidate/v1` first fixes the exact artifact refs
+(`schema`, `sha256`) in one history universe. The independent
+`ReviewedHistoryAuthority/v1` binds the candidate's canonical file SHA, the
+same refs, `decision: approved`, a complete-universe/no-known-omission
+attestation, and reviewer ID/role/time with independence attested. The final
+`HistoryAuthorityManifest/v1` contains a closed `approval_ref`; its digest
+binds that separate approval without a content-address cycle.
+
+`build-history` requires both final manifest and approval and accepts only
+`ScholarDiscoveryRequest/v1`, request sets,
+`ScholarDiscoveryResult/v1`, result sets, and
+`KnowledgeGapHypotheses/v1`. It emits a private content-addressed index with
+exact fields `schema`, `schema_version`, `history_id`, `history_digest`,
+`generated_at`, `authority_ref`, `source_artifacts`, `artifact_universe`, and
+`entries`.
+
+Each entry binds sorted canonical terms and a
+`semantic-concept-bag-v1` SHA-256 signature to objective, state, request ID,
+source schema/digest/logical locator, and selection-leak flag. States cover
+requested, selection leak, succeeded, partial, empty, failed, blocked,
+budget-exhausted, and candidate. Failure records join their request queries
+independently of CLI artifact order. Abstracts, snippets, full text, private
+paths, and credentials are excluded.
+
+`artifact_universe` embeds each actual owner-validated source artifact with its
+schema and canonical SHA-256. Validation matches that universe exactly to the
+separately supplied authority manifest, reconstructs its candidate, recomputes
+the approval digest, reconstructs the entire index, and
+requires byte-semantic equality. Clearing entries or deleting a complete source
+from the universe, source list, and entries cannot be legalized by recomputing
+the outer digest. Every result binds the exact
+request digest and deterministic compiled-plan digest. Every planned query must
+occur in `search_events`, `unresolved_query_ids`, or `provider_failures`; a
+partial result with missing query coverage is invalid.
+
+Requests projected from evidence appraisal additionally carry a closed
+`EvidenceAppraisalNeedOrigin/v1`. Its exact need route is
+`scholar_discovery`, and all need-set, need, challenge, claim, and appraisal
+refs remain bound by the request digest.
+For appraisal-origin request sets, the full reviewed selected hypotheses and
+global Scholar policy are embedded. Both owners replay the reviewed selection
+and reconstruct the complete ordered request list; missing origins, deleted
+requests, and unreviewed appends cannot be legalized by rehashing.
+
+```bash
+python scripts/scholar_discovery.py build-history \
+  --artifact round05-requests.json --artifact round06-results.json \
+  --authority-manifest history-authority.json \
+  --authority-review reviewed-history-authority.json \
+  --generated-at 2026-08-09T08:00:00Z --output search-history.json
+```
+
+Use `build-history-authority-candidate`, `approve-history-authority` with
+both explicit attestation flags, and `finalize-history-authority` before this
+command. Each output uses the atomic private writer.
+
+## `AppraisalScholarDiscoveryRequestSet/v1`
+
+This schema is reserved for exact selected projections originating in evidence
+appraisal. Only `execute-appraisal` accepts it. Generic
+`ScholarDiscoveryRequestSet/v1` cannot enter appraisal execution, and generic
+`execute` rejects the appraisal schema.
+
+## `ReviewedSearchExecutionAuthorization/v1`
+
+Request-set validation does not authorize network execution. Both generic
+`execute` and appraisal-only `execute-appraisal` require a separate reviewed
+authorization plus the caller-provided external
+`expected_execution_authority_sha256` pin. That pin is exactly the SHA-256 of
+the authorization artifact's original file bytes, not its internal
+`authorization_digest`. `authorize-request-set` binds the
+actual request-set raw file SHA-256, schema,
+request-set ID/digest, global and ordered per-request execution profiles, and
+the exact ordered request IDs, request digests, and query rows. It also binds
+`decision: approved` and an independently attested reviewer ID, role, and time.
+
+At execution, the authorization owner replays that complete projection from
+the supplied request set, independently recomputes the internal content digest,
+and compares the actual authorization file SHA to the external pin before the
+transport is reachable. CLI execution derives the actual request-set raw SHA
+from bytes. Python authorization/execution APIs likewise require the actual
+request-set artifact path, and execution APIs additionally require the actual
+authorization artifact path. The owner reads only regular, non-symlink files,
+requires each parsed object to equal its supplied object, and computes the raw
+SHA-256 values internally; caller SHA arguments are optional equality
+cross-checks only. Both entrypoints reject a missing artifact path, a
+pretty-byte rewrite, or a pin mismatch before transport. An internal digest
+used as the pin, a changed
+trailing newline, missing authorization, a wrong pin, or rewriting
+an appraisal set to generic while changing its typed request IDs cannot be
+legalized by resealing either artifact. `validate` may still inspect request
+sets without an authorization because it never contacts providers.
+
+`ScholarDiscoveryResult/v1` and `ScholarDiscoveryResultSet/v2` are
+cross-field consistent: `complete_bounded` requires all planned queries to be
+represented, complete, untruncated, within budget, and free of unresolved rows
+or blocking provider failures. Partial/blocked statuses require matching event,
+failure, unresolved-query, truncation, or budget evidence. Only an explicitly
+optional manual Google Scholar occurrence with
+`artifact_origin: not_provided_manual_optional` may remain blocked without
+making otherwise complete automatic-provider coverage partial.
+Result-set v2 replay uses a conservative raw `pre_truncation_candidate_count`
+equal to the sum of `search_events[].candidate_count`, and rejects missing or
+inconsistent values (`>= len(ranked_candidates)`).

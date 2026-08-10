@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import importlib.util
 import io
@@ -20,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import knowledge_network as kn
+import evidence_appraisal_binding as appraisal_binding
 
 
 PATCH_V1_SCHEMA = "NetworkPatchProposal/v1"
@@ -267,9 +269,7 @@ def validate_target_claim(
         if not isinstance(values, list) or any(
             not isinstance(item, str) or not item for item in values
         ):
-            raise ValueError(
-                f"{label}.target_claim.{field} must be a string list"
-            )
+            raise ValueError(f"{label}.target_claim.{field} must be a string list")
         require_unique(values, f"{label}.target_claim.{field}")
 
     scope = require_object(target["scope"], f"{label}.target_claim.scope")
@@ -303,11 +303,14 @@ def validate_target_claim(
         if not isinstance(values, list) or any(
             not isinstance(item, str) or not item for item in values
         ):
-            raise ValueError(f"{label}.target_claim.scope.{field} must be a string list")
+            raise ValueError(
+                f"{label}.target_claim.scope.{field} must be a string list"
+            )
         require_unique(values, f"{label}.target_claim.scope.{field}")
-    if scope["coverage_dimensions"] != target["coverage_dimensions"] or scope[
-        "benchmark_profiles"
-    ] != target["benchmark_profiles"]:
+    if (
+        scope["coverage_dimensions"] != target["coverage_dimensions"]
+        or scope["benchmark_profiles"] != target["benchmark_profiles"]
+    ):
         raise ValueError(f"{label}.target_claim scope/profile projection mismatch")
     if target["scope_digest"] != digest_json(scope):
         raise ValueError(f"{label}.target_claim.scope_digest mismatch")
@@ -363,7 +366,9 @@ def validate_target_claim(
 
 
 def relation_operation_id(
-    action: dict[str, Any], basis: dict[str, Any]
+    action: dict[str, Any],
+    basis: dict[str, Any],
+    relation_type: str = "supports",
 ) -> str:
     subject = {
         "target_signature": action["target_signature"],
@@ -371,7 +376,7 @@ def relation_operation_id(
         "basis_id": basis["basis_id"],
         "basis_digest": basis["basis_digest"],
         "evidence_id": basis["evidence_id"],
-        "relation_type": "supports",
+        "relation_type": relation_type,
     }
     return "relation-" + digest_json(subject)[:16]
 
@@ -387,6 +392,192 @@ def current_network_ref(
         "snapshot_id": str(exported["snapshot_id"]),
         "sha256": str(exported["content_sha256"]),
     }
+
+
+def _gate_argument_paths(args: argparse.Namespace) -> dict[str, Any] | None:
+    values = {
+        "package": getattr(args, "appraisal_package", None),
+        "approval": getattr(args, "appraisal_approval", None),
+        "prepared": getattr(args, "appraisal_prepared", None),
+        "independent_review": getattr(args, "appraisal_independent_review", None),
+        "owner_bundle": getattr(args, "appraisal_owner_bundle", None),
+        "expected_authority_sha256": getattr(args, "expected_authority_sha256", None),
+        "proposal": getattr(args, "proposal", None),
+        "binding": getattr(args, "appraisal_binding", None),
+        "projection": getattr(args, "appraisal_projection", None),
+    }
+    appraisal_values = {
+        key: value for key, value in values.items() if key != "proposal"
+    }
+    lineage = list(getattr(args, "appraisal_lineage", None) or [])
+    if (any(appraisal_values.values()) or lineage) and not all(
+        appraisal_values.values()
+    ):
+        raise ValueError(
+            "appraisal gate is incomplete; provide --appraisal-package, "
+            "--appraisal-approval, --appraisal-prepared, "
+            "--appraisal-independent-review, --appraisal-owner-bundle, --appraisal-binding, and "
+            "--expected-authority-sha256 and --appraisal-projection together"
+        )
+    if not all(appraisal_values.values()):
+        return None
+    return {
+        **{key: str(value) for key, value in values.items()},
+        "lineage": [str(value) for value in lineage],
+    }
+
+
+def _load_optional_appraisal_gate(
+    args: argparse.Namespace,
+    proposal: dict[str, Any],
+    network_ref: dict[str, str],
+    paths: kn.Paths,
+    records: dict[str, list[dict[str, Any]]],
+) -> tuple[dict[str, Any] | None, list[str]]:
+    raw_paths = _gate_argument_paths(args)
+    if raw_paths is None:
+        return None, []
+    package = appraisal_binding.load_json_stable(
+        raw_paths["package"], "appraisal package"
+    )
+    approval = appraisal_binding.load_json_stable(
+        raw_paths["approval"], "appraisal approval"
+    )
+    prepared = appraisal_binding.load_json_stable(
+        raw_paths["prepared"], "appraisal preparation"
+    )
+    independent_review = appraisal_binding.load_json_stable(
+        raw_paths["independent_review"], "appraisal independent review"
+    )
+    owner_bundle = appraisal_binding.load_json_stable(
+        raw_paths["owner_bundle"], "appraisal owner bundle"
+    )
+    lineage = [
+        appraisal_binding.load_json_stable(path, f"appraisal lineage[{index}]")
+        for index, path in enumerate(raw_paths["lineage"])
+    ]
+    binding = appraisal_binding.load_json_stable(
+        raw_paths["binding"], "appraisal binding"
+    )
+    projection = appraisal_binding.load_json_stable(
+        raw_paths["projection"], "appraisal projection"
+    )
+    prefix_counts = {
+        name: int(binding["network_guard"]["ledgers"][name]["record_count"])
+        for name in kn.LEDGER_NAMES
+    }
+    gate = appraisal_binding.validate_gate(
+        package,
+        approval,
+        prepared,
+        independent_review,
+        owner_bundle,
+        lineage,
+        raw_paths["expected_authority_sha256"],
+        proposal,
+        binding,
+        projection,
+        network_ref,
+        kn._claim_scopes_from_records(records, prefix_counts=prefix_counts),
+    )
+    consumed = kn._validate_guard_prefix(paths, records, gate)
+    if consumed:
+        raise ValueError(
+            "appraisal binding already has consumed operations; regenerate from current authority"
+        )
+    cli_args = [
+        "--appraisal-package",
+        raw_paths["package"],
+        "--appraisal-approval",
+        raw_paths["approval"],
+        "--appraisal-prepared",
+        raw_paths["prepared"],
+        "--appraisal-independent-review",
+        raw_paths["independent_review"],
+        "--appraisal-owner-bundle",
+        raw_paths["owner_bundle"],
+        "--expected-authority-sha256",
+        raw_paths["expected_authority_sha256"],
+        "--appraisal-proposal",
+        raw_paths["proposal"],
+        "--appraisal-binding",
+        raw_paths["binding"],
+        "--appraisal-projection",
+        raw_paths["projection"],
+    ]
+    for path in raw_paths["lineage"]:
+        cli_args.extend(["--appraisal-lineage", path])
+    return gate, cli_args
+
+
+def _binding_row(
+    gate: dict[str, Any], action: dict[str, Any], basis: dict[str, Any]
+) -> dict[str, Any]:
+    matches = [
+        row
+        for row in gate["binding"]["relation_bindings"]
+        if row["action_id"] == action["action_id"]
+        and row["basis_id"] == basis["basis_id"]
+    ]
+    if len(matches) != 1:
+        raise ValueError("appraisal gate does not bind an exact action evidence basis")
+    return matches[0]
+
+
+def _operation_ledger_subject(operation: dict[str, Any]) -> dict[str, Any]:
+    operation_type = operation["operation_type"]
+    payload = copy.deepcopy(operation["payload"])
+    if operation_type == "add-claim":
+        payload["is_factual"] = False
+    elif operation_type == "add-relation":
+        payload["from"] = payload.pop("from_ref")
+        payload["to"] = payload.pop("to_ref")
+    return payload
+
+
+def validate_appraised_acceptance(
+    acceptance: dict[str, Any],
+    gate: dict[str, Any],
+    records: dict[str, list[dict[str, Any]]],
+) -> None:
+    gap_records = {
+        row["record_id"]: row
+        for row in records["gaps"]
+        if isinstance(row.get("record_id"), str)
+    }
+    consumed: set[str] = set()
+    for decision in acceptance["decisions"]:
+        if decision["decision"] != "accept":
+            continue
+        for operation in decision["operations"]:
+            operation_type = operation["operation_type"]
+            ledger_payload = _operation_ledger_subject(operation)
+            authorization_subject = None
+            if operation_type == "transition-gap":
+                payload = operation["payload"]
+                prior = gap_records.get(payload["from_record_id"])
+                if prior is None or prior.get("gap_id") != payload["gap_id"]:
+                    raise ValueError(
+                        "appraised gap transition does not bind a live prior record"
+                    )
+                authorization_subject = {
+                    "operation_type": "transition-gap",
+                    "gap_id": payload["gap_id"],
+                    "from_record_id": payload["from_record_id"],
+                    "from_status": prior.get("status"),
+                    "to_status": payload["status"],
+                    "reason": payload["reason"],
+                    "evidence_refs": sorted(payload["evidence_refs"]),
+                    "resolution_source": payload["resolution_source"] or "",
+                }
+            authorization = appraisal_binding.authorize_mutation(
+                gate,
+                operation_type,
+                ledger_payload,
+                authorization_subject=authorization_subject,
+                consumed_authorization_digests=consumed,
+            )
+            consumed.add(authorization["authorization_digest"])
 
 
 def validate_network_ref(
@@ -432,7 +623,10 @@ def validate_v1_audit(value: Any, network_ref: dict[str, str]) -> dict[str, Any]
     ):
         raise ValueError("proposal.basis_gap_ids must be a string list")
     require_unique(gaps, "proposal.basis_gap_ids")
-    if proposal["proposal_only"] is not True or proposal["novelty_claimed"] is not False:
+    if (
+        proposal["proposal_only"] is not True
+        or proposal["novelty_claimed"] is not False
+    ):
         raise ValueError("v1 proposal must remain proposal-only and non-novelty")
     if proposal["review_gate"] != "pending_research_knowledge_network_validation":
         raise ValueError("v1 proposal review_gate is invalid")
@@ -475,9 +669,10 @@ def validate_basis(value: Any, label: str) -> dict[str, Any]:
         require_string(basis[field], f"{label}.{field}")
     for field in digest_fields:
         require_digest(basis[field], f"{label}.{field}")
-    if Path(basis["source_ref"]).name != basis["source_ref"] or "://" in basis[
-        "source_ref"
-    ]:
+    if (
+        Path(basis["source_ref"]).name != basis["source_ref"]
+        or "://" in basis["source_ref"]
+    ):
         raise ValueError(f"{label}.source_ref must be a local artifact filename")
     if "://" in basis["evidence_locator"]:
         raise ValueError(f"{label}.evidence_locator must be source-rooted, not a URL")
@@ -511,9 +706,7 @@ def validate_basis(value: Any, label: str) -> dict[str, Any]:
     return basis
 
 
-def validate_proposal_v2(
-    value: Any, network_ref: dict[str, str]
-) -> dict[str, Any]:
+def validate_proposal_v2(value: Any, network_ref: dict[str, str]) -> dict[str, Any]:
     proposal = require_object(value, "proposal")
     require_keys(
         proposal,
@@ -551,7 +744,10 @@ def validate_proposal_v2(
     for field in ("request_set_digest", "review_request_set_digest"):
         require_digest(request_ref[field], f"proposal.request_ref.{field}")
     require_timestamp(proposal["generated_at"], "proposal.generated_at")
-    if proposal["proposal_only"] is not True or proposal["novelty_claimed"] is not False:
+    if (
+        proposal["proposal_only"] is not True
+        or proposal["novelty_claimed"] is not False
+    ):
         raise ValueError("proposal must remain proposal-only and non-novelty")
     if proposal["review_gate"] != "pending_research_knowledge_network_acceptance":
         raise ValueError("proposal.review_gate must remain pending acceptance")
@@ -589,8 +785,12 @@ def validate_proposal_v2(
             raise ValueError(f"{label}.action_status must be proposed or blocked")
         require_string(action["hypothesis_id"], f"{label}.hypothesis_id")
         require_string(action["hypothesis"], f"{label}.hypothesis")
-        signature = require_object(action["target_signature"], f"{label}.target_signature")
-        require_keys(signature, {"target_kind", "signature"}, f"{label}.target_signature")
+        signature = require_object(
+            action["target_signature"], f"{label}.target_signature"
+        )
+        require_keys(
+            signature, {"target_kind", "signature"}, f"{label}.target_signature"
+        )
         target_kind = signature.get("target_kind")
         if target_kind not in ACTION_FOR_TARGET_KIND:
             raise ValueError(f"{label}.target_signature.target_kind is invalid")
@@ -822,9 +1022,7 @@ def validate_evidence_pack(
             loaded[role] = None
         else:
             try:
-                loaded[role] = require_object(
-                    json.loads(raw.decode("utf-8")), label
-                )
+                loaded[role] = require_object(json.loads(raw.decode("utf-8")), label)
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                 raise ValueError(f"{label} must be UTF-8 JSON") from exc
         if declared != observed:
@@ -840,10 +1038,13 @@ def validate_evidence_pack(
     verification_root, tree_digest, verification_files = _verification_tree_snapshot(
         verification_ref["path"]
     )
-    if require_digest(
-        verification_ref["tree_sha256"],
-        "evidence_pack.verification_root.tree_sha256",
-    ) != tree_digest:
+    if (
+        require_digest(
+            verification_ref["tree_sha256"],
+            "evidence_pack.verification_root.tree_sha256",
+        )
+        != tree_digest
+    ):
         raise ValueError("evidence_pack verification tree digest mismatch")
     expected_pack_digest = digest_json(without(pack, "pack_id", "pack_digest"))
     if pack["pack_digest"] != expected_pack_digest:
@@ -1123,9 +1324,7 @@ def validate_authority_basis(value: Any, label: str) -> dict[str, Any]:
 def verify_authority_artifacts(
     acceptance: dict[str, Any], acceptance_path: str
 ) -> None:
-    acceptance_file = _canonical_absolute_path(
-        acceptance_path, "acceptance.path"
-    )
+    acceptance_file = _canonical_absolute_path(acceptance_path, "acceptance.path")
     authority_root = acceptance_file.parent
     for index, basis in enumerate(acceptance["operator"]["authority_basis"]):
         relative_text = basis["source_ref"]
@@ -1155,6 +1354,7 @@ def validate_acceptance(
     proposal: dict[str, Any],
     plan: dict[str, Any],
     network_ref: dict[str, str],
+    appraisal_gate: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     acceptance = require_object(value, "acceptance")
     require_keys(
@@ -1173,9 +1373,14 @@ def validate_acceptance(
         },
         "acceptance",
     )
-    if acceptance["schema"] != ACCEPTANCE_SCHEMA or acceptance["schema_version"] != "1.0":
+    if (
+        acceptance["schema"] != ACCEPTANCE_SCHEMA
+        or acceptance["schema_version"] != "1.0"
+    ):
         raise ValueError("acceptance schema/version invalid")
-    validate_network_ref(acceptance["network_ref"], network_ref, "acceptance.network_ref")
+    validate_network_ref(
+        acceptance["network_ref"], network_ref, "acceptance.network_ref"
+    )
     proposal_ref = require_object(acceptance["proposal_ref"], "acceptance.proposal_ref")
     require_keys(
         proposal_ref, {"proposal_id", "proposal_digest"}, "acceptance.proposal_ref"
@@ -1202,9 +1407,9 @@ def validate_acceptance(
     if not isinstance(authority, list) or not authority:
         raise ValueError("acceptance.operator.authority_basis must be non-empty")
     authority_ids = [
-        validate_authority_basis(
-            item, f"acceptance.operator.authority_basis[{index}]"
-        )["basis_id"]
+        validate_authority_basis(item, f"acceptance.operator.authority_basis[{index}]")[
+            "basis_id"
+        ]
         for index, item in enumerate(authority)
     ]
     require_unique(authority_ids, "acceptance authority basis IDs")
@@ -1228,9 +1433,10 @@ def validate_acceptance(
             },
             label,
         )
-        if decision["action_id"] != action["action_id"] or decision[
-            "action_digest"
-        ] != action["action_digest"]:
+        if (
+            decision["action_id"] != action["action_id"]
+            or decision["action_digest"] != action["action_digest"]
+        ):
             raise ValueError(f"{label} does not bind its ordered proposal action")
         if decision["decision"] not in DECISIONS:
             raise ValueError(f"{label}.decision invalid")
@@ -1248,13 +1454,8 @@ def validate_acceptance(
             raise ValueError(f"{label} accepted action requires typed operations")
         if decision["decision"] != "accept" and operations:
             raise ValueError(f"{label} reject/defer must not contain operations")
-        if (
-            decision["decision"] == "accept"
-            and action["action_status"] == "blocked"
-        ):
-            raise ValueError(
-                f"{label} blocked action cannot be accepted or applied"
-            )
+        if decision["decision"] == "accept" and action["action_status"] == "blocked":
+            raise ValueError(f"{label} blocked action cannot be accepted or applied")
         operation_types: list[str] = []
         action_basis = {
             (basis["basis_id"], basis["basis_digest"]): basis
@@ -1282,8 +1483,25 @@ def validate_acceptance(
                 resolved_basis.append(basis)
             if operation["operation_type"] == "add-evidence":
                 if len(resolved_basis) != 1:
-                    raise ValueError(f"{label} add-evidence must bind exactly one basis")
+                    raise ValueError(
+                        f"{label} add-evidence must bind exactly one basis"
+                    )
                 basis = resolved_basis[0]
+                binding_row = (
+                    _binding_row(appraisal_gate, action, basis)
+                    if appraisal_gate is not None
+                    else None
+                )
+                projected_relation = (
+                    binding_row["allowed_relation"]
+                    if binding_row is not None
+                    else "supports"
+                )
+                independence_group = (
+                    binding_row["independence_group"]
+                    if binding_row is not None
+                    else source_independence_group(basis)
+                )
                 expected_evidence = {
                     "evidence_id": basis["evidence_id"],
                     "claim_id": (
@@ -1292,9 +1510,9 @@ def validate_acceptance(
                         else basis["claim_id"]
                     ),
                     "source_id": basis["source_id"],
-                    "polarity": "supports",
+                    "polarity": projected_relation,
                     "exact_locator": basis["evidence_locator"],
-                    "independence_group": source_independence_group(basis),
+                    "independence_group": independence_group,
                     "summary": action["hypothesis"],
                     "notes": "accepted from NetworkPatchProposal/v2",
                     "supersedes": None,
@@ -1355,12 +1573,16 @@ def validate_acceptance(
                     )
             elif operation["operation_type"] == "transition-gap":
                 if payload["gap_id"] != action["hypothesis_id"]:
-                    raise ValueError(f"{label} gap transition targets another hypothesis")
+                    raise ValueError(
+                        f"{label} gap transition targets another hypothesis"
+                    )
                 if {
                     (ref["basis_id"], ref["basis_digest"])
                     for ref in operation["basis_refs"]
                 } != set(action_basis_order):
-                    raise ValueError(f"{label} gap transition must bind every action basis")
+                    raise ValueError(
+                        f"{label} gap transition must bind every action basis"
+                    )
                 if set(payload["evidence_refs"]) != {
                     basis["evidence_id"] for basis in action["reviewed_evidence"]
                 }:
@@ -1382,7 +1604,9 @@ def validate_acceptance(
                 if transition_operations:
                     expected_types.append("transition-gap")
                 if operation_types != expected_types:
-                    raise ValueError(f"{label} relation operation sequence is not canonical")
+                    raise ValueError(
+                        f"{label} relation operation sequence is not canonical"
+                    )
                 if (
                     len(node_operations) != 1
                     or len(evidence_operations) != len(action_basis)
@@ -1394,11 +1618,21 @@ def validate_acceptance(
                     for _, basis in evidence_operations
                 ]
                 if observed_basis_order != action_basis_order:
-                    raise ValueError(f"{label} evidence operations cross or reorder bases")
-                for relation, identity in zip(
-                    relation_operations, action_basis_order
-                ):
+                    raise ValueError(
+                        f"{label} evidence operations cross or reorder bases"
+                    )
+                for relation, identity in zip(relation_operations, action_basis_order):
                     basis = action_basis[identity]
+                    binding_row = (
+                        _binding_row(appraisal_gate, action, basis)
+                        if appraisal_gate is not None
+                        else None
+                    )
+                    projected_relation = (
+                        binding_row["allowed_relation"]
+                        if binding_row is not None
+                        else "supports"
+                    )
                     relation_payload = relation["payload"]
                     if relation["basis_refs"] != [
                         {"basis_id": identity[0], "basis_digest": identity[1]}
@@ -1407,8 +1641,10 @@ def validate_acceptance(
                             f"{label} relation operation must bind one ordered basis"
                         )
                     expected_relation = {
-                        "relation_id": relation_operation_id(action, basis),
-                        "relation_type": "supports",
+                        "relation_id": relation_operation_id(
+                            action, basis, projected_relation
+                        ),
+                        "relation_type": projected_relation,
                         "from_ref": "claim:" + target_claim_id(action),
                         "to_ref": "evidence:" + basis["evidence_id"],
                         "notes": "network-patch-action:" + action["action_digest"],
@@ -1423,18 +1659,20 @@ def validate_acceptance(
                 if transition_operations:
                     expected_types.append("transition-gap")
                 if operation_types != expected_types or len(action_basis) != 1:
-                    raise ValueError(f"{label} evidence action requires one exact basis")
+                    raise ValueError(
+                        f"{label} evidence action requires one exact basis"
+                    )
                 if evidence_operations[0][0]["payload"]["evidence_id"] != signature:
-                    raise ValueError(f"{label} evidence does not match target signature")
+                    raise ValueError(
+                        f"{label} evidence does not match target signature"
+                    )
             else:
                 raise ValueError(
                     f"{label} propose_node acceptance requires a closed target_node"
                 )
     require_unique(operation_ids, "acceptance operation IDs")
     require_unique(operation_digests, "acceptance operation digests")
-    expected = digest_json(
-        without(acceptance, "acceptance_id", "acceptance_digest")
-    )
+    expected = digest_json(without(acceptance, "acceptance_id", "acceptance_digest"))
     if acceptance["acceptance_digest"] != expected:
         raise ValueError("acceptance.acceptance_digest mismatch")
     if acceptance["acceptance_id"] != f"network-patch-acceptance-{expected[:16]}":
@@ -1493,6 +1731,9 @@ def command_validate(args: argparse.Namespace) -> int:
                 network_ref,
                 live_network=live_network,
             )
+            appraisal_gate, _ = _load_optional_appraisal_gate(
+                args, proposal, network_ref, paths, records
+            )
             output = {
                 "schema": VALIDATION_SCHEMA,
                 "proposal_schema": PATCH_V2_SCHEMA,
@@ -1500,8 +1741,17 @@ def command_validate(args: argparse.Namespace) -> int:
                 "proposal_digest": proposal["proposal_digest"],
                 "network_ref": network_ref,
                 "valid": True,
-                "apply_eligible": True,
-                "reason": "explicit_acceptance_still_required",
+                "apply_eligible": appraisal_gate is not None,
+                "appraisal_status": (
+                    "reviewed_appraisal"
+                    if appraisal_gate is not None
+                    else "not_appraised_legacy"
+                ),
+                "reason": (
+                    "explicit_acceptance_still_required"
+                    if appraisal_gate is not None
+                    else "finalized_appraisal_binding_and_reviewed_projection_required"
+                ),
             }
     print(json.dumps(output, ensure_ascii=False, sort_keys=True, indent=2))
     return 0
@@ -1528,6 +1778,31 @@ def _safe_plan_output(root: Path, raw_output: str) -> Path:
     return output
 
 
+def _safe_control_output(
+    root: Path, directory_name: str, raw_output: str, label: str
+) -> Path:
+    directory = root / directory_name
+    if directory.exists() or directory.is_symlink():
+        metadata = directory.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError(f"{label} root must be a non-symlink directory")
+    else:
+        directory.mkdir(mode=0o700)
+        kn._fsync_directory(root)
+    output = Path(raw_output).expanduser()
+    if not output.is_absolute():
+        output = root / output
+    if Path(os.path.normpath(str(output))) != output:
+        raise ValueError(f"{label} output must be a canonical path")
+    if output.parent != directory or not output.name or output.name.startswith("."):
+        raise ValueError(
+            f"{label} output must be a direct child of <root>/{directory_name}"
+        )
+    if os.path.lexists(output):
+        raise ValueError(f"{label} output already exists; overwrite is forbidden")
+    return output
+
+
 def _write_json_exclusive_atomic(path: Path, payload: dict[str, Any]) -> None:
     temporary: Path | None = None
     try:
@@ -1546,10 +1821,124 @@ def _write_json_exclusive_atomic(path: Path, payload: dict[str, Any]) -> None:
         os.link(temporary, path, follow_symlinks=False)
         kn._fsync_directory(path.parent)
     except FileExistsError as exc:
-        raise ValueError("plan output appeared concurrently; overwrite refused") from exc
+        raise ValueError(
+            "plan output appeared concurrently; overwrite refused"
+        ) from exc
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+def command_bind_appraisal(args: argparse.Namespace) -> int:
+    paths = kn._safe_paths(args.root, args.network_id)
+    with kn._exclusive_lock(paths):
+        state, records, network_ref = validate_live_network(paths)
+        live_network = kn._knowledge_network_export(paths, state, records)
+        proposal = validate_proposal_v2(
+            read_contract(args.proposal, "proposal"), network_ref
+        )
+        require_onboarded_sources(proposal, live_network)
+        evidence_pack = read_contract(args.evidence_pack, "evidence_pack")
+        validate_evidence_pack(
+            evidence_pack,
+            proposal,
+            network_ref,
+            live_network=live_network,
+        )
+        package = read_contract(args.appraisal_package, "appraisal package")
+        approval = read_contract(args.appraisal_approval, "appraisal approval")
+        prepared = read_contract(args.appraisal_prepared, "appraisal preparation")
+        independent_review = read_contract(
+            args.appraisal_independent_review, "appraisal independent review"
+        )
+        owner_bundle = read_contract(
+            args.appraisal_owner_bundle, "appraisal owner bundle"
+        )
+        lineage = [
+            read_contract(path, f"appraisal lineage[{index}]")
+            for index, path in enumerate(args.appraisal_lineage)
+        ]
+        binding = appraisal_binding.create_binding(
+            package,
+            approval,
+            prepared,
+            independent_review,
+            owner_bundle,
+            lineage,
+            args.expected_authority_sha256,
+            proposal,
+            network_ref,
+            kn._scientific_binding_guard(paths, records),
+            kn._claim_scopes_from_records(records),
+            bound_at=args.as_of,
+        )
+        output_path = _safe_control_output(
+            paths.root,
+            "appraisal-bindings",
+            args.output,
+            "appraisal binding",
+        )
+        _write_json_exclusive_atomic(output_path, binding)
+    print(json.dumps(binding, ensure_ascii=False, sort_keys=True, indent=2))
+    return 0
+
+
+def command_review_appraisal(args: argparse.Namespace) -> int:
+    paths = kn._safe_paths(args.root, args.network_id)
+    with kn._exclusive_lock(paths):
+        _, records, network_ref = validate_live_network(paths)
+        proposal = validate_proposal_v2(
+            read_contract(args.proposal, "proposal"), network_ref
+        )
+        package = read_contract(args.appraisal_package, "appraisal package")
+        approval = read_contract(args.appraisal_approval, "appraisal approval")
+        prepared = read_contract(args.appraisal_prepared, "appraisal preparation")
+        independent_review = read_contract(
+            args.appraisal_independent_review, "appraisal independent review"
+        )
+        owner_bundle = read_contract(
+            args.appraisal_owner_bundle, "appraisal owner bundle"
+        )
+        lineage = [
+            read_contract(path, f"appraisal lineage[{index}]")
+            for index, path in enumerate(args.appraisal_lineage)
+        ]
+        binding_value = read_contract(args.appraisal_binding, "appraisal binding")
+        prefix_counts = {
+            name: int(binding_value["network_guard"]["ledgers"][name]["record_count"])
+            for name in kn.LEDGER_NAMES
+        }
+        binding = appraisal_binding.validate_binding(
+            binding_value,
+            package,
+            approval,
+            prepared,
+            independent_review,
+            owner_bundle,
+            lineage,
+            args.expected_authority_sha256,
+            proposal,
+            network_ref,
+            kn._claim_scopes_from_records(records, prefix_counts=prefix_counts),
+        )
+        if kn._scientific_binding_guard(paths, records) != binding["network_guard"]:
+            raise ValueError("appraisal binding is stale before projection review")
+        review = read_contract(args.review, "projection review")
+        projection = appraisal_binding.create_reviewed_projection(
+            binding,
+            proposal,
+            review,
+            reviewed_at=args.as_of,
+        )
+        output_path = _safe_control_output(
+            paths.root,
+            "appraisal-projections",
+            args.output,
+            "appraisal projection",
+        )
+        _write_json_exclusive_atomic(output_path, projection)
+    print(json.dumps(projection, ensure_ascii=False, sort_keys=True, indent=2))
+    return 0
 
 
 def command_prepare(args: argparse.Namespace) -> int:
@@ -1569,6 +1958,7 @@ def command_prepare(args: argparse.Namespace) -> int:
             network_ref,
             live_network=live_network,
         )
+        _load_optional_appraisal_gate(args, proposal, network_ref, paths, records)
         plan = create_plan(proposal, network_ref)
         output_path = _safe_plan_output(paths.root, args.output)
         _write_json_exclusive_atomic(output_path, plan)
@@ -1606,7 +1996,10 @@ def operation_arguments(operation: dict[str, Any]) -> list[str]:
 
 
 def execute_staged_operation(
-    staging_root: Path, network_id: str, operation: dict[str, Any]
+    staging_root: Path,
+    network_id: str,
+    operation: dict[str, Any],
+    appraisal_cli_args: list[str],
 ) -> None:
     stdout = io.StringIO()
     stderr = io.StringIO()
@@ -1616,12 +2009,17 @@ def execute_staged_operation(
         "--network-id",
         network_id,
         *operation_arguments(operation),
+        *appraisal_cli_args,
     ]
     with redirect_stdout(stdout), redirect_stderr(stderr):
         result = kn.main(argv)
     if result != 0:
-        reason = stderr.getvalue().strip() or stdout.getvalue().strip() or "unknown error"
-        raise ValueError(f"typed operation {operation['operation_id']} failed: {reason}")
+        reason = (
+            stderr.getvalue().strip() or stdout.getvalue().strip() or "unknown error"
+        )
+        raise ValueError(
+            f"typed operation {operation['operation_id']} failed: {reason}"
+        )
 
 
 def reject_prior_terminal_decisions(
@@ -1646,11 +2044,16 @@ def reject_prior_terminal_decisions(
         if decision["action_digest"] in terminal
     )
     if repeated:
-        raise ValueError(f"proposal actions already have terminal decisions: {repeated}")
+        raise ValueError(
+            f"proposal actions already have terminal decisions: {repeated}"
+        )
 
 
 def decision_event(
-    proposal: dict[str, Any], plan: dict[str, Any], acceptance: dict[str, Any]
+    proposal: dict[str, Any],
+    plan: dict[str, Any],
+    acceptance: dict[str, Any],
+    appraisal_gate: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload = {
         "event_type": "patch_decision",
@@ -1663,6 +2066,20 @@ def decision_event(
         "acceptance_digest": acceptance["acceptance_digest"],
         "decided_at": acceptance["decided_at"],
         "operator": acceptance["operator"],
+        "appraisal_gate": (
+            copy.deepcopy(appraisal_gate["refs"])
+            if appraisal_gate is not None
+            else {
+                "status": "not_appraised_legacy",
+                "appraisal_package_ref": None,
+                "appraisal_set_ref": None,
+                "approval_ref": None,
+                "owner_artifact_binding_digests": None,
+                "expected_authority_sha256": None,
+                "binding_ref": None,
+                "projection_ref": None,
+            }
+        ),
         "decisions": [
             {
                 "action_id": item["action_id"],
@@ -1704,13 +2121,33 @@ def command_apply(args: argparse.Namespace) -> int:  # noqa: C901
             network_ref,
             live_network=live_network,
         )
+        appraisal_gate, appraisal_cli_args = _load_optional_appraisal_gate(
+            args, proposal, network_ref, paths, records
+        )
         plan = validate_plan(plan_value, proposal, network_ref)
         acceptance = validate_acceptance(
-            acceptance_value, proposal, plan, network_ref
+            acceptance_value,
+            proposal,
+            plan,
+            network_ref,
+            appraisal_gate=appraisal_gate,
         )
+        accepted_science = any(
+            decision["decision"] == "accept" and decision["operations"]
+            for decision in acceptance["decisions"]
+        )
+        if accepted_science and appraisal_gate is None:
+            raise ValueError(
+                "accepted scientific mutation requires finalized appraisal binding "
+                "and reviewed exact-operation projection; legacy patch artifacts are read-only"
+            )
+        if accepted_science:
+            validate_appraised_acceptance(acceptance, appraisal_gate, records)
         verify_authority_artifacts(acceptance, args.acceptance)
         reject_prior_terminal_decisions(records, acceptance)
-        with tempfile.TemporaryDirectory(prefix=".network-patch-", dir=paths.root) as raw:
+        with tempfile.TemporaryDirectory(
+            prefix=".network-patch-", dir=paths.root
+        ) as raw:
             staging_root = Path(raw)
             staging_parent = staging_root / kn.NETWORK_ROOT
             staging_parent.mkdir(parents=True)
@@ -1723,12 +2160,17 @@ def command_apply(args: argparse.Namespace) -> int:  # noqa: C901
                 if decision["decision"] == "accept":
                     for operation in decision["operations"]:
                         execute_staged_operation(
-                            staging_root, paths.network_id, operation
+                            staging_root,
+                            paths.network_id,
+                            operation,
+                            appraisal_cli_args,
                         )
             staging_paths = kn._safe_paths(str(staging_root), paths.network_id)
             with kn._exclusive_lock(staging_paths):
                 staged_state, staged_records = kn._load_state(staging_paths)
-                event_payload = decision_event(proposal, plan, acceptance)
+                event_payload = decision_event(
+                    proposal, plan, acceptance, appraisal_gate
+                )
                 record_id = kn._record_id(
                     "event", "patch", event_payload["event_digest"][:16]
                 )
@@ -1759,12 +2201,16 @@ def command_apply(args: argparse.Namespace) -> int:  # noqa: C901
                 "plan_digest": plan["plan_digest"],
                 "acceptance_id": acceptance["acceptance_id"],
                 "acceptance_digest": acceptance["acceptance_digest"],
+                "appraisal_status": (
+                    "reviewed_appraisal"
+                    if appraisal_gate is not None
+                    else "not_appraised_legacy"
+                ),
                 "before_network_ref": network_ref,
                 "after_network_ref": after_ref,
                 "decision_counts": {
                     decision: sum(
-                        item["decision"] == decision
-                        for item in acceptance["decisions"]
+                        item["decision"] == decision for item in acceptance["decisions"]
                     )
                     for decision in sorted(DECISIONS)
                 },
@@ -1790,14 +2236,28 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--root", required=True)
     parser.add_argument("--network-id", required=True)
     commands = parser.add_subparsers(dest="command", required=True)
+
+    def add_appraisal_gate(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--appraisal-package")
+        command.add_argument("--appraisal-approval")
+        command.add_argument("--appraisal-prepared")
+        command.add_argument("--appraisal-independent-review")
+        command.add_argument("--appraisal-owner-bundle")
+        command.add_argument("--appraisal-lineage", action="append", default=[])
+        command.add_argument("--expected-authority-sha256")
+        command.add_argument("--appraisal-binding")
+        command.add_argument("--appraisal-projection")
+
     validate = commands.add_parser("validate-patch")
     validate.add_argument("--proposal", required=True)
     validate.add_argument("--evidence-pack", required=True)
+    add_appraisal_gate(validate)
     validate.set_defaults(func=command_validate)
     prepare = commands.add_parser("prepare-patch")
     prepare.add_argument("--proposal", required=True)
     prepare.add_argument("--evidence-pack", required=True)
     prepare.add_argument("--output", required=True)
+    add_appraisal_gate(prepare)
     prepare.set_defaults(func=command_prepare)
     apply = commands.add_parser("apply-patch")
     apply.add_argument("--proposal", required=True)
@@ -1805,7 +2265,35 @@ def build_parser() -> argparse.ArgumentParser:
     apply.add_argument("--plan", required=True)
     apply.add_argument("--acceptance", required=True)
     apply.add_argument("--dry-run", action="store_true")
+    add_appraisal_gate(apply)
     apply.set_defaults(func=command_apply)
+    bind = commands.add_parser("bind-appraisal")
+    bind.add_argument("--proposal", required=True)
+    bind.add_argument("--evidence-pack", required=True)
+    bind.add_argument("--appraisal-package", required=True)
+    bind.add_argument("--appraisal-approval", required=True)
+    bind.add_argument("--appraisal-prepared", required=True)
+    bind.add_argument("--appraisal-independent-review", required=True)
+    bind.add_argument("--appraisal-owner-bundle", required=True)
+    bind.add_argument("--appraisal-lineage", action="append", default=[])
+    bind.add_argument("--expected-authority-sha256", required=True)
+    bind.add_argument("--as-of", required=True)
+    bind.add_argument("--output", required=True)
+    bind.set_defaults(func=command_bind_appraisal)
+    review = commands.add_parser("review-appraisal")
+    review.add_argument("--proposal", required=True)
+    review.add_argument("--appraisal-package", required=True)
+    review.add_argument("--appraisal-approval", required=True)
+    review.add_argument("--appraisal-prepared", required=True)
+    review.add_argument("--appraisal-independent-review", required=True)
+    review.add_argument("--appraisal-owner-bundle", required=True)
+    review.add_argument("--appraisal-lineage", action="append", default=[])
+    review.add_argument("--expected-authority-sha256", required=True)
+    review.add_argument("--appraisal-binding", required=True)
+    review.add_argument("--review", required=True)
+    review.add_argument("--as-of", required=True)
+    review.add_argument("--output", required=True)
+    review.set_defaults(func=command_review_appraisal)
     return parser
 
 

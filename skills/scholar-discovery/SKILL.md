@@ -123,3 +123,59 @@ Call that bounded pragmatic saturation, never systematic-review completeness.
 
 Read [research-basis.md](references/research-basis.md) when maintaining provider
 routing, Google Scholar policy, deduplication, ranking, or evaluation design.
+
+## Search-history gate
+
+Before an adversarial or targeted round, build a
+`HistoryAuthorityCandidate/v1`, obtain a separate
+`ReviewedHistoryAuthority/v1` with an approved decision, complete-universe
+omission attestation, and independent reviewer context, then finalize the
+`HistoryAuthorityManifest/v1`. Run `build-history` over the exact current
+and historical artifact universe named by that manifest. The content-addressed
+`SearchHistoryIndex/v1` records requested queries, unselected-query leakage,
+failed/partial/empty attempts, result queries, and candidate-title semantics.
+Downstream gap compilation rejects exact and semantic-paraphrase reuse rather
+than accepting a renamed query as orthogonal.
+
+The index embeds its complete validated artifact universe, binds the authority
+digest, and is replayed from that exact authority-approved universe on every
+read. A rehashed whole-source deletion or self-reported smaller source list is
+invalid. Results bind the exact request and compiled-plan digests; every
+planned query must be represented by an event, unresolved row, or failure row.
+
+Neither `partial_provider` nor an empty result resolves a targeted appraisal
+need. Provider absence is not evidence of novelty, nonexistence, or truth.
+
+Appraisal requests use `AppraisalScholarDiscoveryRequestSet/v1` and only
+`execute-appraisal`. Generic `execute` rejects that schema, while the
+appraisal entrypoint rejects generic sets.
+
+Neither entrypoint may contact a provider from request validation alone. Build
+a separate `ReviewedSearchExecutionAuthorization/v1` with
+`authorize-request-set`, then supply both that artifact and the caller-held
+`expected_execution_authority_sha256`, defined strictly as the SHA-256 of the
+actual authorization file bytes. The CLI computes the actual file SHA itself;
+Python callers must supply the actual request-set and authorization artifact
+paths. The owner opens each as a regular, non-symlink file, requires its parsed
+object to equal the supplied object, and computes both raw-file SHA-256 values
+from those bytes. Caller-supplied SHA values are optional equality cross-checks,
+never substitutes for the files. The authorization owner-replays the
+exact request-set file SHA, full content digest, schema, execution profile,
+ordered request IDs/digests/queries, approved decision, and independent
+reviewer context. Missing authorization, a wrong external pin, or a rehashed
+schema/ID/query rewrite fails before transport. Ordinary `validate` remains
+available without execution authorization and never performs provider access.
+The internal `authorization_digest` is independently recomputed for content
+integrity and is never accepted as a substitute for the external file pin.
+`request_set_file_sha256` is required by `authorize-request-set`,
+`execute`, and `execute-appraisal`. Missing values, a pretty/rewritten
+request-set hash mismatch, or an external pin mismatch fail before any
+transport is reachable.
+
+A `complete_bounded` result is valid only when every planned query is complete,
+untruncated, within budget, and has no unresolved row or blocking provider
+failure. Partial or blocked statuses must be supported by the corresponding
+events, failures, unresolved queries, truncation, or budget state. The sole
+nonblocking blocked occurrence is an explicitly optional manual Google Scholar
+route whose artifact origin is `not_provided_manual_optional`; it cannot stand
+in for automatic provider coverage.

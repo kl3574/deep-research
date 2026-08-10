@@ -13,7 +13,7 @@ requires a prespecified protocol.
 ## Core loop
 
 Run `scope -> map -> gap -> discover -> inspect -> extract -> countercheck ->
-merge -> citation audit -> stop or continue`. Each action must close a named gap
+appraise -> merge -> citation audit -> stop or continue`. Each action must close a named gap
 or improve a decision-critical claim. Compare only aligned routes. Use
 [research-decomposition.md](references/research-decomposition.md) for mapping and
 [execution-loop.md](references/execution-loop.md) for controller, parallelism,
@@ -47,6 +47,15 @@ versions. Explain conflicts; never vote them away.
   `PaperUnderstanding/v1` plus an `UnderstandingNetworkProjection/v1` adapter.
   Record that routing in `PaperUnderstandingRoute/v1`; never copy, repair,
   summarize, or revalidate the five semantic domains inside this orchestrator.
+- Route claim/evidence fitness checks, adversarial challenges, unresolved
+  conflicts, and targeted missing-evidence needs to `$evidence-appraisal`.
+  A candidate `EvidenceAppraisalSet/v1` is not terminal authority: require the
+  owner-replayable package, detached approval, prepared request, independent
+  review, actual `EvidenceAppraisalOwnerBundle/v1` files and receipts, complete
+  predecessor lineage, and the externally expected authority
+  digest. Route its open challenges and targeted needs back through bounded
+  countercheck/discovery; appraisal never establishes absence, completeness,
+  novelty, or a no-add streak.
 - If a compatible knowledge network is supplied or requested, audit it first,
   then use `$network-gap-discovery` for falsifiable open-world gap hypotheses and
   `$scholar-discovery` for bounded candidate discovery. Otherwise run a bounded
@@ -58,7 +67,11 @@ versions. Explain conflicts; never vote them away.
 - In a compound pipeline, do not equate terminated discovery actions with full
   provider/route coverage. Bind the validated result set: record
   `topic_discovery=completed` only for all-`complete_bounded` results without
-  request failures; record usable incomplete results as `partial`. Partial stages
+  request failures and explicit one-try-per-path/attempt coverage. Multiple
+  `ScholarDiscoveryResultSet/v2` for one request set must use
+  `ScholarDiscoveryResultSetAttempt/v1` linear supersession (`attempt` +
+  `supersedes_attempt`); otherwise reject. Record usable incomplete results as
+  `partial`. Partial stages
   may feed bounded downstream work but can never enable complete finalization.
 - Route accepted candidate identities to `$scholarly-source-acquisition` for a
   legal, hash-verified full-text attempt. Before `$learn-from-papers`, route each
@@ -80,7 +93,8 @@ For Tier A machine handoff, require a verified `PaperSourceBundle/v1`, audited
 attestation fields are protocol records, not semantic truth or authenticated
 verifier identity. A `decisive` projection is only eligible under its declared
 trust policy. Never relabel `refutes`, `qualifies`, or `not_tested` as support,
-and never mutate a research knowledge network without its explicit governance
+and never mutate a research knowledge network without both its owner-validated
+appraisal binding/reviewed exact-operation projection and explicit governance
 acceptance.
 
 When rich understanding is requested, additionally require the upstream
@@ -124,6 +138,19 @@ round may be an observed no-add, but never a qualifying no-add. Only the final
 two consecutive qualifying rounds in the complete plan, with disjoint
 request/query IDs and pre-reviewed orthogonal axes, can support bounded
 `pragmatic_saturation`.
+
+In this skill runtime, every `status`/`validate`/`record-stage` path replays
+terminal owner-gated stage artifacts before accepting progression. For
+`topic_discovery`, `evidence_appraisal`, and `network_publish`, that includes
+`completed`/`partial` and `blocked` states that have retained coverage artifacts:
+
+- replay `topic_discovery` request-set/result-set/authorization binding proofs;
+- replay `evidence_appraisal` owner packages through the live owner API contract;
+- replay `network_publish` via the public owner contract in
+  `research-network-publish` and compare rendered publication HTML by hash.
+
+JSON parsing in these replay paths uses duplicate-key-safe loading so malformed
+top-level key collisions are rejected as key policy errors, not silently coalesced.
 
 If an already closed partial-provider round must follow a newer RKN authority
 whose only changes are reviewed Zotero-corpus revision guards, never reseal the

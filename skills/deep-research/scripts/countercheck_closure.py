@@ -25,7 +25,7 @@ STREAK_INPUT_SCHEMA = "CountercheckStreakInput/v1"
 STREAK_OUTPUT_SCHEMA = "CountercheckPragmaticSaturationAssessment/v1"
 AXIS_PLAN_SCHEMA = "CountercheckAxisPlan/v1"
 REQUEST_SCHEMA = "ScholarDiscoveryRequestSet/v1"
-RESULT_SCHEMA = "ScholarDiscoveryResultSet/v1"
+RESULT_SCHEMA = "ScholarDiscoveryResultSet/v2"
 SCREENING_SCHEMA = "CountercheckScreeningSet/v1"
 REVIEW_SCHEMA = "CountercheckTierAReviewSet/v1"
 NETWORK_SCHEMA = "KnowledgeNetwork/v1"
@@ -94,6 +94,7 @@ ROUND_INPUT_FIELDS = {
     "previous_closure_ref",
     "search_axis",
     "request_set_ref",
+    "execution_authorization_ref",
     "result_set_ref",
     "screening_ref",
     "tier_a_review_ref",
@@ -837,6 +838,7 @@ def _validate_request_set(value: dict[str, Any]) -> dict[str, Any]:
     if len(request_ids) != len(set(request_ids)):
         raise ContractError("request IDs must be unique")
     return {
+        "request_set": value,
         "request_set_id": require_string(value.get("request_set_id"), "request_set_id"),
         "request_set_digest": require_hex(
             value.get("request_set_digest"), "request_set_digest"
@@ -926,9 +928,29 @@ def _result_failure_status(value: dict[str, Any], label: str) -> str:
 
 
 def _validate_results(
-    value: dict[str, Any], request_info: dict[str, Any], network: dict[str, str]
+    value: dict[str, Any],
+    request_info: dict[str, Any],
+    network: dict[str, str],
+    *,
+    execution_authority: dict[str, Any],
+    execution_authority_file_sha256: str,
+    request_set_file_sha256: str,
 ) -> tuple[bool, list[dict[str, str]]]:
-    document = _owner_validate("validate_result_set", value, "result set")
+    try:
+        document = _load_scholar_owner().validate_result_set(
+            copy.deepcopy(value),
+            request_set_value=request_info["request_set"],
+            execution_authority=execution_authority,
+            expected_execution_authority_sha256=(
+                execution_authority_file_sha256
+            ),
+            execution_authority_file_sha256=(
+                execution_authority_file_sha256
+            ),
+            request_set_file_sha256=request_set_file_sha256,
+        )
+    except ValueError as exc:
+        raise ContractError(f"result set failed owner validation: {exc}") from exc
     if document.get("schema") != RESULT_SCHEMA:
         raise ContractError(f"result set schema must be {RESULT_SCHEMA}")
     for field in ("request_set_id", "request_set_digest"):
@@ -1204,6 +1226,10 @@ def close_round(
     request_ref, request_set = load_artifact_ref(
         manifest.get("request_set_ref"), "request_set_ref"
     )
+    execution_authority_ref, execution_authority = load_artifact_ref(
+        manifest.get("execution_authorization_ref"),
+        "execution_authorization_ref",
+    )
     result_ref, result_set = load_artifact_ref(
         manifest.get("result_set_ref"), "result_set_ref"
     )
@@ -1217,7 +1243,14 @@ def close_round(
     if not _network_request_binding_matches(request_info["network_ref"], before):
         raise ContractError("request set does not bind the authoritative network content")
     axis = _validate_axis(manifest.get("search_axis"), request_info, plan_axis)
-    provider_complete, occurrences = _validate_results(result_set, request_info, before)
+    provider_complete, occurrences = _validate_results(
+        result_set,
+        request_info,
+        before,
+        execution_authority=execution_authority,
+        execution_authority_file_sha256=execution_authority_ref["sha256"],
+        request_set_file_sha256=request_ref["sha256"],
+    )
     tier_a_ids = _validate_screening(
         screening, round_id, request_info, result_ref, occurrences
     )
@@ -1271,6 +1304,9 @@ def close_round(
         "network_after": after,
         "artifact_bindings": {
             "request_set": _artifact_binding(request_ref),
+            "execution_authorization": _artifact_binding(
+                execution_authority_ref
+            ),
             "result_set": _artifact_binding(result_ref),
             "screening": _artifact_binding(screening_ref),
             "tier_a_review": _artifact_binding(review_ref),

@@ -1,6 +1,6 @@
 # deep-research
 
-一套面向 Codex agent 的可审计深度调研技能，覆盖十个核心能力和一个
+一套面向 Codex agent 的可审计深度调研技能，覆盖十一个核心能力和一个
 可选的受约束 Zotero 执行能力：
 
 ```text
@@ -12,6 +12,7 @@
   → $scholarly-source-acquisition：合法全文获取、PDF身份与哈希验证
   → $scholarly-document-normalization：本地PDF文本质量分类、OCR衍生与谱系验证
   → $learn-from-papers：对关键单篇论文进行证据级深读与重建
+  → $evidence-appraisal：对已选主张-证据关系作对抗性审查并产生定向证据需要
   → $curate-research-to-zotero：快照、下载、导入、读回，持续同步目标库
   → $repair-zotero-metadata：证据约束的 existing-parent 书目纠错审查
   → $research-network-publish：验证网络的隐私安全自包含 HTML 发布
@@ -19,7 +20,7 @@
 
 “深度”不是堆积来源，而是把时间和模型开销放在真正控制结论的瓶颈上；“可信”不是固定来源排行榜，而是版本、范围、局部适配和失败边界都能被持续验收。
 
-## 十个核心技能与一个受约束执行器
+## 十一个核心技能与一个受约束执行器
 
 | 技能 | 职责 | 典型输入 | 核心产物 |
 | --- | --- | --- | --- |
@@ -30,23 +31,25 @@
 | `$scholar-discovery` | 对一个明确证据需要执行可复现的多源论文发现 | gap search test、主题条件、种子论文 | query plan、检索账本、去重 work families、排序候选与失败状态 |
 | `$scholarly-source-acquisition` | 将已接受候选合法获取为可复验全文资产 | DOI、开放URL、候选身份 | acquisition plan、PDF magic/大小/哈希、失败状态 |
 | `$scholarly-document-normalization` | 分类本地PDF文本质量并生成可追溯OCR衍生物 | 已获取PDF、可选source bundle | 逐页质量、显式skip或searchable PDF谱系、review gate |
+| `$evidence-appraisal` | 对已选关系执行 fail-closed 对抗性证据审查 | prepared request、独立 review、owner bundle | `EvidenceAppraisalSet/v1`、挑战、定向证据需要、批准 package |
 | `$curate-research-to-zotero` | 保存经审核的研究资产 | 来源清单、本地文件、Zotero 目标 | 文件哈希、ingestion manifest、PDF/元数据/笔记同步与 readback |
 | `$repair-zotero-metadata` | 审查已有 parent 的固定字段书目纠错 | 已验证身份、existing-parent 快照、字段证据 | 私有 reviewed repair source、重复冲突或 bridge handoff |
 | `$research-network-publish` | 将验证网络投影为可分享视图 | `KnowledgeNetwork/v1`、可选研究地图 | 自包含 HTML、coverage/gap/conflict 视图、隐私审计 |
 
-十个技能可独立调用，或由 `$deep-research` 统筹。Google Scholar 仅支持用户
+十一个技能可独立调用，或由 `$deep-research` 统筹。Google Scholar 仅支持用户
 手工检索与导出导入；自主检索使用有正式接口的学术数据源，不能抓取 Scholar
 结果页或绕过 CAPTCHA。
 
 可选配套执行器 `$zotero-declarative-bridge` 只负责已审核 manifest 的
 existing-parent collection membership、书目 `shortTitle`、子笔记、单附件，
 以及来自 `$repair-zotero-metadata` 的独立固定 profile parent 修复
-事务。当前待发布组合为仓库 `v0.6.12` 与 bridge `0.1.11`；候选 XPI 的
+事务。当前发布组合为仓库 `v0.7.0` 与 bridge `0.1.11`；候选 XPI 的
 确定性 SHA-256 为
 `a5aabab25da4b61d321172524a1e961a27420f5887bcb49c76e04e27c70d037c`。
 这个摘要只绑定候选构件，不替代真实运行回读。作为历史证据，`v0.6.1` 的
 bridge `0.1.4` 完成真实写入，`0.1.5` 在 Zotero `9.0.6` 中完成激活、受约束
 probe、正向回读和目标集合成员关系负向回读；详情见
+[v0.7.0 release notes](docs/releases/v0.7.0.md) 与
 [historical v0.6.1 release notes](docs/releases/v0.6.1.md)。bridge 仍是显式
 opt-in，不扩大研究、选源、全文理解或 Zotero 内容决策职责。
 
@@ -63,6 +66,7 @@ RAG、主动筛选、研究知识图谱与完整 Zotero 读写闭环，避免把
 - 把 `version-fit`、全文访问、方法适配和来源身份作为硬门，而不是用名望或引用数代替审查；
 - 对关键论文执行 `Question plan → Source bundle → Document graph → Evidence → Reconstruction → Separate-context attestation`；attestation 只记录可审计的上下文声明，不认证主体身份，逐项证据仍保留可重算的页码/字符区间以及图、表、公式或定理定位；
 - 将适用场景、工作流与结构化 I/O、数据流、数学推导依赖、算法步骤和有边界结论固化为内容寻址的 `PaperUnderstanding/v1`；区分 `answered / unresolved / not_applicable` 与 terminal/understood coverage，禁止把终态覆盖冒充理解；
+- `$deep-research` 的当前 11-stage pipeline 在 `paper_understanding` 后执行 `evidence_appraisal`，并在该审查完成前阻止 `network_merge`；
 - 从同一理解对象确定性投影 `PaperUnderstandingNoteInput/v1 → PaperKnowledgeNote/v2`：先给适用场景与结论，再给工作流、数学和算法原理，最后保留证据、边界与溯源；研究检索标题默认只进入子笔记 `<h1>`，只有显式审阅并启用 `decision-oriented` 策略时，才把“适用场景：结论/警示”写入书目 `shortTitle`；
 - 将 `supports / qualifies / refutes / not_tested` 作为不可随意降维的关系；检索 DOI/URL 与证据段落 locator 永远分离；
 - 所有跨来源结论在主张级综合，主动寻找反证并保留未决冲突；
@@ -77,11 +81,11 @@ RAG、主动筛选、研究知识图谱与完整 Zotero 读写闭环，避免把
 ## 安装
 
 ```bash
-git clone --branch v0.6.12 --depth 1 https://github.com/kl3574/deep-research.git
+git clone --branch v0.7.0 --depth 1 https://github.com/kl3574/deep-research.git
 cd deep-research
 mkdir -p ~/.codex/skills
 stamp="$(date +%Y%m%d%H%M%S)"
-for skill in deep-research learn-from-papers research-knowledge-network network-gap-discovery scholar-discovery scholarly-source-acquisition scholarly-document-normalization curate-research-to-zotero repair-zotero-metadata research-network-publish; do
+for skill in deep-research learn-from-papers evidence-appraisal research-knowledge-network network-gap-discovery scholar-discovery scholarly-source-acquisition scholarly-document-normalization curate-research-to-zotero repair-zotero-metadata research-network-publish; do
   if [ -e "$HOME/.codex/skills/$skill" ] || [ -L "$HOME/.codex/skills/$skill" ]; then
     mv "$HOME/.codex/skills/$skill" "$HOME/.codex/skills/${skill}.backup-${stamp}"
   fi
@@ -155,6 +159,12 @@ skills/
 │   ├── SKILL.md
 │   ├── agents/openai.yaml
 │   └── references/
+├── evidence-appraisal/
+│   ├── SKILL.md
+│   ├── agents/openai.yaml
+│   ├── references/
+│   ├── scripts/
+│   └── tests/
 ├── research-knowledge-network/
 │   ├── SKILL.md
 │   ├── agents/openai.yaml
@@ -219,6 +229,8 @@ python scripts/check_public_privacy.py
 python -m unittest discover -s scripts -p 'test_*.py'
 python -m unittest discover -s skills/deep-research/scripts -p 'test_*.py'
 python -m unittest discover -s skills/learn-from-papers/scripts -p 'test_*.py'
+python -m pytest -q skills/evidence-appraisal/scripts/test_evidence_appraisal_seam.py skills/evidence-appraisal/tests/test_contract_adversarial.py
+python skills/evidence-appraisal/scripts/quick_validate.py
 python -m unittest discover -s skills/research-knowledge-network/scripts -p 'test_*.py'
 python -m unittest discover -s skills/network-gap-discovery/scripts -p 'test_*.py'
 python -m unittest discover -s skills/scholar-discovery/scripts -p 'test_*.py'

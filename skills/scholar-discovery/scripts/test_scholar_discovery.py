@@ -1,25 +1,33 @@
 import copy
+import hashlib
 import json
 import os
+import tempfile
 import unittest
 import urllib.parse
+from pathlib import Path
 from unittest import mock
 
 from scholar_discovery import (
     ContractError,
     HTTP_USER_AGENT,
+    validate_result,
     build_preflight,
     build_result,
+    authorize_request_set,
+    canonical_bytes,
+    canonical_search_execution_authorization_file_sha256,
     compile_topic_need_set,
     compile_understanding_gap_request,
     compile_plan,
-    execute_request_set,
+    execute_request_set as execute_request_set_owner,
     _http_transport,
     _query_url_crossref,
     _query_url_openalex,
     _query_url_semantic_scholar,
     validate_request,
     validate_request_set,
+    validate_preflight,
     validate_result_set,
     sha256_json,
     validate_batch,
@@ -159,6 +167,108 @@ def request_set_digest(request_set):
     return request_set
 
 
+def request_set_file_sha256(request_set):
+    request_set_file_path, request_set_file_sha256 = request_set_file_artifact(request_set)
+    os.unlink(request_set_file_path)
+    return request_set_file_sha256
+
+
+def request_set_file_artifact(request_set):
+    raw = (
+        json.dumps(
+            request_set,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        + b"\n"
+    )
+    with tempfile.NamedTemporaryFile("wb", delete=False) as temporary:
+        temporary.write(raw)
+        request_set_path = temporary.name
+    os.chmod(request_set_path, 0o600)
+    return request_set_path, hashlib.sha256(Path(request_set_path).read_bytes()).hexdigest()
+
+
+def execution_authority_file_artifact(execution_authority):
+    raw = canonical_bytes(execution_authority) + b"\n"
+    with tempfile.NamedTemporaryFile("wb", delete=False) as temporary:
+        temporary.write(raw)
+        authority_file = temporary.name
+    os.chmod(authority_file, 0o600)
+    return authority_file, hashlib.sha256(raw).hexdigest()
+
+
+def execution_authority_fixture(request_set):
+    request_set_file, request_set_file_sha256_value = request_set_file_artifact(request_set)
+    return authorize_request_set(
+        copy.deepcopy(request_set),
+        reviewer_id="reviewer-execution-1",
+        reviewer_role="independent search execution reviewer",
+        reviewed_at="2026-08-05T00:11:00Z",
+        independent_reviewer_attested=True,
+        request_set_file=request_set_file,
+        request_set_file_sha256=request_set_file_sha256_value,
+    )
+
+
+def execute_request_set(request_set, transport, timeout_seconds=None):
+    request_set_file, request_set_file_sha256_value = request_set_file_artifact(
+        request_set
+    )
+    authority = execution_authority_fixture(request_set)
+    authority_file, authority_file_sha256 = execution_authority_file_artifact(
+        authority
+    )
+    try:
+        return execute_request_set_owner(
+            request_set,
+            transport,
+            timeout_seconds,
+            execution_authority=authority,
+            expected_execution_authority_sha256=authority_file_sha256,
+            execution_authority_file=authority_file,
+            execution_authority_file_sha256=authority_file_sha256,
+            request_set_file=request_set_file,
+            request_set_file_sha256=request_set_file_sha256_value,
+        )
+    finally:
+        os.unlink(request_set_file)
+        os.unlink(authority_file)
+
+
+def execute_request_set_with_authority_file(
+    request_set,
+    transport,
+    *,
+    execution_authority,
+    expected_execution_authority_sha256,
+    execution_authority_file_sha256=None,
+    request_set_file,
+    request_set_file_sha256,
+    timeout_seconds=None,
+):
+    authority_file, authority_file_sha256 = execution_authority_file_artifact(
+        execution_authority
+    )
+    if execution_authority_file_sha256 is None:
+        execution_authority_file_sha256 = authority_file_sha256
+    try:
+        return execute_request_set_owner(
+            request_set,
+            transport,
+            timeout_seconds=timeout_seconds,
+            execution_authority=execution_authority,
+            expected_execution_authority_sha256=expected_execution_authority_sha256,
+            execution_authority_file=authority_file,
+            execution_authority_file_sha256=execution_authority_file_sha256,
+            request_set_file=request_set_file,
+            request_set_file_sha256=request_set_file_sha256,
+        )
+    finally:
+        os.unlink(authority_file)
+
+
 def candidate(title="A Study", doi="10.1000/ABC", rank=1, authors=None, year=2024):
     return {
         "title": title,
@@ -289,7 +399,27 @@ class ScholarDiscoveryTest(unittest.TestCase):
         )
         self.assertFalse(openalex["configured"])
         self.assertEqual(preflight["google_scholar"]["automatic"], False)
+        self.assertEqual(
+            preflight["request_projection"][0]["queries"],
+            request_set["requests"][0]["query_seeds"],
+        )
+        self.assertEqual(
+            preflight["provider_coverage"][0]["request_id"],
+            request_set["requests"][0]["request_id"],
+        )
         self.assertNotIn("secret-value", json.dumps(preflight))
+        with mock.patch.dict(
+            os.environ,
+            {"OPENALEX_API_KEY": "", "SEMANTIC_SCHOLAR_API_KEY": "secret-value"},
+            clear=False,
+        ):
+            validate_preflight(copy.deepcopy(preflight), request_set)
+            tampered = copy.deepcopy(preflight)
+            tampered["request_projection"][0]["queries"][0]["query"] = (
+                "unreviewed rewritten query"
+            )
+            with self.assertRaisesRegex(ContractError, "owner-replayed"):
+                validate_preflight(tampered, request_set)
 
     def test_compiles_all_understanding_gap_types_to_targeted_queries(self):
         query_pairs = set()
@@ -680,6 +810,8 @@ class ScholarDiscoveryTest(unittest.TestCase):
 
         with mock.patch.dict(os.environ, {"OPENALEX_API_KEY": "unit-test-key"}):
             result_set = execute_request_set(request_set, transport, timeout_seconds=30)
+        result_set["schema"] = "ScholarDiscoveryResultSet/v1"
+        del result_set["execution_authorization_ref"]
         result_set["failures"].append(
             {
                 "request_id": "SDR-GAP-FAILURE",
@@ -743,6 +875,180 @@ class ScholarDiscoveryTest(unittest.TestCase):
         self.assertEqual(result["discovery_status"], "complete_bounded")
         self.assertFalse(result["limits"]["candidate_budget_reached"])
         self.assertEqual(len(result["ranked_candidates"]), 2)
+
+    def test_validate_result_rejects_non_boolean_search_event_truncated(self):
+        request = request_fixture()
+        request["routes"]["automatic"] = ["openalex"]
+        request["routes"]["google_scholar"] = "disabled"
+        plan = compile_plan(request)
+        batch = batch_fixture(request, plan["queries"][0], [], status="empty")
+        result = build_result(request, plan, [batch])
+        tampered = copy.deepcopy(result)
+        tampered["search_events"][0]["search_event"]["truncated"] = "true"
+        with self.assertRaisesRegex(
+            ContractError, "result.search_events\\[0\\]\\.search_event\\.truncated must be boolean"
+        ):
+            validate_result(tampered)
+
+    def test_validate_result_rejects_search_event_provider_plan_mismatch(self):
+        request = request_fixture()
+        request["routes"]["automatic"] = ["openalex"]
+        request["routes"]["google_scholar"] = "disabled"
+        plan = compile_plan(request)
+        batch = batch_fixture(request, plan["queries"][0], [])
+        result = build_result(request, plan, [batch])
+        tampered = copy.deepcopy(result)
+        tampered["search_events"][0]["provider"] = (
+            "crossref"
+            if tampered["search_events"][0]["provider"] == "openalex"
+            else "openalex"
+        )
+        with self.assertRaisesRegex(
+            ContractError, "provider does not match its planned provider"
+        ):
+            validate_result(tampered)
+
+    def test_validate_result_rejects_provider_failure_without_incomplete_event_support(self):
+        request = request_fixture()
+        request["routes"]["automatic"] = ["openalex"]
+        request["routes"]["google_scholar"] = "disabled"
+        plan = compile_plan(request)
+        batch = batch_fixture(request, plan["queries"][0], [], status="success")
+        batch["search_event"]["retrieved"] = 0
+        result = build_result(request, plan, [batch])
+        query_id = result["search_events"][0]["query_id"]
+        tampered = copy.deepcopy(result)
+        tampered["provider_failures"] = [
+            {
+                "query_id": query_id,
+                "provider": result["query_plan"][0]["provider"],
+                "execution": result["query_plan"][0]["execution"],
+                "status": "partial",
+                "limitations": result["search_events"][0]["search_event"][
+                    "limitations"
+                ],
+            }
+        ]
+        with self.assertRaisesRegex(
+            ContractError,
+            "result.provider_failures must be supported by an incomplete search_event",
+        ):
+            validate_result(tampered)
+
+    def test_validate_result_allows_supported_provider_failure_overlap(self):
+        request = request_fixture()
+        request["routes"]["automatic"] = ["openalex"]
+        request["routes"]["google_scholar"] = "disabled"
+        request["budgets"]["max_candidates"] = 20
+        plan = compile_plan(request)
+        batch = batch_fixture(
+            request,
+            plan["queries"][0],
+            [candidate(), candidate(doi="10.1000/def")],
+            status="partial",
+        )
+        batch["search_event"]["truncated"] = False
+        result = build_result(request, plan, [batch])
+        self.assertEqual(len(result["search_events"]), 1)
+        self.assertEqual(len(result["provider_failures"]), 1)
+        self.assertEqual(result["provider_failures"][0]["query_id"], result["search_events"][0]["query_id"])
+        validate_result(result)
+
+    def test_validate_result_allows_unresolved_query_with_incomplete_event_overlap(self):
+        request = request_fixture()
+        request["routes"]["automatic"] = ["openalex"]
+        request["routes"]["google_scholar"] = "disabled"
+        request["budgets"]["max_candidates"] = 20
+        plan = compile_plan(request)
+        batch = batch_fixture(
+            request,
+            plan["queries"][0],
+            [candidate(), candidate(doi="10.1000/def")],
+            status="partial",
+        )
+        batch["search_event"]["truncated"] = False
+        result = build_result(request, plan, [batch])
+        tampered = copy.deepcopy(result)
+        tampered["unresolved_query_ids"] = [result["search_events"][0]["query_id"]]
+        self.assertEqual(tampered["discovery_status"], "partial_provider")
+        validate_result(tampered)
+
+    def test_validate_result_rejects_unresolved_query_with_terminal_event(self):
+        request = request_fixture()
+        request["routes"]["automatic"] = ["openalex"]
+        request["routes"]["google_scholar"] = "disabled"
+        plan = compile_plan(request)
+        batch = batch_fixture(
+            request,
+            plan["queries"][0],
+            [candidate()],
+            status="success",
+        )
+        result = build_result(request, plan, [batch])
+        tampered = copy.deepcopy(result)
+        tampered["unresolved_query_ids"] = [result["search_events"][0]["query_id"]]
+        with self.assertRaisesRegex(
+            ContractError,
+            "terminal search events cannot coexist with unresolved query ids",
+        ):
+            validate_result(tampered)
+
+    def test_validate_result_rejects_complete_bounded_with_budget_indicators(self):
+        request = request_fixture()
+        request["routes"]["automatic"] = ["openalex"]
+        request["routes"]["google_scholar"] = "disabled"
+        request["budgets"]["max_queries"] = 1
+        plan = compile_plan(request)
+        batch = batch_fixture(request, plan["queries"][0], [], status="empty")
+        batch["search_event"]["retrieved"] = 0
+        result = build_result(request, plan, [batch])
+        tampered = copy.deepcopy(result)
+        tampered["discovery_status"] = "complete_bounded"
+        tampered["stop_reason"] = "complete_bounded"
+        with self.assertRaisesRegex(
+            ContractError,
+            "complete_bounded results require complete untruncated query coverage",
+        ):
+            validate_result(tampered)
+
+    def test_validate_result_rejects_complete_bounded_with_candidate_budget(self):
+        request = request_fixture()
+        request["routes"]["automatic"] = ["openalex"]
+        request["routes"]["google_scholar"] = "disabled"
+        request["budgets"]["max_candidates"] = 1
+        plan = compile_plan(request)
+        batches = [
+            batch_fixture(
+                request,
+                plan["queries"][0],
+                [candidate(doi="10.1000/one"), candidate(doi="10.1000/two", rank=2)],
+            )
+        ]
+        result = build_result(request, plan, batches)
+        self.assertEqual(result["discovery_status"], "partial_budget")
+        tampered = copy.deepcopy(result)
+        tampered["discovery_status"] = "complete_bounded"
+        tampered["stop_reason"] = "complete_bounded"
+        with self.assertRaisesRegex(
+            ContractError,
+            "complete_bounded results require complete untruncated query coverage",
+        ):
+            validate_result(tampered)
+
+    def test_validate_result_allows_partial_budget_for_omitted_queries(self):
+        request = request_fixture()
+        request["routes"]["automatic"] = ["openalex"]
+        request["routes"]["google_scholar"] = "disabled"
+        request["budgets"]["max_queries"] = 1
+        plan = compile_plan(request)
+        batch = batch_fixture(request, plan["queries"][0], [], status="empty")
+        batch["search_event"]["retrieved"] = 0
+        result = build_result(request, plan, [batch])
+        validate_result(result)
+        missing = result["limits"]["missing_query_ids"]
+        self.assertEqual(len(missing), 1)
+        self.assertEqual(result["discovery_status"], "partial_budget")
+        self.assertEqual(result["unresolved_query_ids"], [])
 
     def test_partial_provider_from_openalex_truncation(self):
         request = request_fixture()
@@ -891,7 +1197,12 @@ class ScholarDiscoveryTest(unittest.TestCase):
         blocked = batch_fixture(request, plan["queries"][0], [], status="blocked")
         result = build_result(request, plan, [blocked])
         self.assertEqual(result["discovery_status"], "blocked_capability")
-        self.assertIn(plan["queries"][0]["query_id"], result["unresolved_query_ids"])
+        plan_query_ids = {row["query_id"] for row in plan["queries"]}
+        event_query_ids = {row["query_id"] for row in result["search_events"]}
+        self.assertEqual(
+            set(result["unresolved_query_ids"]),
+            plan_query_ids - event_query_ids,
+        )
 
     def test_output_is_deterministic_across_batch_order(self):
         request = request_fixture()
@@ -1000,7 +1311,7 @@ class ScholarDiscoveryTest(unittest.TestCase):
 
         with mock.patch.dict(os.environ, {"OPENALEX_API_KEY": "unit-test-key"}):
             result_set = execute_request_set(request_set, transport, timeout_seconds=30)
-        self.assertEqual(result_set["schema"], "ScholarDiscoveryResultSet/v1")
+        self.assertEqual(result_set["schema"], "ScholarDiscoveryResultSet/v2")
         self.assertEqual(result_set["schema_version"], "v1")
         self.assertTrue(result_set["request_set_id"].startswith("request-set-"))
         self.assertEqual(result_set["request_set_digest"], request_set["request_set_digest"])
@@ -1010,6 +1321,508 @@ class ScholarDiscoveryTest(unittest.TestCase):
         self.assertEqual(result_set["results"][0]["hypothesis_id"], "GAP-1")
         self.assertEqual(result_set["results"][0]["gap_hypothesis_id"], "GAP-1")
         self.assertEqual(result_set["request_count"], 1)
+
+    def test_result_set_v2_requires_exact_execution_authorization_projection(self):
+        request_set = request_set_fixture()
+        authority = execution_authority_fixture(request_set)
+        authority_file_sha256 = canonical_search_execution_authorization_file_sha256(
+            authority
+        )
+
+        def transport(url: str, timeout: int) -> bytes:
+            del timeout
+            if "crossref" in url:
+                return b'{"message":{"total-results":0,"items":[]}}'
+            if "openalex" in url:
+                return b'{"meta":{"count":0},"results":[]}'
+            return b'{"total":0,"data":[]}'
+
+        with mock.patch.dict(os.environ, {"OPENALEX_API_KEY": "unit-test-key"}):
+            request_set_file, request_set_file_sha256_value = (
+                request_set_file_artifact(request_set)
+            )
+            result_set = execute_request_set_with_authority_file(
+                request_set,
+                transport,
+                execution_authority=authority,
+                expected_execution_authority_sha256=authority_file_sha256,
+                request_set_file=request_set_file,
+                request_set_file_sha256=request_set_file_sha256_value,
+            )
+        validation = {
+            "request_set_value": request_set,
+            "execution_authority": authority,
+            "expected_execution_authority_sha256": authority_file_sha256,
+            "execution_authority_file_sha256": authority_file_sha256,
+            "request_set_file_sha256": result_set[
+                "execution_authorization_ref"
+            ]["request_set_file_sha256"],
+        }
+        validate_result_set(copy.deepcopy(result_set), **validation)
+        for case in ("delete", "replace"):
+            with self.subTest(case=case):
+                tampered = copy.deepcopy(result_set)
+                if case == "delete":
+                    del tampered["execution_authorization_ref"]
+                else:
+                    tampered["execution_authorization_ref"][
+                        "authorization_digest"
+                    ] = "f" * 64
+                with self.assertRaises(ContractError):
+                    validate_result_set(tampered, **validation)
+        with self.assertRaisesRegex(ContractError, "validation requires"):
+            validate_result_set(copy.deepcopy(result_set))
+
+        legacy = copy.deepcopy(result_set)
+        legacy["schema"] = "ScholarDiscoveryResultSet/v1"
+        del legacy["execution_authorization_ref"]
+        validate_result_set(legacy)
+
+    def test_result_set_v2_complete_bounded_rejects_incomplete_payloads(self):
+        request_set = request_set_fixture()
+        for request in request_set["requests"]:
+            request["routes"]["google_scholar"] = "disabled"
+            request["budgets"]["max_queries"] = 12
+        request_set_digest(request_set)
+        authority = execution_authority_fixture(request_set)
+        authority_file_sha256 = canonical_search_execution_authorization_file_sha256(
+            authority
+        )
+
+        def transport(url: str, timeout: int) -> bytes:
+            del timeout
+            if "crossref" in url:
+                return b'{"message":{"total-results":0,"items":[]}}'
+            if "openalex" in url:
+                return b'{"meta":{"count":0,"results":[]}}'
+            return b'{"total":0,"data":[]}'
+
+        with mock.patch.dict(os.environ, {"OPENALEX_API_KEY": "unit-test-key"}):
+            request_set_file, request_set_file_sha256_value = (
+                request_set_file_artifact(request_set)
+            )
+            result_set = execute_request_set_with_authority_file(
+                request_set,
+                transport,
+                execution_authority=authority,
+                expected_execution_authority_sha256=authority_file_sha256,
+                request_set_file=request_set_file,
+                request_set_file_sha256=request_set_file_sha256_value,
+            )
+
+        validation = {
+            "request_set_value": request_set,
+            "execution_authority": authority,
+            "expected_execution_authority_sha256": authority_file_sha256,
+            "execution_authority_file_sha256": authority_file_sha256,
+            "request_set_file_sha256": request_set_file_sha256_value,
+        }
+
+        for case, mutate in [
+            ("provider-failures", lambda row: row.update({"provider_failures": [{"provider": "openalex"}]})),
+            (
+                "unresolved-queries",
+                lambda row: row.update({"unresolved_query_ids": [row["request_id"]]}),
+            ),
+            (
+                "stop-reason",
+                lambda row: row.update({"stop_reason": "partial_provider"}),
+            ),
+            (
+                "truncated-search-event",
+                lambda row: row["search_events"][0]["search_event"].update(
+                    {"truncated": True}
+                ),
+            ),
+            (
+                "partial-search-event",
+                lambda row: row["search_events"][0].update({"status": "partial"}),
+            ),
+        ]:
+            with self.subTest(case=case):
+                tampered = copy.deepcopy(result_set)
+                mutate(tampered["results"][0])
+                with self.assertRaises(ContractError):
+                    validate_result_set(tampered, **validation)
+
+    def test_result_set_v2_rejects_query_budget_pseudo_complete(self):
+        request_set = request_set_fixture()
+        request = request_set["requests"][0]
+        request["routes"]["google_scholar"] = "disabled"
+        request["budgets"]["max_queries"] = 1
+        request_set_digest(request_set)
+        authority = execution_authority_fixture(request_set)
+        authority_file_sha256 = canonical_search_execution_authorization_file_sha256(
+            authority
+        )
+
+        def transport(url: str, timeout: int) -> bytes:
+            del timeout
+            if "crossref" in url:
+                return b'{"message":{"total-results":0,"items":[]}}'
+            if "openalex" in url:
+                return b'{"meta":{"count":0},"results":[]}'
+            return b'{"total":0,"data":[]}'
+
+        with mock.patch.dict(os.environ, {"OPENALEX_API_KEY": "unit-test-key"}):
+            request_set_file, request_set_file_sha256_value = (
+                request_set_file_artifact(request_set)
+            )
+            result_set = execute_request_set_with_authority_file(
+                request_set,
+                transport,
+                execution_authority=authority,
+                expected_execution_authority_sha256=authority_file_sha256,
+                request_set_file=request_set_file,
+                request_set_file_sha256=request_set_file_sha256_value,
+            )
+
+        validation = {
+            "request_set_value": request_set,
+            "execution_authority": authority,
+            "expected_execution_authority_sha256": authority_file_sha256,
+            "execution_authority_file_sha256": authority_file_sha256,
+            "request_set_file_sha256": request_set_file_sha256_value,
+        }
+        result = result_set["results"][0]
+        self.assertEqual(result["discovery_status"], "partial_budget")
+        self.assertTrue(result["limits"]["query_budget_reached"])
+        self.assertTrue(result["limits"]["missing_query_ids"])
+
+        tampered = copy.deepcopy(result_set)
+        tampered_result = tampered["results"][0]
+        tampered_result["discovery_status"] = "complete_bounded"
+        tampered_result["stop_reason"] = "complete_bounded"
+        tampered_result["limits"]["query_budget_reached"] = False
+        tampered_result["limits"]["missing_query_ids"] = []
+        with self.assertRaisesRegex(
+            ContractError,
+            "complete_bounded results require complete untruncated query coverage|does not match request budget replay|query_budget_reached",
+        ):
+            validate_result_set(tampered, **validation)
+
+    def test_result_set_v2_rejects_candidate_budget_pseudo_complete(self):
+        request_set = request_set_fixture()
+        request = request_set["requests"][0]
+        request["routes"]["google_scholar"] = "disabled"
+        request["budgets"]["max_candidates"] = 1
+        request["budgets"]["max_queries"] = 12
+        request_set_digest(request_set)
+        authority = execution_authority_fixture(request_set)
+        authority_file_sha256 = canonical_search_execution_authorization_file_sha256(
+            authority
+        )
+
+        payload = {
+            "meta": {"count": 2},
+            "results": [
+                {
+                    "title": "OpenAlex Work A",
+                    "authorships": [{"author": {"display_name": "Alice"}}],
+                    "publication_year": 2025,
+                    "host_venue": {"display_name": "Open Journal"},
+                    "doi": "10.1000/openalex-a",
+                    "ids": {"openalex": "W123"},
+                    "type": "article",
+                    "is_retracted": False,
+                    "abstract_inverted_index": {"a": [1]},
+                    "primary_location": {"landing_page_url": "https://example.org/openalex"},
+                },
+                {
+                    "title": "OpenAlex Work B",
+                    "authorships": [{"author": {"display_name": "Bob"}}],
+                    "publication_year": 2025,
+                    "host_venue": {"display_name": "Open Journal"},
+                    "doi": "10.1000/openalex-b",
+                    "ids": {"openalex": "W124"},
+                    "type": "article",
+                    "is_retracted": False,
+                    "abstract_inverted_index": {"b": [1]},
+                    "primary_location": {"landing_page_url": "https://example.org/openalex-b"},
+                },
+            ],
+        }
+
+        def transport(url: str, timeout: int) -> bytes:
+            del timeout
+            if "crossref" in url:
+                return b'{"message":{"total-results":0,"items":[]}}'
+            if "openalex" in url:
+                return json.dumps(payload).encode("utf-8")
+            return b'{"total":0,"data":[]}'
+
+        with mock.patch.dict(os.environ, {"OPENALEX_API_KEY": "unit-test-key"}):
+            request_set_file, request_set_file_sha256_value = (
+                request_set_file_artifact(request_set)
+            )
+            result_set = execute_request_set_with_authority_file(
+                request_set,
+                transport,
+                execution_authority=authority,
+                expected_execution_authority_sha256=authority_file_sha256,
+                request_set_file=request_set_file,
+                request_set_file_sha256=request_set_file_sha256_value,
+            )
+
+        validation = {
+            "request_set_value": request_set,
+            "execution_authority": authority,
+            "expected_execution_authority_sha256": authority_file_sha256,
+            "execution_authority_file_sha256": authority_file_sha256,
+            "request_set_file_sha256": request_set_file_sha256_value,
+        }
+        result = result_set["results"][0]
+        self.assertEqual(result["discovery_status"], "partial_budget")
+        self.assertTrue(result["limits"]["candidate_budget_reached"])
+
+        tampered = copy.deepcopy(result_set)
+        tampered_result = tampered["results"][0]
+        tampered_result["discovery_status"] = "complete_bounded"
+        tampered_result["stop_reason"] = "complete_bounded"
+        tampered_result["limits"]["candidate_budget_reached"] = False
+        with self.assertRaisesRegex(
+            ContractError,
+            "search result candidate budget flag does not match replayed pre-truncation",
+        ):
+            validate_result_set(tampered, **validation)
+
+    def test_result_set_v2_rejects_pre_truncation_candidate_count_integrity(self):
+        request_set = request_set_fixture()
+        request = request_set["requests"][0]
+        request["routes"]["google_scholar"] = "disabled"
+        request["budgets"]["max_candidates"] = 1
+        request["budgets"]["max_queries"] = 12
+        request_set_digest(request_set)
+        authority = execution_authority_fixture(request_set)
+        authority_file_sha256 = canonical_search_execution_authorization_file_sha256(
+            authority
+        )
+
+        payload = {
+            "meta": {"count": 2},
+            "results": [
+                {
+                    "title": "OpenAlex Work A",
+                    "authorships": [{"author": {"display_name": "Alice"}}],
+                    "publication_year": 2025,
+                    "host_venue": {"display_name": "Open Journal"},
+                    "doi": "10.1000/openalex-a",
+                    "ids": {"openalex": "W123"},
+                    "type": "article",
+                    "is_retracted": False,
+                    "abstract_inverted_index": {"a": [1]},
+                    "primary_location": {"landing_page_url": "https://example.org/openalex"},
+                },
+                {
+                    "title": "OpenAlex Work B",
+                    "authorships": [{"author": {"display_name": "Bob"}}],
+                    "publication_year": 2025,
+                    "host_venue": {"display_name": "Open Journal"},
+                    "doi": "10.1000/openalex-b",
+                    "ids": {"openalex": "W124"},
+                    "type": "article",
+                    "is_retracted": False,
+                    "abstract_inverted_index": {"b": [1]},
+                    "primary_location": {"landing_page_url": "https://example.org/openalex-b"},
+                },
+            ],
+        }
+
+        def transport(url: str, timeout: int) -> bytes:
+            del timeout
+            if "crossref" in url:
+                return b'{"message":{"total-results":0,"items":[]}}'
+            if "openalex" in url:
+                return json.dumps(payload).encode("utf-8")
+            return b'{"total":0,"data":[]}'
+
+        with mock.patch.dict(os.environ, {"OPENALEX_API_KEY": "unit-test-key"}):
+            request_set_file, request_set_file_sha256_value = (
+                request_set_file_artifact(request_set)
+            )
+            result_set = execute_request_set_with_authority_file(
+                request_set,
+                transport,
+                execution_authority=authority,
+                expected_execution_authority_sha256=authority_file_sha256,
+                request_set_file=request_set_file,
+                request_set_file_sha256=request_set_file_sha256_value,
+            )
+
+        validation = {
+            "request_set_value": request_set,
+            "execution_authority": authority,
+            "expected_execution_authority_sha256": authority_file_sha256,
+            "execution_authority_file_sha256": authority_file_sha256,
+            "request_set_file_sha256": request_set_file_sha256_value,
+        }
+
+        result = result_set["results"][0]
+        self.assertTrue(result["limits"]["candidate_budget_reached"])
+        self.assertGreater(result["limits"]["pre_truncation_candidate_count"], 0)
+        self.assertGreater(len(result["ranked_candidates"]), 0)
+
+        tampered_missing = copy.deepcopy(result_set)
+        del tampered_missing["results"][0]["limits"]["pre_truncation_candidate_count"]
+        with self.assertRaisesRegex(
+            ContractError,
+            "pre_truncation_candidate_count is required for request replay",
+        ):
+            validate_result_set(tampered_missing, **validation)
+
+        tampered_inconsistent = copy.deepcopy(result_set)
+        tampered_inconsistent["results"][0]["limits"]["pre_truncation_candidate_count"] = 1
+        with self.assertRaisesRegex(
+            ContractError,
+            "does not match the sum of search_event candidate_count",
+        ):
+            validate_result_set(tampered_inconsistent, **validation)
+
+        tampered_zeroed = copy.deepcopy(result_set)
+        tampered_zeroed["results"][0]["limits"]["pre_truncation_candidate_count"] = 0
+        for event in tampered_zeroed["results"][0]["search_events"]:
+            event["candidate_count"] = 0
+        with self.assertRaisesRegex(
+            ContractError,
+            "must be at least the number of ranked candidates",
+        ):
+            validate_result_set(tampered_zeroed, **validation)
+
+    def test_execute_requires_owner_replayed_external_authorization(self):
+        request_set = request_set_fixture()
+        calls = []
+
+        def transport(url: str, timeout: int) -> bytes:
+            calls.append(url)
+            return b'{"message":{"total-results":0,"items":[]}}'
+
+        validate_request_set(copy.deepcopy(request_set))
+        with self.assertRaisesRegex(
+            ContractError,
+            "external trust boundary"
+        ):
+            request_set_file, request_set_file_sha256_value = (
+                request_set_file_artifact(request_set)
+            )
+            execution_authority = execution_authority_fixture(request_set)
+            execute_request_set_with_authority_file(
+                request_set,
+                transport,
+                execution_authority=execution_authority,
+                expected_execution_authority_sha256="f" * 64,
+                request_set_file=request_set_file,
+                request_set_file_sha256=request_set_file_sha256_value,
+                timeout_seconds=None,
+            )
+        with self.assertRaisesRegex(
+            ContractError, "ReviewedSearchExecutionAuthorization"
+        ):
+            request_set_file, request_set_file_sha256_value = (
+                request_set_file_artifact(request_set)
+            )
+            execute_request_set_owner(
+                request_set,
+                transport,
+                request_set_file=request_set_file,
+                request_set_file_sha256=request_set_file_sha256_value,
+            )
+        authority = execution_authority_fixture(request_set)
+        authority_file_sha256 = canonical_search_execution_authorization_file_sha256(
+            authority
+        )
+        with self.assertRaisesRegex(
+            ContractError, "execution authority file|external trust boundary"
+        ):
+            request_set_file, request_set_file_sha256_value = (
+                request_set_file_artifact(request_set)
+            )
+            execute_request_set_with_authority_file(
+                request_set,
+                transport,
+                execution_authority=authority,
+                expected_execution_authority_sha256="f" * 64,
+                request_set_file=request_set_file,
+                request_set_file_sha256=request_set_file_sha256_value,
+            )
+
+        self.assertNotEqual(
+            authority["authorization_digest"], authority_file_sha256
+        )
+        with self.assertRaisesRegex(
+            ContractError, "execution authority file|external trust boundary"
+        ):
+            request_set_file, request_set_file_sha256_value = (
+                request_set_file_artifact(request_set)
+            )
+            execute_request_set_with_authority_file(
+                request_set,
+                transport,
+                execution_authority=authority,
+                expected_execution_authority_sha256=authority[
+                    "authorization_digest"
+                ],
+                request_set_file=request_set_file,
+                request_set_file_sha256=request_set_file_sha256_value,
+            )
+        trailing_newline_file_sha256 = hashlib.sha256(
+            canonical_bytes(authority) + b"\n\n"
+        ).hexdigest()
+        with self.assertRaisesRegex(
+            ContractError, "execution authority file|external trust boundary"
+        ):
+            request_set_file, request_set_file_sha256_value = (
+                request_set_file_artifact(request_set)
+            )
+            execute_request_set_with_authority_file(
+                request_set,
+                transport,
+                execution_authority=authority,
+                expected_execution_authority_sha256=authority_file_sha256,
+                execution_authority_file_sha256=trailing_newline_file_sha256,
+                request_set_file=request_set_file,
+                request_set_file_sha256=request_set_file_sha256_value,
+            )
+        # reuse precomputed variable for assertion readability
+
+        rewritten = copy.deepcopy(request_set)
+        rewritten["requests"][0]["request_id"] = "SDR-REWRITTEN"
+        request_set_digest(rewritten)
+        with self.assertRaisesRegex(ContractError, "exactly match|owner-replayed"):
+            request_set_file, request_set_file_sha256_value = (
+                request_set_file_artifact(request_set)
+            )
+            execute_request_set_with_authority_file(
+                rewritten,
+                transport,
+                execution_authority=authority,
+                expected_execution_authority_sha256=authority_file_sha256,
+                request_set_file=request_set_file,
+                request_set_file_sha256=request_set_file_sha256_value,
+            )
+        pretty_request_set_file_sha256 = hashlib.sha256(
+            json.dumps(
+                request_set,
+                sort_keys=True,
+                indent=2,
+                ensure_ascii=False,
+            ).encode("utf-8")
+            + b"\n"
+        ).hexdigest()
+        with self.assertRaisesRegex(
+            ContractError, "request_set_file_sha256|owner-replayed"
+        ):
+            request_set_file, request_set_file_sha256_value = (
+                request_set_file_artifact(request_set)
+            )
+            execute_request_set_with_authority_file(
+                request_set,
+                transport,
+                execution_authority=authority,
+                expected_execution_authority_sha256=authority_file_sha256,
+                request_set_file=request_set_file,
+                request_set_file_sha256=pretty_request_set_file_sha256,
+            )
+        self.assertEqual(calls, [])
 
     def test_validate_request_set_rejects_tampered_digest_or_missing_fields(self):
         request_set = request_set_fixture()

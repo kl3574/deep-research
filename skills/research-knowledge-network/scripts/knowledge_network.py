@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -69,13 +70,22 @@ GAP_STATUS_TRANSITIONS = {
     "resolved": {"open"},
     "blocked": {"open", "resolved"},
 }
-RELATION_TYPES = {"supports", "contradicts", "grounds", "refines", "depends", "enables"}
+RELATION_TYPES = {
+    "supports",
+    "contradicts",
+    "qualifies",
+    "grounds",
+    "refines",
+    "depends",
+    "enables",
+}
 EVENT_TYPES = {
     "init",
     "derive_gaps",
     "snapshot_refreshed",
     "status_snapshot",
     "patch_decision",
+    "appraised_mutation",
 }
 
 
@@ -395,14 +405,10 @@ def _semantic_notes_by_parent(
         if semantic_schema != inventory_schema:
             raise ValueError(f"semantic parent {parent_key} note schema mismatch")
         note_key = inventory_note.get("key")
-        if not isinstance(note_key, str) or not re.fullmatch(
-            r"[A-Z0-9]{8}", note_key
-        ):
+        if not isinstance(note_key, str) or not re.fullmatch(r"[A-Z0-9]{8}", note_key):
             raise ValueError(f"inventory parent {parent_key} note key invalid")
         if inventory_note.get("availability") != "present":
-            raise ValueError(
-                f"inventory parent {parent_key} note availability invalid"
-            )
+            raise ValueError(f"inventory parent {parent_key} note availability invalid")
         short_title = semantic_parent.get("short_title")
         if not isinstance(short_title, str):
             raise ValueError(f"{prefix} short_title must be a string")
@@ -509,9 +515,10 @@ def _validate_revision_guard_shape(guard: Any, label: str) -> None:
     ):
         if not SNAPSHOT_DIGEST_RE.fullmatch(str(guard.get(field) or "")):
             raise ValueError(f"{label}.{field} invalid")
-    if type(guard.get("note_child_count")) is not int or guard.get(
-        "note_child_count"
-    ) != 1:
+    if (
+        type(guard.get("note_child_count")) is not int
+        or guard.get("note_child_count") != 1
+    ):
         raise ValueError(f"{label}.note_child_count must equal one")
     if not isinstance(guard.get("note_key"), str) or not re.fullmatch(
         r"[A-Z0-9]{8}", guard["note_key"]
@@ -631,9 +638,9 @@ def _safe_slug(value: str) -> str:
 
 def _parent_source_id(parent: dict[str, Any], identity_digest: str) -> str:
     canonical_identity = _snapshot_parent_identity(parent)
-    canonical_digest = _sha256_json(
-        {"canonical_identity": canonical_identity}
-    ).split(":", 1)[1]
+    canonical_digest = _sha256_json({"canonical_identity": canonical_identity}).split(
+        ":", 1
+    )[1]
     version_digest = identity_digest.split(":", 1)[1]
     return f"zotero-{canonical_digest[:16]}-{version_digest[:16]}"
 
@@ -982,13 +989,16 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _json_text(payload: dict[str, Any]) -> str:
-    return json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        indent=2,
-        allow_nan=False,
-    ) + "\n"
+    return (
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+            allow_nan=False,
+        )
+        + "\n"
+    )
 
 
 def _jsonl_text(rows: list[dict[str, Any]]) -> str:
@@ -1028,20 +1038,35 @@ def _restore_file_with_mode(path: Path, content: bytes, mode: int) -> None:
 
 def _rollback_replaced_files(
     replaced: list[Path],
-    originals: dict[Path, bytes],
-    original_modes: dict[Path, int],
+    restore_links: dict[Path, Path],
 ) -> bool:
     rollback_failed = False
     for path in reversed(replaced):
         try:
-            _restore_file_with_mode(
-                path,
-                originals[path],
-                original_modes[path],
-            )
-        except OSError:
+            os.replace(restore_links[path], path)
+        except BaseException:
             rollback_failed = True
     return rollback_failed
+
+
+def _create_restore_link(path: Path) -> Path:
+    """Retain the original inode until a multi-file commit is durable."""
+    restore_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "wb",
+            dir=path.parent,
+            prefix=f".{path.name}.restore.",
+            delete=False,
+        ) as handle:
+            restore_path = Path(handle.name)
+        restore_path.unlink()
+        os.link(path, restore_path, follow_symlinks=False)
+        return restore_path
+    except BaseException:
+        if restore_path is not None:
+            restore_path.unlink(missing_ok=True)
+        raise
 
 
 def _fsync_directory(path: Path) -> None:
@@ -1094,13 +1119,9 @@ def _replace_files_transactionally(
     duplicate_paths = set(contents) & set(ledger_updates)
     if duplicate_paths:
         raise ValueError("transaction path cannot be both replaced and appended")
-    ordinary_ledger_paths = [
-        path for path in contents if path.name in ledger_filenames
-    ]
+    ordinary_ledger_paths = [path for path in contents if path.name in ledger_filenames]
     if ordinary_ledger_paths:
-        raise ValueError(
-            "append-only ledgers require an expected-prior ledger update"
-        )
+        raise ValueError("append-only ledgers require an expected-prior ledger update")
     invalid_ledger_paths = [
         path for path in ledger_updates if path.name not in ledger_filenames
     ]
@@ -1108,7 +1129,6 @@ def _replace_files_transactionally(
         raise ValueError("ledger update target is not a known append-only ledger")
 
     planned: dict[Path, tuple[bytes, bytes]] = {}
-    original_modes: dict[Path, int] = {}
     for path, content in contents.items():
         if path.is_symlink():
             raise ValueError(f"transaction target is symbolic link: {path}")
@@ -1118,7 +1138,6 @@ def _replace_files_transactionally(
         after = content.encode("utf-8")
         if before != after:
             planned[path] = (before, after)
-            original_modes[path] = stat.S_IMODE(path.stat().st_mode)
 
     for path, (expected_prior_records, intended_records) in ledger_updates.items():
         if path.is_symlink():
@@ -1142,9 +1161,7 @@ def _replace_files_transactionally(
             continue
         before = path.read_bytes()
         if before and not before.endswith(b"\n"):
-            raise ValueError(
-                f"{path.name}: append-only ledger must end with a newline"
-            )
+            raise ValueError(f"{path.name}: append-only ledger must end with a newline")
         observed_prior_records = _parse_jsonl_bytes(path, before)
         if observed_prior_records != expected_prior_records:
             raise ValueError(
@@ -1152,7 +1169,6 @@ def _replace_files_transactionally(
             )
         suffix = _jsonl_text(appended_records).encode("utf-8")
         planned[path] = (before, before + suffix)
-        original_modes[path] = stat.S_IMODE(path.stat().st_mode)
 
     if not planned:
         return
@@ -1161,8 +1177,10 @@ def _replace_files_transactionally(
         raise ValueError("transaction targets must share one directory")
 
     staged: dict[Path, Path] = {}
+    restore_links: dict[Path, Path] = {}
     originals = {path: before for path, (before, _) in planned.items()}
     replaced: list[Path] = []
+    rollback_failed = False
     first_path = next(iter(planned))
     journal_path = first_path.parent / ".transaction.json"
     if journal_path.exists() or journal_path.is_symlink():
@@ -1199,16 +1217,19 @@ def _replace_files_transactionally(
         _fsync_directory(first_path.parent)
 
         for path in planned:
+            restore_links[path] = _create_restore_link(path)
+        _fsync_directory(first_path.parent)
+
+        for path in planned:
             os.replace(staged[path], path)
             replaced.append(path)
         _fsync_directory(first_path.parent)
         journal_path.unlink()
         _fsync_directory(first_path.parent)
-    except Exception:
+    except BaseException:
         rollback_failed = _rollback_replaced_files(
             replaced,
-            originals,
-            original_modes,
+            restore_links,
         )
         if not rollback_failed:
             _fsync_directory(first_path.parent)
@@ -1218,6 +1239,9 @@ def _replace_files_transactionally(
     finally:
         for temp_path in staged.values():
             temp_path.unlink(missing_ok=True)
+        if not rollback_failed:
+            for restore_path in restore_links.values():
+                restore_path.unlink(missing_ok=True)
 
 
 def _append_jsonl(
@@ -1348,6 +1372,346 @@ def _append_candidate(
     }
     _append_jsonl(target, row, records[ledger])
     records[ledger].append(row)
+    return True
+
+
+def _load_appraisal_binding_module():
+    path = Path(__file__).with_name("evidence_appraisal_binding.py")
+    name = "rkn_evidence_appraisal_binding"
+    existing = sys.modules.get(name)
+    if existing is not None:
+        return existing
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ValueError(f"appraisal binding owner unavailable: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _stable_bytes_for_guard(path: Path, label: str) -> bytes:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"{label} must be a regular non-symlink file")
+    before = path.stat()
+    raw = path.read_bytes()
+    after = path.stat()
+    before_fingerprint = (
+        before.st_dev,
+        before.st_ino,
+        before.st_mode,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    )
+    after_fingerprint = (
+        after.st_dev,
+        after.st_ino,
+        after.st_mode,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    )
+    if before_fingerprint != after_fingerprint:
+        raise ValueError(f"{label} changed while it was read")
+    return raw
+
+
+def _scientific_binding_guard(
+    paths: Paths, records: dict[str, list[dict[str, Any]]]
+) -> dict[str, Any]:
+    state_raw = _stable_bytes_for_guard(paths.state, "network state")
+    ledgers: dict[str, Any] = {}
+    for name in LEDGER_NAMES:
+        raw = _stable_bytes_for_guard(paths.ledger(name), f"{name} ledger")
+        ledgers[name] = {
+            "record_count": len(records[name]),
+            "byte_size": len(raw),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+        }
+    return {
+        "state": {
+            "size": len(state_raw),
+            "sha256": hashlib.sha256(state_raw).hexdigest(),
+        },
+        "ledgers": ledgers,
+    }
+
+
+def _claim_scopes_from_records(
+    records: dict[str, list[dict[str, Any]]],
+    *,
+    prefix_counts: dict[str, int] | None = None,
+) -> dict[str, dict[str, Any]]:
+    claim_rows = records["claims"]
+    if prefix_counts is not None:
+        claim_rows = claim_rows[: prefix_counts["claims"]]
+    fields = (
+        "scope_statement",
+        "assumptions",
+        "conditions",
+        "units",
+        "exclusions",
+        "defeaters",
+        "coverage_dimensions",
+        "benchmark_profiles",
+    )
+    return {
+        str(row["claim_id"]): {
+            field: row.get(field, [] if field != "scope_statement" else "")
+            for field in fields
+        }
+        for row in claim_rows
+        if isinstance(row.get("claim_id"), str)
+    }
+
+
+def _appraisal_gate_paths(args: argparse.Namespace) -> dict[str, Any]:
+    values = {
+        "package": getattr(args, "appraisal_package", None),
+        "approval": getattr(args, "appraisal_approval", None),
+        "prepared": getattr(args, "appraisal_prepared", None),
+        "independent_review": getattr(args, "appraisal_independent_review", None),
+        "owner_bundle": getattr(args, "appraisal_owner_bundle", None),
+        "expected_authority_sha256": getattr(args, "expected_authority_sha256", None),
+        "proposal": getattr(args, "appraisal_proposal", None),
+        "binding": getattr(args, "appraisal_binding", None),
+        "projection": getattr(args, "appraisal_projection", None),
+    }
+    lineage = list(getattr(args, "appraisal_lineage", None) or [])
+    if (any(values.values()) or lineage) and not all(values.values()):
+        raise ValueError(
+            "scientific mutation appraisal gate is incomplete; provide "
+            "--appraisal-package, --appraisal-approval, --appraisal-prepared, "
+            "--appraisal-independent-review, --appraisal-owner-bundle, --appraisal-proposal, "
+            "--expected-authority-sha256, --appraisal-binding, and "
+            "--appraisal-projection together"
+        )
+    if not all(values.values()):
+        raise ValueError(
+            "scientific mutation requires an owner-replayed "
+            "EvidenceAppraisalPackage/v1 with approval/source artifacts, an "
+            "owner-derived EvidenceAppraisalBinding/v1, and an explicit reviewed "
+            "projection; candidate sets and legacy artifacts are read-only"
+        )
+    return {
+        **{key: str(value) for key, value in values.items()},
+        "lineage": [str(value) for value in lineage],
+    }
+
+
+def _validate_guard_prefix(
+    paths: Paths,
+    records: dict[str, list[dict[str, Any]]],
+    gate: dict[str, Any],
+) -> set[str]:
+    binding = gate["binding"]
+    guard = binding["network_guard"]
+    state_raw = _stable_bytes_for_guard(paths.state, "network state")
+    if (
+        len(state_raw) != guard["state"]["size"]
+        or hashlib.sha256(state_raw).hexdigest() != guard["state"]["sha256"]
+    ):
+        raise ValueError("appraisal binding network state guard is stale")
+
+    prefix_counts = {
+        name: int(guard["ledgers"][name]["record_count"]) for name in LEDGER_NAMES
+    }
+    suffix_rows: dict[str, list[dict[str, Any]]] = {}
+    for name in LEDGER_NAMES:
+        item = guard["ledgers"][name]
+        raw = _stable_bytes_for_guard(paths.ledger(name), f"{name} ledger")
+        byte_size = int(item["byte_size"])
+        if (
+            len(raw) < byte_size
+            or hashlib.sha256(raw[:byte_size]).hexdigest() != item["sha256"]
+        ):
+            raise ValueError(f"appraisal binding {name} physical prefix guard is stale")
+        if len(records[name]) < prefix_counts[name]:
+            raise ValueError(f"appraisal binding {name} record prefix was truncated")
+        suffix_rows[name] = records[name][prefix_counts[name] :]
+
+    if suffix_rows["sources"] or suffix_rows["entities"]:
+        raise ValueError(
+            "appraisal binding cannot be replayed after unrelated source/entity mutation"
+        )
+    refs = gate["refs"]
+    consumed: set[str] = set()
+    event_targets: set[tuple[str, str]] = set()
+    for event in suffix_rows["events"]:
+        if event.get("event_type") != "appraised_mutation":
+            raise ValueError(
+                "appraisal binding cannot be replayed after an unrelated event"
+            )
+        if any(
+            event.get(field) != refs[field]
+            for field in (
+                "appraisal_package_ref",
+                "appraisal_set_ref",
+                "approval_ref",
+                "owner_artifact_binding_digests",
+                "expected_authority_sha256",
+                "binding_ref",
+                "projection_ref",
+            )
+        ):
+            raise ValueError("appraisal binding suffix uses another authorization")
+        authorization_digest = event.get("authorization_digest")
+        if (
+            not isinstance(authorization_digest, str)
+            or authorization_digest in consumed
+        ):
+            raise ValueError("appraisal authorization was replayed")
+        consumed.add(authorization_digest)
+        event_targets.add(
+            (str(event.get("target_ledger")), str(event.get("target_record_id")))
+        )
+    observed_targets = {
+        (name, str(row.get("record_id")))
+        for name in ("claims", "evidence", "relations", "gaps")
+        for row in suffix_rows[name]
+    }
+    if event_targets != observed_targets:
+        raise ValueError(
+            "appraisal binding suffix contains an unpaired scientific mutation/event"
+        )
+    return consumed
+
+
+def _require_scientific_mutation_gate(
+    args: argparse.Namespace,
+    paths: Paths,
+    records: dict[str, list[dict[str, Any]]],
+    operation_type: str,
+    payload: dict[str, Any],
+    *,
+    authorization_subject: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    module = _load_appraisal_binding_module()
+    gate_paths = _appraisal_gate_paths(args)
+    package = module.load_json_stable(gate_paths["package"], "appraisal package")
+    approval = module.load_json_stable(gate_paths["approval"], "appraisal approval")
+    prepared = module.load_json_stable(gate_paths["prepared"], "appraisal preparation")
+    independent_review = module.load_json_stable(
+        gate_paths["independent_review"], "appraisal independent review"
+    )
+    owner_bundle = module.load_json_stable(
+        gate_paths["owner_bundle"], "appraisal owner bundle"
+    )
+    lineage = [
+        module.load_json_stable(path, f"appraisal lineage[{index}]")
+        for index, path in enumerate(gate_paths["lineage"])
+    ]
+    proposal = module.load_json_stable(gate_paths["proposal"], "appraisal proposal")
+    binding = module.load_json_stable(gate_paths["binding"], "appraisal binding")
+    projection = module.load_json_stable(
+        gate_paths["projection"], "appraisal projection"
+    )
+    prefix_counts = {
+        name: int(binding["network_guard"]["ledgers"][name]["record_count"])
+        for name in LEDGER_NAMES
+    }
+    gate = module.validate_gate(
+        package,
+        approval,
+        prepared,
+        independent_review,
+        owner_bundle,
+        lineage,
+        gate_paths["expected_authority_sha256"],
+        proposal,
+        binding,
+        projection,
+        binding["network_ref"],
+        _claim_scopes_from_records(records, prefix_counts=prefix_counts),
+    )
+    consumed = _validate_guard_prefix(paths, records, gate)
+    return module.authorize_mutation(
+        gate,
+        operation_type,
+        payload,
+        authorization_subject=authorization_subject,
+        consumed_authorization_digests=consumed,
+    )
+
+
+def _append_scientific_candidate(
+    paths: Paths,
+    records: dict[str, list[dict[str, Any]]],
+    ledger: str,
+    record_id: str,
+    payload: dict[str, Any],
+    *,
+    args: argparse.Namespace,
+    operation_type: str,
+    authorization_subject: dict[str, Any] | None = None,
+) -> bool:
+    state = _check_idempotent_or_fail(
+        records[ledger], {"record_id": record_id, **payload}, record_id
+    )
+    if state == "conflict":
+        print(
+            f"{ledger} record {record_id!r} already exists with different payload",
+            file=sys.stderr,
+        )
+        return False
+    if state == "noop":
+        return True
+    authorization = _require_scientific_mutation_gate(
+        args,
+        paths,
+        records,
+        operation_type,
+        payload,
+        authorization_subject=authorization_subject,
+    )
+    timestamp = _utcnow()
+    sequence = _next_sequence(records)
+    scientific_row = {
+        "schema_version": SCHEMA_VERSION,
+        "network_id": paths.network_id,
+        "record_id": record_id,
+        "sequence": sequence,
+        "recorded_at": timestamp,
+        **payload,
+    }
+    refs = authorization["refs"]
+    event_payload = {
+        "event_type": "appraised_mutation",
+        "network_id": paths.network_id,
+        "operation_type": operation_type,
+        "authorization_digest": authorization["authorization_digest"],
+        "mutation_subject_digest": authorization["mutation_subject_digest"],
+        "target_ledger": ledger,
+        "target_record_id": record_id,
+        "appraisal_package_ref": refs["appraisal_package_ref"],
+        "appraisal_set_ref": refs["appraisal_set_ref"],
+        "approval_ref": refs["approval_ref"],
+        "owner_artifact_binding_digests": refs["owner_artifact_binding_digests"],
+        "expected_authority_sha256": refs["expected_authority_sha256"],
+        "binding_ref": refs["binding_ref"],
+        "projection_ref": refs["projection_ref"],
+    }
+    event_digest = _sha256_json(event_payload).split(":", 1)[1]
+    event_payload["event_digest"] = event_digest
+    event_row = {
+        "schema_version": SCHEMA_VERSION,
+        "network_id": paths.network_id,
+        "record_id": _record_id("event", "appraisal", event_digest[:16]),
+        "sequence": sequence + 1,
+        "recorded_at": timestamp,
+        **event_payload,
+    }
+    ledger_updates = {
+        paths.ledger(ledger): (records[ledger], [*records[ledger], scientific_row]),
+        paths.ledger("events"): (
+            records["events"],
+            [*records["events"], event_row],
+        ),
+    }
+    _replace_files_transactionally({}, ledger_updates)
+    records[ledger].append(scientific_row)
+    records["events"].append(event_row)
     return True
 
 
@@ -1518,9 +1882,7 @@ def _validate_snapshot_membership(
     snapshot_state = _zotero_snapshot_state_digest(snapshot) or ""
     expected: list[tuple[str, dict[str, Any]]] = []
     for parent in _snapshot_parents_sorted(snapshot.get("parents", [])):
-        expected.append(
-            _source_payload_from_parent(parent, snapshot, snapshot_state)
-        )
+        expected.append(_source_payload_from_parent(parent, snapshot, snapshot_state))
     expected_ids = [source_id for source_id, _ in expected]
     current_ids = _corpus_snapshot_current_source_ids(state)
     if current_ids != expected_ids:
@@ -1535,9 +1897,7 @@ def _validate_snapshot_membership(
         actual = latest_by_id.get(source_id)
         if actual is None:
             errors.append(f"current snapshot source row missing: {source_id}")
-        elif _source_row_signature(actual) != _source_row_signature(
-            expected_payload
-        ):
+        elif _source_row_signature(actual) != _source_row_signature(expected_payload):
             errors.append(f"current snapshot source payload mismatch: {source_id}")
 
 
@@ -1595,9 +1955,7 @@ def _validate_guarded_snapshot_membership(
         occurrence_hash = observed_guard.get("source_occurrence_sha256")
         if not SNAPSHOT_DIGEST_RE.fullmatch(str(occurrence_hash or "")):
             raise ValueError(f"{label}.source_occurrence_sha256 invalid")
-        expected_core = _source_revision_core(
-            parent, note_states[str(parent["key"])]
-        )
+        expected_core = _source_revision_core(parent, note_states[str(parent["key"])])
         if _revision_guard_core(observed_guard) != expected_core:
             raise ValueError(f"{label} does not match bound snapshots")
         actual = latest_by_id.get(source_id)
@@ -1609,16 +1967,16 @@ def _validate_guarded_snapshot_membership(
             raise ValueError(f"current guarded source parent mismatch: {source_id}")
         if mode == "bound":
             if actual.get("zotero_source_revision") != expected_core:
-                raise ValueError(f"current source revision payload mismatch: {source_id}")
+                raise ValueError(
+                    f"current source revision payload mismatch: {source_id}"
+                )
             if actual.get("version_hash") != expected_core["revision_sha256"]:
                 raise ValueError(f"current source revision hash mismatch: {source_id}")
             if actual.get("zotero_source_occurrence_sha256") != occurrence_hash:
                 raise ValueError(
                     f"current source occurrence hash mismatch: {source_id}"
                 )
-            if source_id != _parent_source_id(
-                parent, str(occurrence_hash)
-            ):
+            if source_id != _parent_source_id(parent, str(occurrence_hash)):
                 raise ValueError(f"current source revision ID mismatch: {source_id}")
             if occurrence_hash != expected_core["revision_sha256"]:
                 expected_occurrence = _sha256_json(
@@ -1634,9 +1992,13 @@ def _validate_guarded_snapshot_membership(
         else:
             parent_hash = expected_core["parent_metadata_sha256"]
             if actual.get("zotero_source_revision") is not None:
-                raise ValueError(f"legacy current source unexpectedly has guard: {source_id}")
+                raise ValueError(
+                    f"legacy current source unexpectedly has guard: {source_id}"
+                )
             if actual.get("version_hash") != parent_hash:
-                raise ValueError(f"legacy current source parent hash mismatch: {source_id}")
+                raise ValueError(
+                    f"legacy current source parent hash mismatch: {source_id}"
+                )
             if occurrence_hash != parent_hash:
                 raise ValueError(
                     f"legacy current source occurrence hash mismatch: {source_id}"
@@ -1653,24 +2015,18 @@ def _validate_source_revision_guard_event_binding(
     event_rows: list[dict[str, Any]],
     errors: list[str],
 ) -> None:
-    current_guards = state.get(
-        "corpus_snapshot_current_source_revision_guards"
-    )
+    current_guards = state.get("corpus_snapshot_current_source_revision_guards")
     if current_guards is None:
         return
     refresh_events = [
         row
-        for row in sorted(
-            event_rows, key=lambda item: int(item.get("sequence") or 0)
-        )
+        for row in sorted(event_rows, key=lambda item: int(item.get("sequence") or 0))
         if row.get("event_type") == "snapshot_refreshed"
     ]
     if not refresh_events:
         return
     if refresh_events[-1].get("source_revision_guards") != current_guards:
-        errors.append(
-            "latest snapshot refresh event source revision guards mismatch"
-        )
+        errors.append("latest snapshot refresh event source revision guards mismatch")
     latest = refresh_events[-1]
     event_bindings = (
         ("snapshot_path", "corpus_snapshot_path"),
@@ -1689,9 +2045,7 @@ def _validate_source_revision_guard_event_binding(
     )
     for event_field, state_field in event_bindings:
         if latest.get(event_field) != state.get(state_field):
-            errors.append(
-                f"latest snapshot refresh event {event_field} mismatch"
-            )
+            errors.append(f"latest snapshot refresh event {event_field} mismatch")
 
 
 def _validate_zotero_source_record(
@@ -1731,9 +2085,8 @@ def _validate_zotero_source_record(
         occurrence = row.get("zotero_source_occurrence_sha256")
         if not SNAPSHOT_DIGEST_RE.fullmatch(str(occurrence or "")):
             errors.append(f"Zotero source {source_id} occurrence hash invalid")
-        elif (
-            isinstance(revision, dict)
-            and occurrence != revision.get("revision_sha256")
+        elif isinstance(revision, dict) and occurrence != revision.get(
+            "revision_sha256"
         ):
             expected_occurrence = _sha256_json(
                 {
@@ -1742,9 +2095,7 @@ def _validate_zotero_source_record(
                 }
             )
             if occurrence != expected_occurrence:
-                errors.append(
-                    f"Zotero source {source_id} occurrence hash mismatch"
-                )
+                errors.append(f"Zotero source {source_id} occurrence hash mismatch")
 
 
 def _validate_source_record(
@@ -1759,9 +2110,10 @@ def _validate_source_record(
         errors.append(f"invalid source_id: {source_id!r}")
     if row.get("record_id") != _record_id("source", str(source_id or "")):
         errors.append(f"source record_id mismatch: {row.get('record_id')}")
-    if not isinstance(row.get("canonical_version"), str) or not row[
-        "canonical_version"
-    ].strip():
+    if (
+        not isinstance(row.get("canonical_version"), str)
+        or not row["canonical_version"].strip()
+    ):
         errors.append(f"source {source_id} missing canonical_version")
     if row.get("read_depth") not in READ_DEPTHS:
         errors.append(f"invalid read_depth for source {source_id}")
@@ -1773,9 +2125,7 @@ def _validate_source_records(
     rows: list[dict[str, Any]], network_id: str, errors: list[str]
 ) -> None:
     known_sources = {
-        row.get("source_id")
-        for row in rows
-        if isinstance(row.get("source_id"), str)
+        row.get("source_id") for row in rows if isinstance(row.get("source_id"), str)
     }
     for row in rows:
         _validate_source_record(row, network_id, errors)
@@ -1902,8 +2252,7 @@ def _validate_evidence_record(
         errors.append(f"evidence {evidence_id} missing independence_group")
     if _references_unknown_supersede(row.get("supersedes"), known_evidence):
         errors.append(
-            f"evidence {evidence_id} supersedes unknown evidence "
-            f"{row['supersedes']}"
+            f"evidence {evidence_id} supersedes unknown evidence {row['supersedes']}"
         )
 
 
@@ -1968,8 +2317,7 @@ def _validate_gap_records(
         record_id = row.get("record_id")
         if not isinstance(gap_id, str) or not isinstance(record_id, str):
             continue
-        transition_from = row.get("transition_from_record_id")
-        if transition_from is None:
+        if _is_initial_gap_record(row):
             if record_id != _gap_initial_record_id(gap_id):
                 errors.append(f"gap {gap_id} initial record_id invalid")
             if gap_id in latest_by_gap:
@@ -1998,9 +2346,7 @@ def _validate_gap_transition(
 ) -> None:
     prior_record_id = prior.get("record_id")
     if row.get("transition_from_record_id") != prior_record_id:
-        errors.append(
-            f"gap {gap_id} transition does not reference latest record"
-        )
+        errors.append(f"gap {gap_id} transition does not reference latest record")
     if row.get("supersedes") != prior_record_id:
         errors.append(f"gap {gap_id} transition supersedes mismatch")
     sequence = row.get("sequence")
@@ -2099,6 +2445,26 @@ def _validate_gap_record(
         errors.append(f"gap {gap_id} invalid gap_type")
     if row.get("status") not in GAP_STATUSES:
         errors.append(f"gap {gap_id} invalid status")
+    transition_from = row.get("transition_from_record_id")
+    if _is_initial_gap_record(row):
+        if row.get("status") != "open":
+            errors.append(
+                f"gap {gap_id} initial record must be open; use transition-gap"
+            )
+        if row.get("resolution_evidence_refs") not in (None, []):
+            errors.append(
+                f"gap {gap_id} initial record cannot contain resolution evidence"
+            )
+        if row.get("resolution_source") not in (None, ""):
+            errors.append(
+                f"gap {gap_id} initial record cannot contain a resolution source"
+            )
+    if "transition_from_record_id" in row and (
+        not isinstance(transition_from, str) or not transition_from.strip()
+    ):
+        errors.append(
+            f"gap {gap_id} transition_from_record_id must be a non-empty string"
+        )
     priority = row.get("priority")
     if priority is not None and priority not in GAP_PRIORITIES:
         errors.append(f"gap {gap_id} invalid priority")
@@ -2107,6 +2473,10 @@ def _validate_gap_record(
         errors.append(f"gap {gap_id} invalid decision_impact")
     if row.get("gap_type") == "implicit_candidate":
         _validate_implicit_gap_record(row, gap_id, known_claims, errors)
+
+
+def _is_initial_gap_record(row: dict[str, Any]) -> bool:
+    return row.get("transition_from_record_id") is None
 
 
 def _validate_implicit_gap_record(
@@ -2145,9 +2515,12 @@ def _references_unknown_supersede(value: Any, known: set[str]) -> bool:
 
 
 def _validate_event_records(
-    rows: list[dict[str, Any]], errors: list[str], expected_network_id: str
+    records: dict[str, list[dict[str, Any]]],
+    errors: list[str],
+    expected_network_id: str,
 ) -> None:
-    for row in rows:
+    consumed: set[tuple[str, str]] = set()
+    for row in records["events"]:
         if row.get("schema_version") != SCHEMA_VERSION:
             errors.append("event record schema_version mismatch")
         event_type = row.get("event_type")
@@ -2155,6 +2528,213 @@ def _validate_event_records(
             errors.append(f"event {row.get('record_id')} invalid event_type")
         if event_type == "patch_decision":
             _validate_patch_decision_event(row, errors, expected_network_id)
+        elif event_type == "appraised_mutation":
+            identity = _validate_appraised_mutation_event(
+                row, records, errors, expected_network_id
+            )
+            if identity is not None:
+                if identity in consumed:
+                    errors.append(
+                        f"event {row.get('record_id')} replays appraisal authorization"
+                    )
+                consumed.add(identity)
+
+
+def _validate_digest_ref(
+    value: Any,
+    *,
+    label: str,
+    id_field: str,
+    digest_field: str,
+    prefix: str | None,
+    errors: list[str],
+) -> None:
+    if not isinstance(value, dict) or set(value) != {id_field, digest_field}:
+        errors.append(f"{label} fields invalid")
+        return
+    digest = value.get(digest_field)
+    identifier = value.get(id_field)
+    valid_id = isinstance(identifier, str) and bool(identifier.strip())
+    if prefix is not None:
+        valid_id = valid_id and identifier == prefix + str(digest)[:16]
+    if (
+        not isinstance(digest, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", digest)
+        or not valid_id
+    ):
+        errors.append(f"{label} ID/digest mismatch")
+
+
+def _validate_package_ref(value: Any, *, label: str, errors: list[str]) -> None:
+    if not isinstance(value, dict) or set(value) != {"package_digest"}:
+        errors.append(f"{label} fields invalid")
+        return
+    if not isinstance(value.get("package_digest"), str) or not re.fullmatch(
+        r"[0-9a-f]{64}", value["package_digest"]
+    ):
+        errors.append(f"{label}.package_digest invalid")
+
+
+def _validate_appraised_mutation_event(
+    row: dict[str, Any],
+    records: dict[str, list[dict[str, Any]]],
+    errors: list[str],
+    expected_network_id: str,
+) -> tuple[str, str] | None:
+    record_id = row.get("record_id")
+    label = f"event {record_id}"
+    expected_fields = {
+        "schema_version",
+        "network_id",
+        "record_id",
+        "sequence",
+        "recorded_at",
+        "event_type",
+        "event_digest",
+        "operation_type",
+        "authorization_digest",
+        "mutation_subject_digest",
+        "target_ledger",
+        "target_record_id",
+        "appraisal_package_ref",
+        "appraisal_set_ref",
+        "approval_ref",
+        "owner_artifact_binding_digests",
+        "expected_authority_sha256",
+        "binding_ref",
+        "projection_ref",
+    }
+    if set(row) != expected_fields:
+        errors.append(f"{label} appraised_mutation fields invalid")
+        return None
+    if row.get("network_id") != expected_network_id:
+        errors.append(f"{label} network_id mismatch")
+    operation_type = row.get("operation_type")
+    target_ledger = row.get("target_ledger")
+    expected_ledger = {
+        "add-claim": "claims",
+        "add-evidence": "evidence",
+        "add-relation": "relations",
+        "transition-gap": "gaps",
+    }.get(str(operation_type))
+    if expected_ledger is None or target_ledger != expected_ledger:
+        errors.append(f"{label} operation/ledger mismatch")
+        return None
+    for field in ("authorization_digest", "mutation_subject_digest", "event_digest"):
+        if not isinstance(row.get(field), str) or not re.fullmatch(
+            r"[0-9a-f]{64}", str(row.get(field))
+        ):
+            errors.append(f"{label} {field} invalid")
+    _validate_package_ref(
+        row.get("appraisal_package_ref"),
+        label=f"{label} appraisal_package_ref",
+        errors=errors,
+    )
+    _validate_digest_ref(
+        row.get("appraisal_set_ref"),
+        label=f"{label} appraisal_set_ref",
+        id_field="appraisal_set_id",
+        digest_field="appraisal_set_digest",
+        prefix=None,
+        errors=errors,
+    )
+    _validate_digest_ref(
+        row.get("approval_ref"),
+        label=f"{label} approval_ref",
+        id_field="authority_id",
+        digest_field="authority_digest",
+        prefix=None,
+        errors=errors,
+    )
+    owner_digests = row.get("owner_artifact_binding_digests")
+    if (
+        not isinstance(owner_digests, list)
+        or not owner_digests
+        or any(
+            not isinstance(item, str) or not re.fullmatch(r"[0-9a-f]{64}", item)
+            for item in owner_digests
+        )
+        or len(owner_digests) != len(set(owner_digests))
+    ):
+        errors.append(f"{label} owner_artifact_binding_digests invalid")
+    if not isinstance(row.get("expected_authority_sha256"), str) or not re.fullmatch(
+        r"[0-9a-f]{64}", row["expected_authority_sha256"]
+    ):
+        errors.append(f"{label} expected_authority_sha256 invalid")
+    elif isinstance(row.get("approval_ref"), dict) and row[
+        "expected_authority_sha256"
+    ] != row["approval_ref"].get("authority_digest"):
+        errors.append(f"{label} expected authority/approval mismatch")
+    _validate_digest_ref(
+        row.get("binding_ref"),
+        label=f"{label} binding_ref",
+        id_field="binding_id",
+        digest_field="binding_digest",
+        prefix="evidence-appraisal-binding-",
+        errors=errors,
+    )
+    _validate_digest_ref(
+        row.get("projection_ref"),
+        label=f"{label} projection_ref",
+        id_field="projection_id",
+        digest_field="projection_digest",
+        prefix="evidence-appraisal-projection-",
+        errors=errors,
+    )
+    subject = {
+        key: value
+        for key, value in row.items()
+        if key
+        not in {
+            "schema_version",
+            "record_id",
+            "sequence",
+            "recorded_at",
+            "event_digest",
+        }
+    }
+    expected_event_digest = _sha256_json(subject).split(":", 1)[1]
+    if row.get("event_digest") != expected_event_digest:
+        errors.append(f"{label} event_digest mismatch")
+    if record_id != _record_id("event", "appraisal", expected_event_digest[:16]):
+        errors.append(f"{label} record ID/digest mismatch")
+    targets = [
+        item
+        for item in records[str(target_ledger)]
+        if item.get("record_id") == row.get("target_record_id")
+    ]
+    if len(targets) != 1:
+        errors.append(f"{label} target scientific record missing or ambiguous")
+    else:
+        target = targets[0]
+        payload = {
+            key: value
+            for key, value in target.items()
+            if key
+            not in {
+                "schema_version",
+                "network_id",
+                "record_id",
+                "sequence",
+                "recorded_at",
+            }
+        }
+        expected_mutation_digest = _sha256_json(
+            {"operation_type": operation_type, "payload": payload}
+        ).split(":", 1)[1]
+        if row.get("mutation_subject_digest") != expected_mutation_digest:
+            errors.append(f"{label} mutation_subject_digest mismatch")
+        if int(target.get("sequence") or 0) >= int(row.get("sequence") or 0):
+            errors.append(f"{label} must follow its scientific record")
+    projection = row.get("projection_ref")
+    authorization = row.get("authorization_digest")
+    if (
+        isinstance(projection, dict)
+        and isinstance(projection.get("projection_digest"), str)
+        and isinstance(authorization, str)
+    ):
+        return projection["projection_digest"], authorization
+    return None
 
 
 def _validate_patch_decision_event(
@@ -2180,9 +2760,117 @@ def _validate_patch_decision_event(
         "operator",
         "decisions",
     }
-    if set(row) != expected_fields:
+    has_appraisal_gate = "appraisal_gate" in row
+    if set(row) not in (expected_fields, expected_fields | {"appraisal_gate"}):
         errors.append(f"{label} patch_decision fields invalid")
         return
+    appraisal_gate = row.get("appraisal_gate")
+    if has_appraisal_gate:
+        if not isinstance(appraisal_gate, dict) or set(appraisal_gate) != {
+            "status",
+            "appraisal_package_ref",
+            "appraisal_set_ref",
+            "approval_ref",
+            "owner_artifact_binding_digests",
+            "expected_authority_sha256",
+            "binding_ref",
+            "projection_ref",
+        }:
+            errors.append(f"{label} appraisal_gate fields invalid")
+        elif appraisal_gate.get("status") == "reviewed_appraisal":
+            _validate_package_ref(
+                appraisal_gate.get("appraisal_package_ref"),
+                label=f"{label} appraisal_package_ref",
+                errors=errors,
+            )
+            _validate_digest_ref(
+                appraisal_gate.get("appraisal_set_ref"),
+                label=f"{label} appraisal_set_ref",
+                id_field="appraisal_set_id",
+                digest_field="appraisal_set_digest",
+                prefix=None,
+                errors=errors,
+            )
+            _validate_digest_ref(
+                appraisal_gate.get("approval_ref"),
+                label=f"{label} approval_ref",
+                id_field="authority_id",
+                digest_field="authority_digest",
+                prefix=None,
+                errors=errors,
+            )
+            owner_digests = appraisal_gate.get("owner_artifact_binding_digests")
+            if (
+                not isinstance(owner_digests, list)
+                or not owner_digests
+                or any(
+                    not isinstance(item, str) or not re.fullmatch(r"[0-9a-f]{64}", item)
+                    for item in owner_digests
+                )
+                or len(owner_digests) != len(set(owner_digests))
+            ):
+                errors.append(f"{label} owner_artifact_binding_digests invalid")
+            if not isinstance(
+                appraisal_gate.get("expected_authority_sha256"), str
+            ) or not re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(appraisal_gate.get("expected_authority_sha256")),
+            ):
+                errors.append(f"{label} expected_authority_sha256 invalid")
+            elif isinstance(
+                appraisal_gate.get("approval_ref"), dict
+            ) and appraisal_gate["expected_authority_sha256"] != appraisal_gate[
+                "approval_ref"
+            ].get("authority_digest"):
+                errors.append(f"{label} expected authority/approval mismatch")
+            _validate_digest_ref(
+                appraisal_gate.get("binding_ref"),
+                label=f"{label} binding_ref",
+                id_field="binding_id",
+                digest_field="binding_digest",
+                prefix="evidence-appraisal-binding-",
+                errors=errors,
+            )
+            _validate_digest_ref(
+                appraisal_gate.get("projection_ref"),
+                label=f"{label} projection_ref",
+                id_field="projection_id",
+                digest_field="projection_digest",
+                prefix="evidence-appraisal-projection-",
+                errors=errors,
+            )
+        elif appraisal_gate.get("status") == "not_appraised_legacy":
+            if any(
+                appraisal_gate.get(field) is not None
+                for field in (
+                    "appraisal_package_ref",
+                    "appraisal_set_ref",
+                    "approval_ref",
+                    "owner_artifact_binding_digests",
+                    "expected_authority_sha256",
+                    "binding_ref",
+                    "projection_ref",
+                )
+            ):
+                errors.append(f"{label} legacy appraisal gate must have null refs")
+        else:
+            errors.append(f"{label} appraisal_gate status invalid")
+    accepted_science = any(
+        isinstance(decision, dict)
+        and decision.get("decision") == "accept"
+        and isinstance(decision.get("operations"), list)
+        and bool(decision["operations"])
+        for decision in row.get("decisions", [])
+    )
+    if (
+        has_appraisal_gate
+        and accepted_science
+        and (
+            not isinstance(appraisal_gate, dict)
+            or appraisal_gate.get("status") != "reviewed_appraisal"
+        )
+    ):
+        errors.append(f"{label} accepted science lacks reviewed appraisal gate")
     if row.get("network_id") != expected_network_id:
         errors.append(f"{label} network_id mismatch")
     digest_fields = (
@@ -2277,8 +2965,7 @@ def _validate_patch_decision_event(
             errors.append(f"{label} authority basis[{index}] locator invalid")
         subject = {key: value for key, value in basis.items() if key != "basis_id"}
         expected_id = (
-            "patch-authority-basis-"
-            + _sha256_json(subject).split(":", 1)[1][:16]
+            "patch-authority-basis-" + _sha256_json(subject).split(":", 1)[1][:16]
         )
         if basis.get("basis_id") != expected_id:
             errors.append(f"{label} authority basis[{index}] ID mismatch")
@@ -2306,9 +2993,11 @@ def _validate_patch_decision_event(
             continue
         action_digest = decision.get("action_digest")
         action_id = decision.get("action_id")
-        if not isinstance(action_digest, str) or not re.fullmatch(
-            r"[0-9a-f]{64}", action_digest
-        ) or action_id != "network-patch-action-" + str(action_digest)[:16]:
+        if (
+            not isinstance(action_digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", action_digest)
+            or action_id != "network-patch-action-" + str(action_digest)[:16]
+        ):
             errors.append(f"{decision_label} action ID/digest mismatch")
         action_identity = (str(action_id), str(action_digest))
         if action_identity in seen_actions:
@@ -2340,15 +3029,15 @@ def _validate_patch_decision_event(
                 "operation_id",
                 "operation_digest",
             }:
-                errors.append(
-                    f"{decision_label} operation[{op_index}] fields invalid"
-                )
+                errors.append(f"{decision_label} operation[{op_index}] fields invalid")
                 continue
             operation_digest = operation.get("operation_digest")
             operation_id = operation.get("operation_id")
-            if not isinstance(operation_digest, str) or not re.fullmatch(
-                r"[0-9a-f]{64}", operation_digest
-            ) or operation_id != "network-operation-" + str(operation_digest)[:16]:
+            if (
+                not isinstance(operation_digest, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", operation_digest)
+                or operation_id != "network-operation-" + str(operation_digest)[:16]
+            ):
                 errors.append(
                     f"{decision_label} operation[{op_index}] ID/digest mismatch"
                 )
@@ -2393,9 +3082,7 @@ def _validate_record_shapes(
     errors: list[str] = []
 
     _validate_snapshot_state(paths, state, records["sources"], errors)
-    _validate_source_revision_guard_event_binding(
-        state, records["events"], errors
-    )
+    _validate_source_revision_guard_event_binding(state, records["events"], errors)
 
     known = _collect_known_record_ids(records)
     _validate_source_records(records["sources"], paths.network_id, errors)
@@ -2417,10 +3104,8 @@ def _validate_record_shapes(
         known["relations"],
         errors,
     )
-    _validate_gap_records(
-        records["gaps"], known["claims"], records["evidence"], errors
-    )
-    _validate_event_records(records["events"], errors, paths.network_id)
+    _validate_gap_records(records["gaps"], known["claims"], records["evidence"], errors)
+    _validate_event_records(records, errors, paths.network_id)
     _validate_sequence_continuity(records, errors)
     _validate_record_id_collisions(records, errors)
 
@@ -2679,9 +3364,7 @@ def _active_records(
     rows: list[dict[str, Any]], identity_field: str
 ) -> list[dict[str, Any]]:
     superseded = {
-        row["supersedes"]
-        for row in rows
-        if isinstance(row.get("supersedes"), str)
+        row["supersedes"] for row in rows if isinstance(row.get("supersedes"), str)
     }
     return [
         row
@@ -2723,9 +3406,7 @@ def _collect_aggregate_coverage(
         "covered_dimensions": sorted(covered_dimensions),
         "covered_benchmark_profiles": sorted(covered_profiles),
         "missing_dimensions": sorted(required_dimension_set - covered_dimensions),
-        "missing_benchmark_profiles": sorted(
-            required_profile_set - covered_profiles
-        ),
+        "missing_benchmark_profiles": sorted(required_profile_set - covered_profiles),
     }
 
 
@@ -2791,8 +3472,7 @@ def _derive_gaps_payload_for_claim(
                 "impact": "medium" if claim.get("impact") != "high" else "high",
                 "status": "open",
                 "description": (
-                    f"Claim {claim_id} currently has one independent "
-                    "source stream."
+                    f"Claim {claim_id} currently has one independent source stream."
                 ),
                 "derivation_source": "derive-gaps",
                 "derivation_rule": "single_independent_source",
@@ -3065,12 +3745,14 @@ def command_add_claim(args: argparse.Namespace) -> int:
             return 1
         return (
             0
-            if _append_candidate(
+            if _append_scientific_candidate(
                 paths,
                 records,
                 "claims",
                 _record_id("claim", claim_id),
                 payload,
+                args=args,
+                operation_type="add-claim",
             )
             else 1
         )
@@ -3122,12 +3804,14 @@ def command_add_evidence(args: argparse.Namespace) -> int:
             return 1
         return (
             0
-            if _append_candidate(
+            if _append_scientific_candidate(
                 paths,
                 records,
                 "evidence",
                 _record_id("evidence", evidence_id),
                 payload,
+                args=args,
+                operation_type="add-evidence",
             )
             else 1
         )
@@ -3180,12 +3864,14 @@ def command_add_relation(args: argparse.Namespace) -> int:
             return 1
         return (
             0
-            if _append_candidate(
+            if _append_scientific_candidate(
                 paths,
                 records,
                 "relations",
                 _record_id("relation", relation_id),
                 payload,
+                args=args,
+                operation_type="add-relation",
             )
             else 1
         )
@@ -3196,6 +3882,18 @@ def command_record_gap(args: argparse.Namespace) -> int:
         paths = _safe_paths(args.root, args.network_id)
         state, records = _load_state(paths)
         gap_id = _validate_gap_id(args.gap_id, "gap_id")
+        if args.status != "open":
+            print(
+                "record-gap creates only open gaps; use transition-gap for status changes",
+                file=sys.stderr,
+            )
+            return 1
+        if args.resolution_evidence_ref or (args.resolution_source or "").strip():
+            print(
+                "record-gap cannot contain resolution references; use transition-gap",
+                file=sys.stderr,
+            )
+            return 1
         if args.gap_type == "implicit_candidate" and args.novelty_claimed:
             print("implicit_candidate cannot claim novelty", file=sys.stderr)
             return 1
@@ -3219,9 +3917,7 @@ def command_record_gap(args: argparse.Namespace) -> int:
             "defeaters": (args.defeaters or "").strip(),
             "search_test": (args.search_test or "").strip(),
             "novelty_claimed": bool(args.novelty_claimed),
-            "resolution_evidence_refs": sorted(
-                set(args.resolution_evidence_ref or [])
-            ),
+            "resolution_evidence_refs": sorted(set(args.resolution_evidence_ref or [])),
             "resolution_source": (args.resolution_source or "").strip(),
         }
         if args.priority is not None:
@@ -3358,7 +4054,25 @@ def command_transition_gap(args: argparse.Namespace) -> int:
         )
         sequence = _next_sequence(records)
         record_id = _gap_transition_record_id(gap_id, sequence)
-        if not _append_candidate(paths, records, "gaps", record_id, payload):
+        if not _append_scientific_candidate(
+            paths,
+            records,
+            "gaps",
+            record_id,
+            payload,
+            args=args,
+            operation_type="transition-gap",
+            authorization_subject={
+                "operation_type": "transition-gap",
+                "gap_id": gap_id,
+                "from_record_id": from_record_id,
+                "from_status": prior_status,
+                "to_status": next_status,
+                "reason": reason,
+                "evidence_refs": evidence_refs,
+                "resolution_source": resolution_source,
+            },
+        ):
             return 1
         print(
             json.dumps(
@@ -3475,10 +4189,7 @@ def _resolve_unique_prior_sources(
         prior_source_id = key_source_id or identity_source_id
         if prior_source_id is not None:
             previous_parent_key = matched_source_ids.get(prior_source_id)
-            if (
-                previous_parent_key is not None
-                and previous_parent_key != parent_key
-            ):
+            if previous_parent_key is not None and previous_parent_key != parent_key:
                 raise ValueError(
                     f"{context} predecessor {prior_source_id!r} matches multiple "
                     f"current parents {previous_parent_key!r} and {parent_key!r}"
@@ -3584,9 +4295,7 @@ def command_ingest_zotero_snapshot(args: argparse.Namespace) -> int:  # noqa: C9
             semantic_path = Path(os.path.abspath(semantic_path))
             try:
                 semantic, semantic_file_digest, semantic_note_states = (
-                    _read_zotero_semantic_snapshot_with_digest(
-                        semantic_path, snapshot
-                    )
+                    _read_zotero_semantic_snapshot_with_digest(semantic_path, snapshot)
                 )
             except (ValueError, OSError, json.JSONDecodeError) as exc:
                 print(f"semantic snapshot invalid: {exc}", file=sys.stderr)
@@ -3630,9 +4339,7 @@ def command_ingest_zotero_snapshot(args: argparse.Namespace) -> int:  # noqa: C9
                     print("snapshot state mismatch", file=sys.stderr)
                     return 1
             if state.get("corpus_snapshot_current_source_revision_guards") is not None:
-                bound_semantic_path_value = state.get(
-                    "corpus_semantic_snapshot_path"
-                )
+                bound_semantic_path_value = state.get("corpus_semantic_snapshot_path")
                 if (
                     semantic is None
                     or semantic_path is None
@@ -3642,9 +4349,7 @@ def command_ingest_zotero_snapshot(args: argparse.Namespace) -> int:  # noqa: C9
                     print("semantic snapshot binding missing", file=sys.stderr)
                     return 1
                 try:
-                    bound_semantic_path = Path(
-                        bound_semantic_path_value
-                    ).resolve()
+                    bound_semantic_path = Path(bound_semantic_path_value).resolve()
                     candidate_semantic_path = semantic_path.resolve()
                 except OSError:
                     print("semantic snapshot binding invalid", file=sys.stderr)
@@ -3680,8 +4385,7 @@ def command_ingest_zotero_snapshot(args: argparse.Namespace) -> int:  # noqa: C9
             )
             legacy_semantic_migration = (
                 semantic is not None
-                and state.get("corpus_snapshot_current_source_revision_guards")
-                is None
+                and state.get("corpus_snapshot_current_source_revision_guards") is None
                 and "corpus_snapshot_current_source_ids" in state
             )
             if (
@@ -3705,8 +4409,8 @@ def command_ingest_zotero_snapshot(args: argparse.Namespace) -> int:  # noqa: C9
         latest_by_identity, latest_by_key = _latest_sources_by_identity_and_key(
             prior_current_rows if has_current_membership else records["sources"]
         )
-        historical_by_identity, historical_by_key = (
-            _latest_sources_by_identity_and_key(records["sources"])
+        historical_by_identity, historical_by_key = _latest_sources_by_identity_and_key(
+            records["sources"]
         )
         prior_revision_guards_value = state.get(
             "corpus_snapshot_current_source_revision_guards"
@@ -3801,11 +4505,9 @@ def command_ingest_zotero_snapshot(args: argparse.Namespace) -> int:  # noqa: C9
                     validated_prior_semantic,
                     validated_prior_semantic_file_digest,
                     prior_note_states,
-                ) = (
-                    _read_zotero_semantic_snapshot_with_digest(
-                        Path(os.path.abspath(validated_prior_semantic_path)),
-                        bound_snapshot,
-                    )
+                ) = _read_zotero_semantic_snapshot_with_digest(
+                    Path(os.path.abspath(validated_prior_semantic_path)),
+                    bound_snapshot,
                 )
                 validated_prior_semantic_path = Path(
                     os.path.abspath(validated_prior_semantic_path)
@@ -3814,9 +4516,7 @@ def command_ingest_zotero_snapshot(args: argparse.Namespace) -> int:  # noqa: C9
                 print(f"prior semantic snapshot invalid: {exc}", file=sys.stderr)
                 return 1
             prior_revision_guards = {}
-            sorted_bound_parents = _snapshot_parents_sorted(
-                bound_snapshot["parents"]
-            )
+            sorted_bound_parents = _snapshot_parents_sorted(bound_snapshot["parents"])
             try:
                 legacy_prior_sources = _resolve_unique_prior_sources(
                     sorted_bound_parents,
@@ -3904,9 +4604,7 @@ def command_ingest_zotero_snapshot(args: argparse.Namespace) -> int:  # noqa: C9
         matched_prior_source_ids: set[str] = set()
         for parent in sorted_parents:
             candidate_revision = (
-                _source_revision_core(
-                    parent, semantic_note_states[str(parent["key"])]
-                )
+                _source_revision_core(parent, semantic_note_states[str(parent["key"])])
                 if semantic_note_states is not None
                 else None
             )
@@ -3923,9 +4621,7 @@ def command_ingest_zotero_snapshot(args: argparse.Namespace) -> int:  # noqa: C9
                 matched_prior_source_ids.add(str(prior["source_id"]))
             prior_guard = (
                 (
-                    prior_revision_guards_by_source_id.get(
-                        str(prior.get("source_id"))
-                    )
+                    prior_revision_guards_by_source_id.get(str(prior.get("source_id")))
                     if prior is not None
                     else None
                 )
@@ -3947,11 +4643,9 @@ def command_ingest_zotero_snapshot(args: argparse.Namespace) -> int:  # noqa: C9
             if candidate_revision is not None and prior_guard is not None:
                 prior_same = _revision_guard_core(prior_guard) == candidate_revision
             else:
-                prior_same = (
-                    prior is not None
-                    and _source_row_signature(prior)
-                    == _source_row_signature(payload)
-                )
+                prior_same = prior is not None and _source_row_signature(
+                    prior
+                ) == _source_row_signature(payload)
             if prior_same:
                 source_id = _validate_id(str(prior["source_id"]), "source_id")
                 if source_id in seen_source_ids:
@@ -4002,16 +4696,11 @@ def command_ingest_zotero_snapshot(args: argparse.Namespace) -> int:  # noqa: C9
                 else str(payload["version_hash"])
             )
             historical_predecessor = (
-                resolved_historical_sources.get(parent_key)
-                if prior is None
-                else None
+                resolved_historical_sources.get(parent_key) if prior is None else None
             )
-            if (
-                candidate_revision is not None
-                and (
-                    proposed_source_id in existing_by_id
-                    or historical_predecessor is not None
-                )
+            if candidate_revision is not None and (
+                proposed_source_id in existing_by_id
+                or historical_predecessor is not None
             ):
                 occurrence_predecessor = prior or historical_predecessor
                 if occurrence_predecessor is None or not isinstance(
@@ -4082,8 +4771,7 @@ def command_ingest_zotero_snapshot(args: argparse.Namespace) -> int:  # noqa: C9
         if (
             allow_refresh
             and snapshot_state_sha == bound_state_sha
-            and state.get("corpus_snapshot_current_source_revision_guards")
-            is not None
+            and state.get("corpus_snapshot_current_source_revision_guards") is not None
             and semantic is not None
             and semantic.get("state_sha256")
             != state.get("corpus_semantic_snapshot_state_sha256")
@@ -4105,9 +4793,7 @@ def command_ingest_zotero_snapshot(args: argparse.Namespace) -> int:  # noqa: C9
         staged_state["corpus_snapshot_current_source_ids"] = current_source_ids
         if semantic is not None and semantic_path is not None:
             staged_state["corpus_semantic_snapshot_path"] = str(semantic_path)
-            staged_state["corpus_semantic_snapshot_file_sha256"] = (
-                semantic_file_digest
-            )
+            staged_state["corpus_semantic_snapshot_file_sha256"] = semantic_file_digest
             staged_state["corpus_semantic_snapshot_state_sha256"] = semantic.get(
                 "state_sha256"
             )
@@ -4452,9 +5138,7 @@ def command_derive_gaps(args: argparse.Namespace) -> int:
                     "appended_gap_ids": [
                         str(payload["gap_id"]) for payload in new_payloads
                     ],
-                    "derived_gap_ids": [
-                        str(payload["gap_id"]) for payload in payloads
-                    ],
+                    "derived_gap_ids": [str(payload["gap_id"]) for payload in payloads],
                     "reopen_required_gap_ids": reopen_required,
                 },
                 ensure_ascii=False,
@@ -4750,14 +5434,11 @@ def _export_nodes(
                 "node_id": f"source:{source_id}",
                 "kind": "source",
                 "label": str(
-                    source.get("title")
-                    or source.get("canonical_identity")
-                    or source_id
+                    source.get("title") or source.get("canonical_identity") or source_id
                 ),
                 "status": (
                     "active"
-                    if source.get("role") != "zotero_corpus"
-                    or source_id in current_ids
+                    if source.get("role") != "zotero_corpus" or source_id in current_ids
                     else "deprecated"
                 ),
                 "confidence": (
@@ -4880,10 +5561,7 @@ def _export_relations(
     for claim, row in backed_claims:
         claim_id = str(claim["claim_id"])
         entity_id = str(claim["entity_id"])
-        if (
-            f"claim:{claim_id}" not in node_ids
-            or f"entity:{entity_id}" not in node_ids
-        ):
+        if f"claim:{claim_id}" not in node_ids or f"entity:{entity_id}" not in node_ids:
             continue
         relations.append(
             {
@@ -5020,9 +5698,7 @@ def _export_change_history(
                     "action": "patch-decision",
                     "object_ids": object_ids,
                     "basis_refs": basis_refs,
-                    "recorded_at": str(
-                        row.get("recorded_at") or state["created_at"]
-                    ),
+                    "recorded_at": str(row.get("recorded_at") or state["created_at"]),
                 }
             )
             continue
@@ -5072,9 +5748,7 @@ def _knowledge_network_export(
         paths, export_sources, current_sources, records
     )
     node_ids = {str(node["node_id"]) for node in nodes}
-    relations = _export_relations(
-        current_sources, records, corpus_node_id, node_ids
-    )
+    relations = _export_relations(current_sources, records, corpus_node_id, node_ids)
     gaps = _export_gaps(records["gaps"], node_ids, corpus_node_id)
     status = _derive_status_summary(paths, state, records)
     open_gap_ids = sorted(
@@ -5098,8 +5772,10 @@ def _knowledge_network_export(
         "change_history_recorded": True,
     }
     completion_status = "partial"
-    if status["completion"]["can_complete"] and not open_gap_ids and all(
-        gate_checks.values()
+    if (
+        status["completion"]["can_complete"]
+        and not open_gap_ids
+        and all(gate_checks.values())
     ):
         completion_status = "passed"
     elif any(gap.get("status") == "unresolved" for gap in gaps):
@@ -5156,15 +5832,11 @@ def _knowledge_network_export(
             "gate_checks": gate_checks,
         },
         "sources": export_sources,
-        "claims": sorted(
-            records["claims"], key=lambda row: str(row.get("record_id"))
-        ),
+        "claims": sorted(records["claims"], key=lambda row: str(row.get("record_id"))),
         "evidence": sorted(
             records["evidence"], key=lambda row: str(row.get("record_id"))
         ),
-        "events": sorted(
-            records["events"], key=lambda row: str(row.get("record_id"))
-        ),
+        "events": sorted(records["events"], key=lambda row: str(row.get("record_id"))),
         "projection_omissions": projection_omissions,
         "ledger_digest": internal_digest,
     }
@@ -5194,6 +5866,19 @@ def command_export(args: argparse.Namespace) -> int:
         return 0
     print(output)
     return 0
+
+
+def _add_appraisal_gate_arguments(command: argparse.ArgumentParser) -> None:
+    command.add_argument("--appraisal-package")
+    command.add_argument("--appraisal-approval")
+    command.add_argument("--appraisal-prepared")
+    command.add_argument("--appraisal-independent-review")
+    command.add_argument("--appraisal-owner-bundle")
+    command.add_argument("--appraisal-lineage", action="append", default=[])
+    command.add_argument("--expected-authority-sha256")
+    command.add_argument("--appraisal-proposal")
+    command.add_argument("--appraisal-binding")
+    command.add_argument("--appraisal-projection")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -5248,6 +5933,7 @@ def _build_parser() -> argparse.ArgumentParser:
     add_claim.add_argument("--coverage-dimension", action="append", default=[])
     add_claim.add_argument("--benchmark-profile", action="append", default=[])
     add_claim.add_argument("--supersedes")
+    _add_appraisal_gate_arguments(add_claim)
     add_claim.set_defaults(func=command_add_claim)
 
     add_evidence = commands.add_parser("add-evidence")
@@ -5262,6 +5948,7 @@ def _build_parser() -> argparse.ArgumentParser:
     add_evidence.add_argument("--summary", required=True)
     add_evidence.add_argument("--notes", default="")
     add_evidence.add_argument("--supersedes")
+    _add_appraisal_gate_arguments(add_evidence)
     add_evidence.set_defaults(func=command_add_evidence)
 
     add_relation = commands.add_parser("add-relation")
@@ -5271,6 +5958,7 @@ def _build_parser() -> argparse.ArgumentParser:
     add_relation.add_argument("--to-ref", required=True)
     add_relation.add_argument("--notes", default="")
     add_relation.add_argument("--supersedes")
+    _add_appraisal_gate_arguments(add_relation)
     add_relation.set_defaults(func=command_add_relation)
 
     record_gap = commands.add_parser("record-gap")
@@ -5280,7 +5968,7 @@ def _build_parser() -> argparse.ArgumentParser:
     record_gap.add_argument("--impact", required=True)
     record_gap.add_argument("--priority", choices=sorted(GAP_PRIORITIES))
     record_gap.add_argument("--decision-impact", choices=sorted(IMPACTS))
-    record_gap.add_argument("--status", required=True, choices=sorted(GAP_STATUSES))
+    record_gap.add_argument("--status", required=True, choices=["open"])
     record_gap.add_argument("--source", default="manual")
     record_gap.add_argument("--description", required=True)
     record_gap.add_argument("--grounds")
@@ -5290,21 +5978,18 @@ def _build_parser() -> argparse.ArgumentParser:
     record_gap.add_argument("--defeaters")
     record_gap.add_argument("--search-test")
     record_gap.add_argument("--novelty-claimed", action="store_true")
-    record_gap.add_argument(
-        "--resolution-evidence-ref", action="append", default=[]
-    )
+    record_gap.add_argument("--resolution-evidence-ref", action="append", default=[])
     record_gap.add_argument("--resolution-source")
     record_gap.set_defaults(func=command_record_gap)
 
     transition_gap = commands.add_parser("transition-gap")
     transition_gap.add_argument("--gap-id", required=True)
     transition_gap.add_argument("--from-record-id", required=True)
-    transition_gap.add_argument(
-        "--status", required=True, choices=sorted(GAP_STATUSES)
-    )
+    transition_gap.add_argument("--status", required=True, choices=sorted(GAP_STATUSES))
     transition_gap.add_argument("--reason", required=True)
     transition_gap.add_argument("--evidence-ref", action="append", default=[])
     transition_gap.add_argument("--resolution-source")
+    _add_appraisal_gate_arguments(transition_gap)
     transition_gap.set_defaults(func=command_transition_gap)
 
     derive = commands.add_parser("derive-gaps")

@@ -1,10 +1,12 @@
 import copy
+import hashlib
 import importlib.util
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
+import network_gap_discovery as discovery
 from network_gap_discovery import (
     ACTION_FOR_TARGET_KIND,
     ContractError,
@@ -13,7 +15,7 @@ from network_gap_discovery import (
     TARGET_KINDS,
     canonical_paper_understanding_gap_digest,
     consume_reviewed_evidence,
-    consume_results,
+    consume_results as _consume_results,
     emit_search_requests as _emit_search_requests,
     generate_hypotheses_from_probe,
     sha256_json,
@@ -77,12 +79,56 @@ def emit_search_requests(value, network=None, **kwargs):
         "selected_hypothesis_ids": selected_ids,
         "review_status": "approved",
     }
-    selected_document = select_hypotheses(
-        prioritized, selection, network
-    )
+    selected_document = select_hypotheses(prioritized, selection, network)
     value.clear()
     value.update(selected_document)
     return _emit_search_requests(value, network, **kwargs)
+
+
+def _artifact_file_sha256(value):
+    artifact_path, artifact_sha256 = _artifact_file(value)
+    artifact_path.unlink()
+    return artifact_sha256
+
+
+def _artifact_file(value):
+    raw = (
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        + b"\n"
+    )
+    with tempfile.NamedTemporaryFile("wb", delete=False) as temporary:
+        temporary.write(raw)
+        artifact_path = Path(temporary.name)
+    artifact_path.chmod(0o600)
+    return artifact_path, hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+
+
+def _request_set_file_sha256(request_set):
+    request_set_file, request_set_file_sha256 = _request_set_file_artifact(request_set)
+    request_set_file.unlink()
+    return request_set_file_sha256
+
+
+def _request_set_file_artifact(request_set):
+    raw = (
+        json.dumps(
+            request_set,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        + b"\n"
+    )
+    with tempfile.NamedTemporaryFile("wb", delete=False) as temporary:
+        temporary.write(raw)
+        request_set_path = Path(temporary.name)
+    request_set_path.chmod(0o600)
+    return request_set_path, hashlib.sha256(request_set_path.read_bytes()).hexdigest()
 
 
 def attach_network_content_sha256(network):
@@ -167,9 +213,7 @@ def network_fixture():
                 "provenance": [{"source_id": "source:1", "locator": "p.1"}],
             }
         ],
-        "gaps": [
-            {"gap_id": "GAP-EXPLICIT", "status": "open", "reason": "benchmark"}
-        ],
+        "gaps": [{"gap_id": "GAP-EXPLICIT", "status": "open", "reason": "benchmark"}],
         "completion": {
             "status": "partial",
             "open_gap_ids": ["GAP-EXPLICIT"],
@@ -194,7 +238,11 @@ def semantic_gap_network_fixture():
             "status": "open",
             "reason": "Sparse coverage on cross-benchmark evidence in sparse graphs",
         },
-        {"gap_id": "GAP-WENDY", "status": "open", "reason": "wendy benchmark scope update"},
+        {
+            "gap_id": "GAP-WENDY",
+            "status": "open",
+            "reason": "wendy benchmark scope update",
+        },
     ]
     return attach_network_content_sha256(network)
 
@@ -246,9 +294,7 @@ def doe_surrogate_noise_network_fixture(single_source_count=96, isolate_count=24
                 "predicate": "supports",
                 "status": "supported",
                 "confidence": "high",
-                "provenance": [
-                    {"source_id": "SRC-DOE", "locator": f"p.{index + 1}"}
-                ],
+                "provenance": [{"source_id": "SRC-DOE", "locator": f"p.{index + 1}"}],
             }
         )
         gaps.append(
@@ -370,23 +416,225 @@ def make_result_set(
     hypothesis_id: str = "KGH-1",
     discovery_status: str = "complete_bounded",
 ):
-    result = make_result(
-        request["request_id"],
-        ranked_candidates,
-        request_digest=request_digest,
-        hypothesis_id=hypothesis_id,
+    scholar = discovery._scholar_discovery_module()
+    try:
+        request_set_file, request_set_file_sha = _request_set_file_artifact(request_set)
+        try:
+            authorization = scholar.authorize_request_set(
+                request_set,
+                reviewer_id="network-test-execution-reviewer",
+                reviewer_role="independent execution reviewer",
+                reviewed_at="2026-08-05T00:30:00Z",
+                independent_reviewer_attested=True,
+                request_set_file=request_set_file,
+                request_set_file_sha256=request_set_file_sha,
+            )
+            authorization_file_path, authorization_file_sha256 = _artifact_file(
+                authorization
+            )
+
+            def transport(url, timeout):
+                del timeout
+                if "crossref" in url:
+                    return b'{"message":{"total-results":0,"items":[]}}'
+                if "openalex" in url:
+                    return b'{"meta":{"count":0},"results":[]}'
+                return b'{"total":0,"data":[]}'
+
+            try:
+                result_set = scholar.execute_request_set(
+                    request_set,
+                    transport,
+                    execution_authority=authorization,
+                    expected_execution_authority_sha256=authorization_file_sha256,
+                    execution_authority_file=authorization_file_path,
+                    execution_authority_file_sha256=authorization_file_sha256,
+                    request_set_file=request_set_file,
+                    request_set_file_sha256=request_set_file_sha,
+                )
+            finally:
+                authorization_file_path.unlink()
+        finally:
+            request_set_file.unlink()
+    except ValueError:
+        # Mismatch tests need a shape-valid current-schema payload without a
+        # trusted authorization context so the production consumer rejects it.
+        result = make_result(
+            request["request_id"],
+            ranked_candidates,
+            request_digest=request_digest,
+            hypothesis_id=hypothesis_id,
+        )
+        result["discovery_status"] = discovery_status
+        return {
+            "schema": "ScholarDiscoveryResultSet/v2",
+            "schema_version": "v1",
+            "request_set_id": request_set["request_set_id"],
+            "request_set_digest": request_set["request_set_digest"],
+            "network_id": request_set["network_id"],
+            "network_snapshot_sha256": request_set["network_snapshot_sha256"],
+            "network_ref": request_set["network_ref"],
+            "generated_at": "2026-08-05T01:00:00Z",
+            "execution_authorization_ref": {},
+            "results": [result],
+            "failures": [],
+            "request_count": 1,
+        }
+
+    result = next(
+        row
+        for row in result_set["results"]
+        if row["request_id"] == request["request_id"]
     )
-    result["discovery_status"] = discovery_status
-    return {
-        "schema": "ScholarDiscoveryResultSet/v1",
-        "request_set_id": request_set["request_set_id"],
-        "request_set_digest": request_set["request_set_digest"],
-        "network_id": request_set["network_id"],
-        "network_snapshot_sha256": request_set["network_snapshot_sha256"],
-        "network_ref": request_set["network_ref"],
-        "generated_at": "2026-08-05T01:00:00Z",
-        "results": [result],
-    }
+    result["request_digest"] = request_digest
+    result["ranked_candidates"] = copy.deepcopy(ranked_candidates)
+    for candidate in result["ranked_candidates"]:
+        candidate.setdefault("discovery_only", True)
+        candidate.setdefault("claim_support_eligible", False)
+    replayed_candidate_count = sum(
+        event["candidate_count"] for event in result["search_events"]
+    )
+    if replayed_candidate_count < len(result["ranked_candidates"]):
+        added_count = len(result["ranked_candidates"]) - replayed_candidate_count
+        result["search_events"][0]["candidate_count"] += added_count
+        replayed_candidate_count += added_count
+    result["limits"]["pre_truncation_candidate_count"] = replayed_candidate_count
+    result["limits"]["candidate_budget_reached"] = (
+        replayed_candidate_count > request["budgets"]["max_candidates"]
+    )
+    normalized_status = (
+        "partial_provider" if discovery_status == "pending" else discovery_status
+    )
+    result["discovery_status"] = normalized_status
+    result["stop_reason"] = normalized_status
+    if normalized_status == "complete_bounded":
+        result["provider_failures"] = []
+        result["unresolved_query_ids"] = []
+        result["limits"]["query_budget_reached"] = False
+        result["limits"]["candidate_budget_reached"] = False
+        result["limits"]["missing_query_ids"] = []
+        for event in result["search_events"]:
+            if event["status"] in {
+                "partial",
+                "blocked",
+                "failed",
+                "budget_exhausted",
+            }:
+                event["status"] = "empty"
+            event["search_event"]["truncated"] = False
+    elif normalized_status == "partial_budget":
+        result["limits"]["candidate_budget_reached"] = True
+        over_budget_count = request["budgets"]["max_candidates"] + 1
+        result["limits"]["pre_truncation_candidate_count"] = over_budget_count
+        result["search_events"][0]["candidate_count"] = over_budget_count
+    else:
+        event = (
+            next(
+                (
+                    row
+                    for row in result["search_events"]
+                    if row.get("provider") == "google_scholar"
+                ),
+                result["search_events"][0],
+            )
+            if normalized_status == "blocked_capability"
+            else result["search_events"][0]
+        )
+        query_id = event["query_id"]
+        event["status"] = (
+            "blocked" if normalized_status == "blocked_capability" else "partial"
+        )
+        event["search_event"]["truncated"] = (
+            normalized_status != "blocked_capability"
+        )
+        event["search_event"]["limitations"] = ["fixture_incomplete_provider"]
+        result["provider_failures"] = [
+            {
+                "query_id": query_id,
+                "provider": event["provider"],
+                "execution": event["execution"],
+                "status": event["status"],
+                "limitations": ["fixture_incomplete_provider"],
+            }
+        ]
+        result["unresolved_query_ids"] = [query_id]
+    _TEST_RESULT_CONTEXTS[id(result_set)] = (
+        {
+            authorization["authorization_id"]: {
+                "authorization": authorization,
+                "expected_execution_authority_sha256": authorization_file_sha256,
+                "execution_authority_file_sha256": authorization_file_sha256,
+            }
+        },
+        request_set_file_sha,
+    )
+    return result_set
+
+
+_TEST_RESULT_CONTEXTS = {}
+
+
+def _owner_history_rows(value, plan_ids):
+    if not isinstance(value, list):
+        return value
+    normalized = []
+    for row in value:
+        if isinstance(row, str) and row in plan_ids:
+            normalized.append(row)
+        elif isinstance(row, str) and (
+            row.startswith("provider:") or row.startswith("provider=")
+        ):
+            normalized.append(row)
+        elif isinstance(row, dict) and isinstance(row.get("query_id"), str):
+            normalized.append(row["query_id"])
+        elif isinstance(row, dict) and isinstance(row.get("provider"), str):
+            normalized.append(f"provider:{row['provider']}")
+        else:
+            normalized.append("provider:generic")
+    return normalized
+
+
+def consume_results(
+    hypotheses_value,
+    network,
+    request_set_value,
+    result_values,
+    *,
+    round_id=None,
+    execution_authority_contexts=None,
+    request_set_file_sha256=None,
+):
+    """Exercise generic state transitions with real v2 owner replay fixtures."""
+    if request_set_file_sha256 is None:
+        request_set_file_sha256 = _request_set_file_sha256(request_set_value)
+    if execution_authority_contexts is None:
+        contexts = {}
+        fixture_file_sha256 = None
+        for result_set in result_values:
+            fixture = _TEST_RESULT_CONTEXTS.get(id(result_set))
+            if fixture is None:
+                continue
+            fixture_contexts, fixture_sha256 = fixture
+            contexts.update(fixture_contexts)
+            if fixture_file_sha256 is None:
+                fixture_file_sha256 = fixture_sha256
+            elif fixture_file_sha256 != fixture_sha256:
+                raise AssertionError(
+                    "test fixtures mixed request-set raw SHA-256 values"
+                )
+        if contexts:
+            execution_authority_contexts = contexts
+            if fixture_file_sha256 is not None:
+                request_set_file_sha256 = fixture_file_sha256
+    return _consume_results(
+        hypotheses_value,
+        network,
+        request_set_value,
+        result_values,
+        round_id=round_id,
+        execution_authority_contexts=execution_authority_contexts,
+        request_set_file_sha256=request_set_file_sha256,
+    )
 
 
 def attach_request_set_digest(request_set):
@@ -406,6 +654,7 @@ def attach_request_set_digest(request_set):
 def with_request_set_max_rounds(request_set, max_rounds: int):
     request_set = copy.deepcopy(request_set)
     request_set["requests"][0]["budgets"]["max_rounds"] = max_rounds
+    request_set["request_profile"]["max_rounds"] = max_rounds
     return attach_request_set_digest(request_set)
 
 
@@ -575,9 +824,7 @@ def _relation_from_outcome(outcome):
 
 def _rehash_v2_report_set(report_set):
     for report in report_set["reports"]:
-        report["report_digest"] = _sha_without(
-            report, {"report_id", "report_digest"}
-        )
+        report["report_digest"] = _sha_without(report, {"report_id", "report_digest"})
         report["report_id"] = "reading-report-v2-" + report["report_digest"][:16]
     report_set["report_set_digest"] = _sha_without(
         report_set, {"report_set_id", "report_set_digest"}
@@ -607,9 +854,7 @@ def make_reading_report_set(
         "source_digest": source["source_digest"],
         "acquisition_locator": source["acquisition_locator"],
     }
-    source_artifact_sha256 = sha256_json(
-        {"source_artifact": source["source_digest"]}
-    )
+    source_artifact_sha256 = sha256_json({"source_artifact": source["source_digest"]})
     source_bundle_digest = sha256_json(
         {"source_bundle": source_artifact_sha256, "source_ref": source["source_ref"]}
     )
@@ -726,9 +971,7 @@ def attach_reading_report_identity(evidence_items, report_set):
             item["claim_support_eligible"] = report["claim_support_eligible"]
             item["source_bundle_id"] = report_set["source_bundle_id"]
             item["source_bundle_digest"] = report_set["source_bundle_digest"]
-            item["source_artifact_sha256"] = report_set[
-                "source_artifact_sha256"
-            ]
+            item["source_artifact_sha256"] = report_set["source_artifact_sha256"]
     else:
         report = report_set["reports"][0]
         passage = report["evidence_passages"][0]
@@ -848,9 +1091,7 @@ def real_producer_projection(
     verifier_id="fixture-independent-verifier",
 ):
     source_path = tmp_path / "actual-paper.txt"
-    source_text = (
-        "The primary result proves it converges under the stated assumptions."
-    )
+    source_text = "The primary result proves it converges under the stated assumptions."
     source_path.write_text(source_text, encoding="utf-8")
     bundle_path = tmp_path / "actual-bundle.json"
     manifest = SOURCE_BUNDLE_MODULE.build_bundle(
@@ -1046,30 +1287,18 @@ def real_producer_projection(
 def rehash_patch_v2(patch):
     for action in patch["actions"]:
         for row in action["reviewed_evidence"]:
-            row["basis_digest"] = _sha_without(
-                row, {"basis_id", "basis_digest"}
-            )
+            row["basis_digest"] = _sha_without(row, {"basis_id", "basis_digest"})
             row["basis_id"] = "network-patch-basis-" + row["basis_digest"][:16]
         if "target_claim" in action:
             target = action["target_claim"]
             target["target_claim_digest"] = _sha_without(
                 target, {"claim_id", "target_claim_digest"}
             )
-            target["claim_id"] = (
-                "claim-target-" + target["target_claim_digest"][:16]
-            )
-        action["action_digest"] = _sha_without(
-            action, {"action_id", "action_digest"}
-        )
-        action["action_id"] = (
-            "network-patch-action-" + action["action_digest"][:16]
-        )
-    patch["proposal_digest"] = _sha_without(
-        patch, {"proposal_id", "proposal_digest"}
-    )
-    patch["proposal_id"] = (
-        "network-patch-proposal-" + patch["proposal_digest"][:16]
-    )
+            target["claim_id"] = "claim-target-" + target["target_claim_digest"][:16]
+        action["action_digest"] = _sha_without(action, {"action_id", "action_digest"})
+        action["action_id"] = "network-patch-action-" + action["action_digest"][:16]
+    patch["proposal_digest"] = _sha_without(patch, {"proposal_id", "proposal_digest"})
+    patch["proposal_id"] = "network-patch-proposal-" + patch["proposal_digest"][:16]
     return patch
 
 
@@ -1195,7 +1424,9 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "gap_digest"):
             validate_paper_understanding_gap(tampered)
 
-    def test_paper_understanding_gap_rejects_cross_domain_fields_and_unbound_basis(self):
+    def test_paper_understanding_gap_rejects_cross_domain_fields_and_unbound_basis(
+        self,
+    ):
         cross_domain = paper_understanding_gap_fixture("missing_data_flow")
         cross_domain["missing_field"] = "conclusion.invented"
         cross_domain["provenance"]["basis_refs"][0]["source_path"] = (
@@ -1204,9 +1435,7 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
         cross_domain["gap_digest"] = canonical_paper_understanding_gap_digest(
             cross_domain
         )
-        cross_domain["gap_id"] = (
-            f"understanding-gap-{cross_domain['gap_digest'][:16]}"
-        )
+        cross_domain["gap_id"] = f"understanding-gap-{cross_domain['gap_digest'][:16]}"
         with self.assertRaisesRegex(ContractError, "field prefix"):
             validate_paper_understanding_gap(cross_domain)
 
@@ -1238,9 +1467,7 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
 
     def test_paper_understanding_gap_requires_validated_opaque_provenance(self):
         invalid = paper_understanding_gap_fixture("missing_conclusion_scope")
-        invalid["provenance"]["understanding_binding"].pop(
-            "validation_record_digest"
-        )
+        invalid["provenance"]["understanding_binding"].pop("validation_record_digest")
         invalid["gap_digest"] = canonical_paper_understanding_gap_digest(invalid)
         invalid["gap_id"] = f"understanding-gap-{invalid['gap_digest'][:16]}"
         with self.assertRaisesRegex(ContractError, "validation_record_digest"):
@@ -1307,10 +1534,11 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
 
     def test_scan_marks_isolate_as_candidate_not_negative(self):
         probe = scan_network(network_fixture())
-        self.assertEqual(probe["topological_isolates"], ["entity:C"]
-        )
+        self.assertEqual(probe["topological_isolates"], ["entity:C"])
         signal = next(
-            item for item in probe["candidate_signals"] if item["kind"] == "topological_isolate"
+            item
+            for item in probe["candidate_signals"]
+            if item["kind"] == "topological_isolate"
         )
         self.assertEqual(signal["classification"], "implicit_candidate_signal")
         self.assertFalse(probe["novelty_claimed"])
@@ -1474,7 +1702,9 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
         with self.assertRaises(ContractError):
             validate_hypotheses(document)
 
-    def test_structural_only_hypothesis_is_not_subject_to_confirm_refute_requirements(self):
+    def test_structural_only_hypothesis_is_not_subject_to_confirm_refute_requirements(
+        self,
+    ):
         network = network_fixture()
         document = generate_hypotheses_from_probe(scan_network(network), network)
         structural_hypothesis = copy.deepcopy(
@@ -1489,7 +1719,9 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
         document["hypotheses"] = [structural_hypothesis]
         validate_hypotheses(document, network)
 
-    def test_needs_semantic_enrichment_hypothesis_is_not_subject_to_semantic_content_requirements(self):
+    def test_needs_semantic_enrichment_hypothesis_is_not_subject_to_semantic_content_requirements(
+        self,
+    ):
         document = hypotheses_fixture()
         hypothesis = document["hypotheses"][0]
         hypothesis["status"] = "proposed"
@@ -1564,9 +1796,7 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
         second_run = prioritize(copy.deepcopy(document))
         self.assertEqual(first, second_run)
         self.assertEqual(first["priority_order"], ["KGH-1", "KGH-2"])
-        self.assertIn(
-            "decision_impact", first["hypotheses"][0]["priority_components"]
-        )
+        self.assertIn("decision_impact", first["hypotheses"][0]["priority_components"])
 
     def test_prioritize_status_matches_emitted_request_selection(self):
         network = network_fixture()
@@ -1585,9 +1815,7 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
             for item in prioritized["hypotheses"]
             if item["status"] == "selected"
         }
-        emitted_ids = {
-            item["gap_hypothesis_id"] for item in request_set["requests"]
-        }
+        emitted_ids = {item["gap_hypothesis_id"] for item in request_set["requests"]}
         self.assertEqual(selected_ids, emitted_ids)
         self.assertEqual(
             prioritized["selection_summary"]["selected_hypothesis_ids"],
@@ -1882,8 +2110,7 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
             for query in hypothesis["search_test"]["queries"]
         ]
         explicit_queries = [
-            query["query"]
-            for query in explicit_gap["search_test"]["queries"]
+            query["query"] for query in explicit_gap["search_test"]["queries"]
         ]
         wendy_confirm_queries = [
             query["query"]
@@ -1921,15 +2148,15 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
         for marker in forbidden:
             self.assertNotIn(marker, all_query_text)
         for query in raw_queries:
-            self.assertLessEqual(
-                len(query.split()), 12, f"query too long: {query}"
-            )
+            self.assertLessEqual(len(query.split()), 12, f"query too long: {query}")
             self.assertNotIn(
                 "Which promised benchmark or locally complete slot is unresolved?",
                 query,
             )
             self.assertNotIn("claims_property", query)
-        self.assertNotRegex(all_query_text, r"\bno evidence for\b.*\bat this snapshot\b")
+        self.assertNotRegex(
+            all_query_text, r"\bno evidence for\b.*\bat this snapshot\b"
+        )
         self.assertIn("sparse", all_query_text)
         self.assertIn("benchmark", all_query_text)
         self.assertTrue(
@@ -1957,10 +2184,14 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
         explicit_ref = explicit_gap["grounds"][0]["ref_id"].lower()
         self.assertNotIn(explicit_ref, explicit_payload)
         self.assertNotIn("gap:" + explicit_ref, explicit_payload)
-        self.assertTrue(
-            "sparse" in explicit_payload or "benchmark" in explicit_payload
-        )
-        for workflow_token in (" gap ", " open ", " explicit ", " missing ", " coverage "):
+        self.assertTrue("sparse" in explicit_payload or "benchmark" in explicit_payload)
+        for workflow_token in (
+            " gap ",
+            " open ",
+            " explicit ",
+            " missing ",
+            " coverage ",
+        ):
             self.assertNotIn(workflow_token, f" {explicit_payload} ")
 
     def test_generated_queries_and_target_signatures_avoid_signal_ids(self):
@@ -2089,6 +2320,33 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
         self.assertTrue(source["discovery_only"])
         self.assertFalse(source["claim_support_eligible"])
 
+    def test_generic_consume_rejects_display_only_v1_result_set(self):
+        network = network_fixture()
+        hypotheses = hypotheses_fixture(network)
+        hypotheses["hypotheses"][0]["decision_impact"] = "medium"
+        request_set = emit_search_requests(hypotheses, network)
+        request = request_set["requests"][0]
+        current = make_result_set(
+            request_set,
+            request,
+            [
+                {
+                    "candidate_id": "V1-CANDIDATE",
+                    "screening": {"decision": "include"},
+                    "access_level": "full_text",
+                    "url": "https://example.org/v1-display-only",
+                }
+            ],
+            request_digest=sha256_json(request),
+        )
+        legacy = copy.deepcopy(current)
+        legacy["schema"] = "ScholarDiscoveryResultSet/v1"
+        del legacy["execution_authorization_ref"]
+
+        with self.assertRaisesRegex(ContractError, "legacy display-only"):
+            _consume_results(hypotheses, network, request_set, [legacy])
+        self.assertEqual(hypotheses["hypotheses"][0]["status"], "selected")
+
     def test_consume_results_status_transitions(self):
         network = network_fixture()
         hypotheses = hypotheses_fixture(network)
@@ -2210,9 +2468,11 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
         awaiting_network = network_fixture()
         awaiting_hypotheses = hypotheses_fixture(awaiting_network)
         awaiting_hypotheses["hypotheses"][0]["decision_impact"] = "medium"
-        awaiting_requests = emit_search_requests(awaiting_hypotheses, awaiting_network)
-        awaiting_requests["requests"][0]["routes"]["google_scholar"] = "manual_required"
-        attach_request_set_digest(awaiting_requests)
+        awaiting_requests = emit_search_requests(
+            awaiting_hypotheses,
+            awaiting_network,
+            google_scholar_policy="manual_required",
+        )
         output_awaiting = consume_results(
             awaiting_hypotheses,
             awaiting_network,
@@ -2308,7 +2568,9 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
                 ],
             )
 
-    def test_consume_results_marks_awaiting_for_provider_failure_and_unresolved_queries(self):
+    def test_consume_results_marks_awaiting_for_provider_failure_and_unresolved_queries(
+        self,
+    ):
         network = network_fixture()
         hypotheses = hypotheses_fixture(network)
         hypotheses["hypotheses"][0]["decision_impact"] = "medium"
@@ -2328,9 +2590,11 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
             request,
             [],
             request_digest=request_digest,
+            discovery_status="partial_provider",
         )
-        provider_failure["results"][0]["provider_failures"] = ["provider timeout"]
-        awaiting_provider = consume_results(hypotheses, network, request_set, [provider_failure])
+        awaiting_provider = consume_results(
+            hypotheses, network, request_set, [provider_failure]
+        )
         self.assertEqual(awaiting_provider["hypotheses"][0]["status"], "awaiting")
         self.assertEqual(
             awaiting_provider["hypotheses"][0]["next_action"], "scholar_discovery"
@@ -2340,17 +2604,17 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
             request_manual_required,
             [],
             request_digest=request_manual_required_digest,
+            discovery_status="blocked_capability",
         )
-        provider_failure_google["results"][0]["provider_failures"] = [
-            {"provider": "google_scholar", "error": "requires_manual_capture"},
-        ]
         awaiting_provider_google = consume_results(
             hypotheses,
             network,
             request_set_manual_required,
             [provider_failure_google],
         )
-        self.assertEqual(awaiting_provider_google["hypotheses"][0]["status"], "awaiting")
+        self.assertEqual(
+            awaiting_provider_google["hypotheses"][0]["status"], "awaiting"
+        )
         self.assertEqual(
             awaiting_provider_google["hypotheses"][0]["next_action"],
             "manual_scholar_export",
@@ -2361,11 +2625,8 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
             request_manual_required,
             [],
             request_digest=request_manual_required_digest,
+            discovery_status="blocked_capability",
         )
-        unresolved["results"][0]["unresolved_query_ids"] = [
-            {"query": "q1", "provider": "google_scholar"},
-            {"query": "q2", "provider": "google_scholar"},
-        ]
         awaiting_unresolved = consume_results(
             hypotheses,
             network,
@@ -2383,25 +2644,31 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
             awaiting_unresolved["cycle_state"]["stop_reason"], "manual_required"
         )
 
-        unresolved_without_manual = copy.deepcopy(request_set)
-        unresolved_without_manual["requests"][0]["routes"]["google_scholar"] = "manual_required"
-        attach_request_set_digest(unresolved_without_manual)
+        unresolved_without_manual = emit_search_requests(
+            hypotheses,
+            network,
+            google_scholar_policy="manual_required",
+        )
         unresolved_without_manual_request = unresolved_without_manual["requests"][0]
-        unresolved_without_manual_request_digest = sha256_json(unresolved_without_manual_request)
+        unresolved_without_manual_request_digest = sha256_json(
+            unresolved_without_manual_request
+        )
         unresolved_without_manual_result_set = make_result_set(
             unresolved_without_manual,
             unresolved_without_manual_request,
             [],
             request_digest=unresolved_without_manual_request_digest,
+            discovery_status="partial_provider",
         )
-        unresolved_without_manual_result_set["results"][0]["unresolved_query_ids"] = ["q1", "q2"]
         awaiting_unresolved_non_manual = consume_results(
             hypotheses,
             network,
             unresolved_without_manual,
             [unresolved_without_manual_result_set],
         )
-        self.assertEqual(awaiting_unresolved_non_manual["hypotheses"][0]["status"], "awaiting")
+        self.assertEqual(
+            awaiting_unresolved_non_manual["hypotheses"][0]["status"], "awaiting"
+        )
         self.assertEqual(
             awaiting_unresolved_non_manual["hypotheses"][0]["next_action"],
             "scholar_discovery",
@@ -2418,10 +2685,16 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
             "pending",
         ):
             is_blocked_capability = discovery_status == "blocked_capability"
-            partial_request_set = request_set_manual_required if is_blocked_capability else request_set
-            partial_request = request_manual_required if is_blocked_capability else request
+            partial_request_set = (
+                request_set_manual_required if is_blocked_capability else request_set
+            )
+            partial_request = (
+                request_manual_required if is_blocked_capability else request
+            )
             partial_request_digest = (
-                request_manual_required_digest if is_blocked_capability else request_digest
+                request_manual_required_digest
+                if is_blocked_capability
+                else request_digest
             )
             partial = make_result_set(
                 partial_request_set,
@@ -2430,10 +2703,6 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
                 request_digest=partial_request_digest,
                 discovery_status=discovery_status,
             )
-            if discovery_status == "blocked_capability":
-                partial["results"][0]["unresolved_query_ids"] = [
-                    {"query": "q-blocked", "provider": "google_scholar"}
-                ]
             awaiter = consume_results(
                 hypotheses,
                 network,
@@ -2446,14 +2715,18 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
                     awaiter["hypotheses"][0]["next_action"],
                     "manual_scholar_export",
                 )
-                self.assertEqual(awaiter["cycle_state"]["pending_reason"], "manual_required")
+                self.assertEqual(
+                    awaiter["cycle_state"]["pending_reason"], "manual_required"
+                )
             else:
                 self.assertEqual(
                     awaiter["hypotheses"][0]["next_action"],
                     "scholar_discovery",
                 )
 
-    def test_partial_provider_with_ranked_candidates_still_generates_review_request(self):
+    def test_partial_provider_with_ranked_candidates_still_generates_review_request(
+        self,
+    ):
         network = network_fixture()
         hypotheses = hypotheses_fixture(network)
         hypotheses["hypotheses"][0]["decision_impact"] = "medium"
@@ -2501,8 +2774,8 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
                 request,
                 [],
                 request_digest=request_digest,
+                discovery_status="partial_provider",
             )
-            result["results"][0]["provider_failures"] = ["provider timeout"]
             return result
 
         first = consume_results(
@@ -2525,6 +2798,7 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
         )
         self.assertFalse(third["cycle_state"]["saturation"])
         self.assertNotEqual(third["cycle_state"]["stop_reason"], "saturated")
+
     def test_consume_results_collects_sources_from_nested_scholar_result_fields(self):
         network = network_fixture()
         hypotheses = hypotheses_fixture(network)
@@ -2654,9 +2928,11 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
         network = network_fixture()
         hypotheses = hypotheses_fixture(network)
         hypotheses["hypotheses"][0]["decision_impact"] = "medium"
-        request_set = emit_search_requests(hypotheses, network)
-        request_set["requests"][0]["routes"]["google_scholar"] = "manual_required"
-        attach_request_set_digest(request_set)
+        request_set = emit_search_requests(
+            hypotheses,
+            network,
+            google_scholar_policy="manual_required",
+        )
 
         awaiting = consume_results(
             hypotheses,
@@ -2770,9 +3046,7 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
                         verification_root=directory,
                         verifier_id=verifier_id,
                     )
-                    with self.assertRaisesRegex(
-                        ContractError, "not independent"
-                    ):
+                    with self.assertRaisesRegex(ContractError, "not independent"):
                         consume_reviewed_evidence(
                             results,
                             network,
@@ -2894,7 +3168,9 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
         basis = action["reviewed_evidence"][0]
         target = action["target_claim"]
         request_scope = review_request["epistemic_task"]["scope"]
-        self.assertEqual(target["claim_text"], report_set["reports"][0]["claim_statement"])
+        self.assertEqual(
+            target["claim_text"], report_set["reports"][0]["claim_statement"]
+        )
         self.assertEqual(target["impact"], "low")
         self.assertEqual(
             target["scope"]["scope_statement"],
@@ -2910,9 +3186,7 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
             target["scope"]["defeaters"],
             review_request["epistemic_task"]["defeaters"],
         )
-        self.assertNotEqual(
-            target["scope"]["exclusions"], target["scope"]["defeaters"]
-        )
+        self.assertNotEqual(target["scope"]["exclusions"], target["scope"]["defeaters"])
         self.assertEqual(target["report_claim_id"], basis["claim_id"])
         self.assertEqual(target["report_claim_digest"], basis["claim_digest"])
         self.assertIn(
@@ -2988,7 +3262,9 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
             self.assertEqual(
                 consumed["hypotheses"][0]["next_action"], "onboarding_required"
             )
-            self.assertEqual(consumed["cycle_state"]["stop_reason"], "onboarding_required")
+            self.assertEqual(
+                consumed["cycle_state"]["stop_reason"], "onboarding_required"
+            )
             with self.assertRaisesRegex(ContractError, "onboarding_required"):
                 propose_patch(
                     consumed,
@@ -3059,9 +3335,9 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
                 with self.assertRaisesRegex(ContractError, "not graph eligible"):
                     validate_patch_v2(invalid, network)
         same_context = copy.deepcopy(valid)
-        same_context["actions"][0]["reviewed_evidence"][0]["verification"][
-            "mode"
-        ] = "same_context_diagnostic"
+        same_context["actions"][0]["reviewed_evidence"][0]["verification"]["mode"] = (
+            "same_context_diagnostic"
+        )
         rehash_patch_v2(same_context)
         with self.assertRaisesRegex(ContractError, "verification mode"):
             validate_patch_v2(same_context, network)
@@ -3087,8 +3363,12 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "onboarding_required"):
             validate_patch_v2(unonboarded, network)
 
-    def test_real_gap_queries_preserve_semantic_label_and_drop_internal_template_terms(self):
-        network = doe_surrogate_noise_network_fixture(single_source_count=0, isolate_count=0)
+    def test_real_gap_queries_preserve_semantic_label_and_drop_internal_template_terms(
+        self,
+    ):
+        network = doe_surrogate_noise_network_fixture(
+            single_source_count=0, isolate_count=0
+        )
         semantic_label = "expensive simulator adaptive sampling and surrogate uncertainty calibration"
         network["gaps"][0]["description"] = semantic_label
         network["gaps"][0]["reason"] = (
@@ -3135,9 +3415,7 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
         network = doe_surrogate_noise_network_fixture(
             single_source_count=0, isolate_count=0
         )
-        semantic_label = (
-            "expensive simulator adaptive sampling with surrogate uncertainty calibration"
-        )
+        semantic_label = "expensive simulator adaptive sampling with surrogate uncertainty calibration"
         network["gaps"][0]["description"] = semantic_label
         attach_network_content_sha256(network)
 
@@ -3148,9 +3426,7 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
             if row["grounds"][0]["ref_id"] == "gap:morphology_specific_benchmark"
         )
         acceptance = hypothesis["search_test"]["acceptance_criteria"].lower()
-        self.assertNotEqual(
-            acceptance, "multiple bounded routes and grounded fallback"
-        )
+        self.assertNotEqual(acceptance, "multiple bounded routes and grounded fallback")
         self.assertIn("expensive simulator", acceptance)
         self.assertIn("primary full-text evidence", acceptance)
         self.assertGreaterEqual(
@@ -3162,9 +3438,7 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
         network["nodes"][0]["label"] = (
             "spatial Sobol maps from Gaussian-process surrogates"
         )
-        network["nodes"][1]["label"] = (
-            "hyperparameter and basis-selection uncertainty"
-        )
+        network["nodes"][1]["label"] = "hyperparameter and basis-selection uncertainty"
         network["relations"][0].update(
             {
                 "confidence": "low",
@@ -3210,6 +3484,7 @@ class NetworkGapDiscoveryTest(unittest.TestCase):
             },
             {row["gap_hypothesis_id"] for row in request_set["requests"]},
         )
+
 
 if __name__ == "__main__":
     unittest.main()

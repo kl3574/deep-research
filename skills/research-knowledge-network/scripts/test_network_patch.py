@@ -31,14 +31,24 @@ def invoke(module, argv: list[str]):
 
 def attach(value: dict, id_field: str, digest_field: str, prefix: str) -> dict:
     subject = {
-        key: item
-        for key, item in value.items()
-        if key not in {id_field, digest_field}
+        key: item for key, item in value.items() if key not in {id_field, digest_field}
     }
     digest = PATCH.digest_json(subject)
     value[digest_field] = digest
     value[id_field] = prefix + digest[:16]
     return value
+
+
+def request_set_file_sha256(request_set):
+    return hashlib.sha256(
+        json.dumps(
+            request_set,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        + b"\n"
+    ).hexdigest()
 
 
 class NetworkPatchTest(unittest.TestCase):
@@ -48,13 +58,69 @@ class NetworkPatchTest(unittest.TestCase):
         self.network_id = "patch-network"
         self._active_proposal = None
         self.gap_stub = mock.Mock()
-        self.gap_stub.propose_patch.side_effect = (
-            lambda *args, **kwargs: self._active_proposal
+        self.gap_stub.propose_patch.side_effect = lambda *args, **kwargs: (
+            self._active_proposal
         )
         self.gap_patcher = mock.patch.object(
             PATCH, "load_gap_module", return_value=self.gap_stub
         )
         self.gap_patcher.start()
+        self._real_validate_acceptance = PATCH.validate_acceptance
+        fake_gate = {
+            "refs": {
+                "status": "reviewed_appraisal",
+                "appraisal_package_ref": {
+                    "package_digest": "c" * 64,
+                },
+                "appraisal_set_ref": {
+                    "appraisal_set_id": "test-appraisal-set",
+                    "appraisal_set_digest": "d" * 64,
+                },
+                "approval_ref": {
+                    "authority_id": "authority-" + "b" * 64,
+                    "authority_digest": "b" * 64,
+                },
+                "owner_artifact_binding_digests": ["d" * 64],
+                "expected_authority_sha256": "b" * 64,
+                "binding_ref": {
+                    "binding_id": "evidence-appraisal-binding-" + "e" * 16,
+                    "binding_digest": "e" * 64,
+                },
+                "projection_ref": {
+                    "projection_id": "evidence-appraisal-projection-" + "f" * 16,
+                    "projection_digest": "f" * 64,
+                },
+            }
+        }
+        legacy_append = lambda paths, records, ledger, record_id, payload, **_: (  # noqa: E731
+            KN._append_candidate(paths, records, ledger, record_id, payload)
+        )
+        self.science_append_patcher = mock.patch.object(
+            KN,
+            "_append_scientific_candidate",
+            side_effect=legacy_append,
+        )
+        self.gate_patcher = mock.patch.object(
+            PATCH,
+            "_load_optional_appraisal_gate",
+            return_value=(fake_gate, []),
+        )
+        self.acceptance_patcher = mock.patch.object(
+            PATCH,
+            "validate_acceptance",
+            side_effect=lambda value, proposal, plan, network_ref, **_: (
+                self._real_validate_acceptance(value, proposal, plan, network_ref)
+            ),
+        )
+        self.appraised_acceptance_patcher = mock.patch.object(
+            PATCH,
+            "validate_appraised_acceptance",
+            return_value=None,
+        )
+        self.science_append_patcher.start()
+        self.gate_patcher.start()
+        self.acceptance_patcher.start()
+        self.appraised_acceptance_patcher.start()
         snapshot = self.root / "corpus.json"
         snapshot.write_text('{"papers": []}', encoding="utf-8")
         code, _, error = self.kn(
@@ -105,6 +171,10 @@ class NetworkPatchTest(unittest.TestCase):
         self.assertEqual(code, 0, error)
 
     def tearDown(self):
+        self.appraised_acceptance_patcher.stop()
+        self.acceptance_patcher.stop()
+        self.gate_patcher.stop()
+        self.science_append_patcher.stop()
         self.gap_patcher.stop()
         self.temp.cleanup()
 
@@ -221,9 +291,7 @@ class NetworkPatchTest(unittest.TestCase):
                 "claim-target-" + target_claim["target_claim_digest"][:16]
             )
             value["target_claim"] = target_claim
-        return attach(
-            value, "action_id", "action_digest", "network-patch-action-"
-        )
+        return attach(value, "action_id", "action_digest", "network-patch-action-")
 
     def proposal(self) -> dict:
         value = {
@@ -287,9 +355,7 @@ class NetworkPatchTest(unittest.TestCase):
                 authority_artifact.read_bytes()
             ).hexdigest(),
         }
-        value["basis_id"] = (
-            "patch-authority-basis-" + PATCH.digest_json(value)[:16]
-        )
+        value["basis_id"] = "patch-authority-basis-" + PATCH.digest_json(value)[:16]
         return value
 
     def acceptance(self, proposal: dict, plan: dict) -> dict:
@@ -311,9 +377,7 @@ class NetworkPatchTest(unittest.TestCase):
                 )
             }
             | {
-                "scope_statement": action["target_claim"]["scope"][
-                    "scope_statement"
-                ],
+                "scope_statement": action["target_claim"]["scope"]["scope_statement"],
                 **{
                     field: action["target_claim"]["scope"][field]
                     for field in (
@@ -345,9 +409,7 @@ class NetworkPatchTest(unittest.TestCase):
         relation = self.operation(
             "add-relation",
             {
-                "relation_id": PATCH.relation_operation_id(
-                    action, relation_basis[0]
-                ),
+                "relation_id": PATCH.relation_operation_id(action, relation_basis[0]),
                 "relation_type": "supports",
                 "from_ref": "claim:" + PATCH.target_claim_id(action),
                 "to_ref": "evidence:paper-evidence-1",
@@ -508,7 +570,10 @@ class NetworkPatchTest(unittest.TestCase):
         before = self.current_ref()
         network_dir = self.root / KN.NETWORK_ROOT / self.network_id
         live_before = {
-            path.name: (path.stat().st_ino, hashlib.sha256(path.read_bytes()).hexdigest())
+            path.name: (
+                path.stat().st_ino,
+                hashlib.sha256(path.read_bytes()).hexdigest(),
+            )
             for path in [network_dir / "network.json"]
             + [network_dir / f"{name}.jsonl" for name in KN.LEDGER_NAMES]
         }
@@ -557,7 +622,10 @@ class NetworkPatchTest(unittest.TestCase):
         self.assertEqual(dry[0], 0, dry[2])
         self.assertEqual(self.current_ref(), before)
         live_after_dry = {
-            path.name: (path.stat().st_ino, hashlib.sha256(path.read_bytes()).hexdigest())
+            path.name: (
+                path.stat().st_ino,
+                hashlib.sha256(path.read_bytes()).hexdigest(),
+            )
             for path in [network_dir / "network.json"]
             + [network_dir / f"{name}.jsonl" for name in KN.LEDGER_NAMES]
         }
@@ -599,7 +667,9 @@ class NetworkPatchTest(unittest.TestCase):
             ],
         )
         events = [
-            item for item in records["events"] if item.get("event_type") == "patch_decision"
+            item
+            for item in records["events"]
+            if item.get("event_type") == "patch_decision"
         ]
         self.assertEqual(len(events), 1)
         self.assertEqual(
@@ -615,10 +685,15 @@ class NetworkPatchTest(unittest.TestCase):
         ]
         self.assertEqual(len(patch_changes), 1)
         self.assertTrue(
-            all(item.startswith("authority:sha256:") for item in patch_changes[0]["basis_refs"])
+            all(
+                item.startswith("authority:sha256:")
+                for item in patch_changes[0]["basis_refs"]
+            )
         )
         self.assertNotIn("source:source-01", patch_changes[0]["basis_refs"])
-        self.assertIn(proposal["actions"][0]["action_id"], patch_changes[0]["object_ids"])
+        self.assertIn(
+            proposal["actions"][0]["action_id"], patch_changes[0]["object_ids"]
+        )
 
         duplicate = self.patch(
             [
@@ -813,8 +888,8 @@ class NetworkPatchTest(unittest.TestCase):
         self.assertNotEqual(
             hashlib.sha256(original_source.read_bytes()).hexdigest(), declared
         )
-        self.gap_stub.propose_patch.side_effect = (
-            lambda *args, **kwargs: self._active_proposal
+        self.gap_stub.propose_patch.side_effect = lambda *args, **kwargs: (
+            self._active_proposal
         )
 
     def test_operation_smuggling_and_cross_basis_identity_are_rejected(self):
@@ -846,9 +921,7 @@ class NetworkPatchTest(unittest.TestCase):
             ValueError,
             "does not match its basis|relation operation sequence|canonical semantic mapping|payload fields invalid",
         ):
-            PATCH.validate_acceptance(
-                smuggled, proposal, plan, self.current_ref()
-            )
+            PATCH.validate_acceptance(smuggled, proposal, plan, self.current_ref())
 
         crossed = json.loads(json.dumps(acceptance))
         evidence = crossed["decisions"][0]["operations"][0]
@@ -868,18 +941,14 @@ class NetworkPatchTest(unittest.TestCase):
         with self.assertRaisesRegex(
             ValueError, "does not match its basis|payload fields invalid"
         ):
-            PATCH.validate_acceptance(
-                crossed, proposal, plan, self.current_ref()
-            )
+            PATCH.validate_acceptance(crossed, proposal, plan, self.current_ref())
 
     def test_prepare_output_is_exclusive_confined_and_cannot_clobber_live_state(self):
         proposal, _, _ = self.contracts()
         pack = self.evidence_pack(proposal)
         proposal_path = self.write("output-proposal.json", proposal)
         pack_path = self.write("output-pack.json", pack)
-        network_state = (
-            self.root / KN.NETWORK_ROOT / self.network_id / "network.json"
-        )
+        network_state = self.root / KN.NETWORK_ROOT / self.network_id / "network.json"
         before = (
             network_state.stat().st_ino,
             hashlib.sha256(network_state.read_bytes()).hexdigest(),
@@ -933,7 +1002,14 @@ class NetworkPatchTest(unittest.TestCase):
         _, before_records = KN._load_state(paths)
         scientific_before = {
             name: json.loads(json.dumps(before_records[name]))
-            for name in ("sources", "entities", "claims", "evidence", "relations", "gaps")
+            for name in (
+                "sources",
+                "entities",
+                "claims",
+                "evidence",
+                "relations",
+                "gaps",
+            )
         }
         before_ref = self.current_ref()
         applied = self.patch(
@@ -987,9 +1063,7 @@ class NetworkPatchTest(unittest.TestCase):
             ]
         )
         self.assertEqual(applied[0], 0, applied[2])
-        events_path = (
-            self.root / KN.NETWORK_ROOT / self.network_id / "events.jsonl"
-        )
+        events_path = self.root / KN.NETWORK_ROOT / self.network_id / "events.jsonl"
         original = events_path.read_text(encoding="utf-8")
         rows = [json.loads(line) for line in original.splitlines() if line]
         patch_event = next(
@@ -1067,6 +1141,70 @@ class NetworkPatchTest(unittest.TestCase):
         after = {path.name: path.read_bytes() for path in live_files}
         self.assertEqual(after, before)
         self.assertFalse((network_dir / ".transaction.json").exists())
+        validated = self.kn(["validate"])
+        self.assertEqual(validated[0], 0, validated[2])
+
+    def test_apply_base_exception_rolls_back_bytes_inodes_and_temps(self):
+        class CommitAbort(BaseException):
+            pass
+
+        proposal, plan, acceptance = self.contracts()
+        pack = self.evidence_pack(proposal)
+        proposal_path = self.write("base-rollback-proposal.json", proposal)
+        plan_path = self.write("base-rollback-plan.json", plan)
+        acceptance_path = self.write("base-rollback-acceptance.json", acceptance)
+        pack_path = self.write("base-rollback-pack.json", pack)
+        network_dir = self.root / KN.NETWORK_ROOT / self.network_id
+        live_files = [network_dir / "network.json"] + [
+            network_dir / f"{name}.jsonl" for name in KN.LEDGER_NAMES
+        ]
+
+        for injected in (
+            KeyboardInterrupt("injected keyboard interrupt"),
+            SystemExit("injected system exit"),
+            CommitAbort("injected custom abort"),
+        ):
+            with self.subTest(exception=type(injected).__name__):
+                before = {
+                    path: (path.stat().st_ino, path.read_bytes()) for path in live_files
+                }
+                original_replace = os.replace
+                live_replace_count = 0
+                live_targets = set(live_files)
+
+                def fail_second_live_replace(source, target):
+                    nonlocal live_replace_count
+                    if Path(target) in live_targets:
+                        live_replace_count += 1
+                        if live_replace_count == 2:
+                            raise injected
+                    return original_replace(source, target)
+
+                with mock.patch.object(
+                    KN.os, "replace", side_effect=fail_second_live_replace
+                ):
+                    with self.assertRaises(type(injected)) as caught:
+                        self.patch(
+                            [
+                                "apply-patch",
+                                "--proposal",
+                                str(proposal_path),
+                                "--evidence-pack",
+                                str(pack_path),
+                                "--plan",
+                                str(plan_path),
+                                "--acceptance",
+                                str(acceptance_path),
+                            ]
+                        )
+                self.assertIs(caught.exception, injected)
+                self.assertGreaterEqual(live_replace_count, 3)
+                for path, expected in before.items():
+                    self.assertEqual((path.stat().st_ino, path.read_bytes()), expected)
+                self.assertFalse((network_dir / ".transaction.json").exists())
+                self.assertFalse(list(network_dir.glob(".*.stage.*")))
+                self.assertFalse(list(network_dir.glob(".*.restore.*")))
+
         validated = self.kn(["validate"])
         self.assertEqual(validated[0], 0, validated[2])
 
@@ -1235,15 +1373,11 @@ class NetworkPatchTest(unittest.TestCase):
 
         hypotheses = gap_support.hypotheses_fixture(live_network)
         hypotheses["hypotheses"][0]["decision_impact"] = "low"
-        hypotheses["hypotheses"][0]["grounds"][0]["ref_id"] = (
-            "evidence:ground-evidence"
-        )
+        hypotheses["hypotheses"][0]["grounds"][0]["ref_id"] = "evidence:ground-evidence"
         hypotheses["hypotheses"][0]["backing"][0]["locator"] = (
             "evidence:ground-evidence"
         )
-        hypotheses["hypotheses"][0]["backing"][0]["ref_id"] = (
-            "evidence:ground-evidence"
-        )
+        hypotheses["hypotheses"][0]["backing"][0]["ref_id"] = "evidence:ground-evidence"
         selected_ids = [
             hypothesis["hypothesis_id"]
             for hypothesis in hypotheses["hypotheses"]
@@ -1266,23 +1400,25 @@ class NetworkPatchTest(unittest.TestCase):
             "selected_hypothesis_ids": selected_ids,
             "review_status": "approved",
         }
-        hypotheses = real_gap.select_hypotheses(
-            prioritized, selection, live_network
-        )
+        hypotheses = real_gap.select_hypotheses(prioritized, selection, live_network)
         request_set = real_gap.emit_search_requests(hypotheses, live_network)
         request = request_set["requests"][0]
+        result_set = gap_support.make_result_set(
+            request_set,
+            request,
+            [gap_support.reviewed_candidate_fixture()],
+            request_digest=real_gap.sha256_json(request),
+        )
+        execution_authority_contexts, request_set_file_sha256_value = (
+            gap_support._TEST_RESULT_CONTEXTS[id(result_set)]
+        )
         discovered = real_gap.consume_results(
             hypotheses,
             live_network,
             request_set,
-            [
-                gap_support.make_result_set(
-                    request_set,
-                    request,
-                    [gap_support.reviewed_candidate_fixture()],
-                    request_digest=real_gap.sha256_json(request),
-                )
-            ],
+            [result_set],
+            execution_authority_contexts=execution_authority_contexts,
+            request_set_file_sha256=request_set_file_sha256_value,
         )
         review_set = discovered["review_requests"]
         review_request = review_set["requests"][0]
@@ -1301,7 +1437,9 @@ class NetworkPatchTest(unittest.TestCase):
         )
         bundle_path = Path(bundle_raw)
         source_path = Path(source_raw)
-        self.assertEqual(hashlib.sha256(source_path.read_bytes()).hexdigest(), source_sha)
+        self.assertEqual(
+            hashlib.sha256(source_path.read_bytes()).hexdigest(), source_sha
+        )
         reviewed = real_gap.consume_reviewed_evidence(
             discovered,
             live_network,
@@ -1398,9 +1536,9 @@ class NetworkPatchTest(unittest.TestCase):
         tampered_path.write_bytes(original_reviewed)
 
         unonboarded_proposal = json.loads(json.dumps(proposal))
-        unonboarded_proposal["actions"][0]["reviewed_evidence"][0][
-            "source_id"
-        ] = "SRC-NOT-ONBOARDED"
+        unonboarded_proposal["actions"][0]["reviewed_evidence"][0]["source_id"] = (
+            "SRC-NOT-ONBOARDED"
+        )
         gap_support.rehash_patch_v2(unonboarded_proposal)
         unonboarded_pack = json.loads(json.dumps(evidence_pack))
         unonboarded_pack["proposal_ref"] = {
@@ -1529,9 +1667,7 @@ class NetworkPatchTest(unittest.TestCase):
                 "decisions": [
                     {
                         "action_id": mixed_proposal["actions"][0]["action_id"],
-                        "action_digest": mixed_proposal["actions"][0][
-                            "action_digest"
-                        ],
+                        "action_digest": mixed_proposal["actions"][0]["action_digest"],
                         "decision": "accept",
                         "rationale": "Accept only the lossless relation mapping.",
                         "authority_basis_ids": [authority["basis_id"]],
@@ -1543,9 +1679,7 @@ class NetworkPatchTest(unittest.TestCase):
                     },
                     {
                         "action_id": mixed_proposal["actions"][1]["action_id"],
-                        "action_digest": mixed_proposal["actions"][1][
-                            "action_digest"
-                        ],
+                        "action_digest": mixed_proposal["actions"][1]["action_digest"],
                         "decision": "reject",
                         "rationale": "No lossless assumption adapter exists.",
                         "authority_basis_ids": [authority["basis_id"]],
@@ -1553,9 +1687,7 @@ class NetworkPatchTest(unittest.TestCase):
                     },
                     {
                         "action_id": mixed_proposal["actions"][2]["action_id"],
-                        "action_digest": mixed_proposal["actions"][2][
-                            "action_digest"
-                        ],
+                        "action_digest": mixed_proposal["actions"][2]["action_digest"],
                         "decision": "defer",
                         "rationale": "Boundary materialization remains blocked.",
                         "authority_basis_ids": [authority["basis_id"]],
@@ -1579,9 +1711,7 @@ class NetworkPatchTest(unittest.TestCase):
             }
         )
         blocked_acceptance = attach(
-            PATCH.without(
-                blocked_acceptance, "acceptance_id", "acceptance_digest"
-            ),
+            PATCH.without(blocked_acceptance, "acceptance_id", "acceptance_digest"),
             "acceptance_id",
             "acceptance_digest",
             "network-patch-acceptance-",
@@ -1862,9 +1992,7 @@ class NetworkPatchTest(unittest.TestCase):
             "network-patch-acceptance-",
         )
         with self.assertRaisesRegex(ValueError, "blocked action cannot be accepted"):
-            PATCH.validate_acceptance(
-                acceptance, proposal, plan, self.current_ref()
-            )
+            PATCH.validate_acceptance(acceptance, proposal, plan, self.current_ref())
 
     def test_every_evidence_pack_artifact_and_verification_tree_rejects_drift(self):
         proposal, _, _ = self.contracts()
@@ -1937,9 +2065,7 @@ class NetworkPatchTest(unittest.TestCase):
             relation["reviewed_evidence"][0], "basis_id", "basis_digest"
         )
         basis["source_id"] = "source-not-onboarded"
-        basis = attach(
-            basis, "basis_id", "basis_digest", "network-patch-basis-"
-        )
+        basis = attach(basis, "basis_id", "basis_digest", "network-patch-basis-")
         relation["reviewed_evidence"] = [basis]
         relation = attach(
             PATCH.without(relation, "action_id", "action_digest"),

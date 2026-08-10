@@ -31,6 +31,26 @@ This skill models a local, auditable graph with explicit provenance boundaries:
   - `schema_version`, `network_id`, `record_id`, `sequence`, `recorded_at`.
 - IDs are collision-safe, deterministic, and must not auto-merge.
 - Same ID with different payload is fail-closed; same ID with same payload is idempotent.
+- The seven ledgers remain `sources`, `entities`, `claims`, `evidence`,
+  `relations`, `gaps`, and `events`; appraisal does not add an eighth ledger.
+  Each new scientific row is atomically paired with one `appraised_mutation`
+  event containing only package/authority/binding/projection references,
+  ordered owner-artifact binding digests, the exact operation digest, and target
+  IDs. Numerical scores, note bodies, source
+  text, and private paths never enter this event.
+- `EvidenceAppraisalBinding/v1` is external control state with
+  `mutation_authorized=false`. It is reconstructed only after the appraisal
+  owner replays the package against the detached approval, prepared request,
+  independent review, actual owner bundle files/receipts, complete predecessor
+  lineage, and externally expected
+  authority digest. It seals `network.json`, physical byte prefixes for all
+  seven ledgers, the current export fingerprint, claim/evidence/appraisal refs,
+  scope digests, lineage group, and exact operation targets/digests.
+- A separately reviewed projection may authorize each exact operation once.
+  Unrelated writes make the prestate stale; a consumed authorization cannot be
+  replayed for a different row or operation. Historical rows lacking these
+  events remain readable as `not_appraised_legacy` but are not evidence that an
+  appraisal occurred.
 
 ## Source ingest from Zotero snapshot
 
@@ -107,7 +127,9 @@ This skill models a local, auditable graph with explicit provenance boundaries:
 
 ## Gap lifecycle
 
-- `record-gap` and deterministic derivation create the initial gap row.
+- `record-gap` and deterministic derivation create only an initial `open` gap
+  row with no resolution evidence/source. Initial `resolved` or `blocked`
+  records are invalid; status changes must use `transition-gap`.
 - `transition-gap` appends a new row and points both
   `transition_from_record_id` and `supersedes` at the latest prior row.
 - Allowed transitions are `open -> resolved|blocked`,
@@ -115,6 +137,9 @@ This skill models a local, auditable graph with explicit provenance boundaries:
 - Every transition requires a reason. A transition to `resolved` also requires
   known evidence whose `claim_id` matches the gap claim. A claimless resolution
   additionally records an explicit resolution source.
+- A transition carrying evidence is a scientific mutation and requires the same
+  finalized appraisal binding/projection as its referenced evidence. Evidence-
+  free administrative transitions retain the existing lifecycle rules.
 - Status and completion use the latest row per `gap_id`; historical rows remain
   append-only and auditable.
 

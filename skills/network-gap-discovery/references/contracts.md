@@ -559,3 +559,84 @@ python scripts/network_gap_discovery.py cycle --network network.json \
   --google-scholar-policy manual_optional
 python scripts/network_gap_discovery.py validate --input patch.json
 ```
+
+## Evidence-appraisal compilation
+
+`compile-appraisal-needs` is the owner path from finalized
+`EvidenceChallenge/v1` plus `TargetedEvidenceNeedSet/v1` into
+`KnowledgeGapHypotheses/v1`. It requires a validated `SearchHistoryIndex/v1`,
+the separately approved `HistoryAuthorityManifest/v1` that fixes its exact
+artifact universe, its referenced `ReviewedHistoryAuthority/v1`, and an
+exported live network. Only proposed
+`scholar_discovery` needs become
+hypotheses; all other routes are preserved exactly in `routed_needs`.
+
+Top-level `appraisal_compilation` embeds the exact need set, sorted challenges,
+history authority, authority approval, and history index. Each projected hypothesis carries a closed
+`EvidenceAppraisalNeedOrigin/v1` with need-set, need, route, challenge, claim,
+and appraisal refs. Prioritize, select, and emit preserve the complete
+projection; deletion, insertion, mutation, or route substitution fails closed.
+
+Confirm and refute goals use scholar-discovery's
+`semantic-concept-bag-v1`. Goal and compiled-query signatures must differ and
+both goals must bind the challenge-axis field. `adversarial_observation_pair`
+supplies the shared target metric, comparator, boundary, and value/state; only
+the closed ordered operator pairs `eq/neq`, `lt/gte`, `lte/gt`,
+`inside/outside`, `present/absent`, `reproduced/not_reproduced`, or
+`supports/does_not_support`, with `supports/challenges` claim implications,
+are accepted. Free-text negation and same-direction rewrites cannot establish
+orthogonality. Canonical or high-containment
+history overlap fails, including selection leaks and failed, partial, empty,
+successful, and candidate records. No-result and partial-provider outcomes do
+not close a need and do not imply novelty.
+
+Both goals must byte-match
+`target_metric=...; comparator=...; boundary=...; observation=<operator> <value_or_state>; claim_implication=...`
+as deterministically regenerated from the structured pair. Provider queries are
+compiled from that projection; free prose cannot override its direction. Query
+planning reserves non-truncatable slots for `target_metric`, `comparator`,
+`boundary`, the objective-specific complementary `operator`, and
+`value_or_state` before adding free keywords. Both normalized queries must
+retain their operator and state. If the deduplicated structured core cannot fit
+the 12-term budget, compilation fails closed rather than emitting a weakened
+query.
+
+The embedded history index is owner-replayed from its authority-fixed full
+artifact universe; entries and source refs are not trusted merely because an
+external caller recomputed their digest. Appraisal-origin request sets embed the entire reviewed
+selected document and global Scholar policy. Network-gap-discovery and
+scholar-discovery independently replay the ReviewedGapSelection and exact
+request projection, so deleting an origin or appending a request fails after
+rehashing.
+
+Appraisal-origin request sets use
+`AppraisalScholarDiscoveryRequestSet/v1`. Network result consumption requires
+that schema whenever hypotheses carry `appraisal_compilation`; changing the
+set to generic after deleting every origin/projection cannot enter appraisal
+execution.
+
+`dispatch-appraisal-package` is the explicit adapter for the producer's compact
+`EvidenceAppraisalPackage/v1`. It preserves package, appraisal-set, need-set,
+and exact need bindings in `EvidenceAppraisalRouteDispatch/v1`. Compact
+non-search routes are dispatched unchanged; compact `scholar_discovery` fails
+closed rather than inventing missing query semantics.
+
+Validation and dispatch require the detached producer approval, prepared
+request, and independent review plus an external caller-held
+`expected_authority_sha256`. The adapter passes that pin to the producer's
+public `validate_appraisal_package`; a missing or incorrect pin fails before
+routing, even when the package and approval have been self-resealed.
+
+```bash
+python scripts/network_gap_discovery.py compile-appraisal-needs \
+  --needs targeted-needs.json --challenge challenge-1.json \
+  --history-index search-history.json --history-authority history-authority.json \
+  --history-authority-review reviewed-history-authority.json \
+  --network network.json \
+  --round-id ROUND-APPRAISAL-001 --output hypotheses.json
+python scripts/network_gap_discovery.py dispatch-appraisal-package \
+  --package appraisal-package.json --approval reviewed-authority.json \
+  --prepared prepared-appraisal.json --review independent-review.json \
+  --expected-authority-sha256 "$EXPECTED_AUTHORITY_SHA256" \
+  --output appraisal-route-dispatch.json
+```

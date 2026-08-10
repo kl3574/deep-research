@@ -1,7 +1,7 @@
 # Compound research scenario pipeline
 
 Use this controller only for a compound run that crosses discovery, acquisition,
-paper understanding, Zotero curation, knowledge-network maintenance, and
+paper understanding, evidence appraisal, Zotero curation, knowledge-network maintenance, and
 publication. It coordinates content-addressed stage state; it does not browse,
 interpret a paper, mutate Zotero, apply a network patch, or publish by itself.
 
@@ -67,6 +67,13 @@ binds its absolute path, byte size, and SHA-256. Each state is immutable: write
 the next state to a new path. `status` returns ready, active, blocked, partial,
 completed, and terminal-stage counts.
 
+`status` and `validate` replay `topic_discovery`, `evidence_appraisal`, and
+`network_publish` terminal artifacts against their owner contracts before
+reporting. `blocked` replay applies when those stages have retained coverage
+artifacts; `blocked` stages without coverage artifacts remain non-replay states.
+This means any post-record file drift on retained terminal artifacts is detected
+as integrity failure before any unrelated stage is accepted.
+
 `completed` means both that the bounded stage action terminated and that its
 promised stage coverage is complete. `partial` means the action terminated with
 usable handoff artifacts but provider, route, budget, or another declared
@@ -102,20 +109,27 @@ history; updates only the understanding dependency; inserts
 only when normalization evidence cannot currently be produced. Never overwrite
 the legacy execution or use migration to fabricate normalization completion.
 
+The resulting ten-stage pre-appraisal shape is also legacy-readable but cannot
+be finalized or published as appraised. Run `migrate` a second time to insert
+`evidence_appraisal` after `paper_understanding`, rebind `network_merge` to that
+stage, and append `ResearchPipelineMigration/v2`. This migration preserves all
+existing stage rows and artifacts; it never fabricates a package or approval.
+
 ## Stage authority
 
 | Stage | Owning capability | Completion evidence |
 | --- | --- | --- |
 | `zotero_baseline` | curator | exact target snapshot and child inventory |
 | `network_seed` | RKN | validated network export plus semantic scenario seed |
-| `topic_discovery` | scholar discovery | validated request/result sets; `completed` only when every represented result is `complete_bounded` and there are no request failures, otherwise `partial` |
+| `topic_discovery` | scholar discovery | validated request/result sets; `completed` only when every represented result is `complete_bounded`, every request-set is bound to one authorization, and every represented path has explicit linear `ScholarDiscoveryResultSetAttempt/v1` coverage when multiple result sets exist. Otherwise `partial` |
 | `source_acquisition` | source acquisition | PDF identity, access route, hash, or explicit failure |
 | `source_normalization` | scholarly document normalization | validated quality records plus derivative lineage, or a `native_ok` quality artifact as explicit skip evidence |
 | `paper_understanding` | learn from papers | validated understanding/dossier/source bindings |
+| `evidence_appraisal` | evidence appraisal | owner-replayable `EvidenceAppraisalPackage/v1` plus exact detached approval, prepared request, independent review, actual `EvidenceAppraisalOwnerBundle/v1` files and receipts, predecessor lineage, and external authority expectation; a candidate set alone is insufficient |
 | `zotero_curation` | curator | per-item write and readback evidence |
 | `network_merge` | RKN | accepted patch and fresh validated export |
 | `gap_cycle` | gap discovery | terminal or explicitly unresolved prioritized gaps |
-| `network_publish` | network publisher | validated privacy-mode HTML |
+| `network_publish` | network publisher | validated `ResearchNetworkPublishEvidence/v1` owner-replayed against `public-redacted` renderer with explicit network/reference hash bindings |
 
 Google Scholar remains a manual export route. Provider preflight reports whether
 OpenAlex is configured, whether Semantic Scholar is using anonymous rate limits,
@@ -128,3 +142,9 @@ stating that derivative generation was skipped. Otherwise bind both the quality
 artifact and validated normalization lineage. `paper_understanding` depends on
 both acquisition and normalization state so an OCR substitution cannot silently
 replace the acquired source.
+
+`network_merge` depends on terminal `evidence_appraisal`. Recording that stage as
+`completed` or `partial` reopens every bound JSON artifact, including the runtime
+owner bundle, and calls the appraisal owner's package replay API against actual
+files and verification receipts. The controller does not trust a self-resealed set or
+package and does not reinterpret challenge or targeted-need content.

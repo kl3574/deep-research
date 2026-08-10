@@ -309,13 +309,68 @@ class CountercheckClosureTests(unittest.TestCase):
         providers = axis["provider_families"]
         request_set = self.request_set(round_id, providers)
         request_path = self.write(f"{round_id}-requests.json", request_set)
+        request_set_file_sha256 = hashlib.sha256(request_path.read_bytes()).hexdigest()
+        execution_authority = OWNER.authorize_request_set(
+            copy.deepcopy(request_set),
+            reviewer_id="countercheck-execution-reviewer",
+            reviewer_role="independent search execution reviewer",
+            reviewed_at="2026-08-09T00:00:30Z",
+            independent_reviewer_attested=True,
+            request_set_file=request_path,
+            request_set_file_sha256=request_set_file_sha256,
+        )
+        execution_authority_path = self.write(
+            f"{round_id}-execution-authorization.json", execution_authority
+        )
+        execution_authority_file_sha256 = hashlib.sha256(
+            execution_authority_path.read_bytes()
+        ).hexdigest()
         result_set = OWNER.execute_request_set(
-            copy.deepcopy(request_set), self.transport, timeout_seconds=30
+            copy.deepcopy(request_set),
+            self.transport,
+            timeout_seconds=30,
+            execution_authority=execution_authority,
+            expected_execution_authority_sha256=execution_authority_file_sha256,
+            execution_authority_file=execution_authority_path,
+            execution_authority_file_sha256=execution_authority_file_sha256,
+            request_set_file=request_path,
+            request_set_file_sha256=request_set_file_sha256,
         )
         if result_status != "complete_bounded":
-            result_set["results"][0]["discovery_status"] = result_status
-            result_set["results"][0]["stop_reason"] = result_status
-        OWNER.validate_result_set(copy.deepcopy(result_set))
+            result = result_set["results"][0]
+            result["discovery_status"] = result_status
+            result["stop_reason"] = result_status
+            event = result["search_events"][0]
+            query_id = event["query_id"]
+            event["status"] = (
+                "blocked" if result_status == "blocked_capability" else "partial"
+            )
+            event["search_event"]["truncated"] = (
+                result_status != "blocked_capability"
+            )
+            event["search_event"]["limitations"] = ["fixture_incomplete_provider"]
+            result["provider_failures"] = [
+                {
+                    "query_id": query_id,
+                    "provider": event["provider"],
+                    "execution": event["execution"],
+                    "status": event["status"],
+                    "limitations": ["fixture_incomplete_provider"],
+                }
+            ]
+            result["unresolved_query_ids"] = [query_id]
+        OWNER.validate_result_set(
+            copy.deepcopy(result_set),
+            request_set_value=request_set,
+            execution_authority=execution_authority,
+            expected_execution_authority_sha256=(
+                execution_authority_file_sha256
+            ),
+            execution_authority_file_sha256=(
+                execution_authority_file_sha256
+            ),
+            request_set_file_sha256=request_set_file_sha256,
+        )
         result_path = self.write(f"{round_id}-results.json", result_set)
         result_ref = self.ref(result_path)
 
@@ -353,7 +408,7 @@ class CountercheckClosureTests(unittest.TestCase):
                 request["request_id"] for request in request_set["requests"]
             ],
             "result_set_ref": {
-                "schema": "ScholarDiscoveryResultSet/v1",
+                "schema": "ScholarDiscoveryResultSet/v2",
                 "sha256": result_ref["sha256"],
             },
             "candidate_occurrence_universe_sha256": MODULE.sha256_json(occurrences),
@@ -421,6 +476,9 @@ class CountercheckClosureTests(unittest.TestCase):
                 "queries": query_bindings,
             },
             "request_set_ref": self.ref(request_path),
+            "execution_authorization_ref": self.ref(
+                execution_authority_path
+            ),
             "result_set_ref": result_ref,
             "screening_ref": self.ref(screening_path),
             "tier_a_review_ref": self.ref(review_path),
@@ -469,10 +527,19 @@ class CountercheckClosureTests(unittest.TestCase):
         owner = MODULE._load_rkn_owner()
         stdout = io.StringIO()
         stderr = io.StringIO()
-        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-            code = owner.main(
-                ["--root", str(root), "--network-id", network_id, *arguments]
+        scientific_append = owner._append_scientific_candidate
+        owner._append_scientific_candidate = (
+            lambda paths, records, ledger, record_id, payload, **_: owner._append_candidate(
+                paths, records, ledger, record_id, payload
             )
+        )
+        try:
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = owner.main(
+                    ["--root", str(root), "--network-id", network_id, *arguments]
+                )
+        finally:
+            owner._append_scientific_candidate = scientific_append
         self.assertEqual(code, 0, stderr.getvalue())
         return json.loads(stdout.getvalue()) if stdout.getvalue().strip() else {}
 

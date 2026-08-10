@@ -1,0 +1,1 @@
+{"schema":"EvidenceAppraisalRequest/v1","appraisal_set_id":"set-minimal","cycle":0,"prior_cycle_ref":null,"relation_keys":[{"claim_ref":"claim-1","evidence_ref":"evidence-1"}]}
