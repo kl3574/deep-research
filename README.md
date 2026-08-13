@@ -85,14 +85,25 @@ RAG、主动筛选、研究知识图谱与完整 Zotero 读写闭环，避免把
 ```bash
 git clone --branch v0.8.0 --depth 1 https://github.com/kl3574/deep-research.git
 cd deep-research
-mkdir -p ~/.codex/skills
-stamp="$(date +%Y%m%d%H%M%S)"
+tag_object="$(git rev-parse refs/tags/v0.8.0)"
+tag_commit="$(git rev-parse refs/tags/v0.8.0^{commit})"
+install_root="$HOME/.codex/skills"
+backup_root="$HOME/.codex/skill-backups/v0.8.0-$tag_commit"
+stage_root="$(mktemp -d "$HOME/.codex/skills-v0.8.0-stage.XXXXXX")"
+mkdir -p "$install_root" "$backup_root"
 for skill in deep-research learn-from-papers evidence-appraisal research-knowledge-network network-gap-discovery scholar-discovery scholarly-source-acquisition scholarly-document-normalization research-workflow-retrospective curate-research-to-zotero repair-zotero-metadata research-network-publish; do
-  if [ -e "$HOME/.codex/skills/$skill" ] || [ -L "$HOME/.codex/skills/$skill" ]; then
-    mv "$HOME/.codex/skills/$skill" "$HOME/.codex/skills/${skill}.backup-${stamp}"
+  cp -a "skills/$skill" "$stage_root/$skill"
+  if [ -e "$install_root/$skill" ] || [ -L "$install_root/$skill" ]; then
+    mv --no-copy "$install_root/$skill" "$backup_root/$skill"
   fi
-  cp -a "skills/$skill" "$HOME/.codex/skills/$skill"
+  mv --no-copy "$stage_root/$skill" "$install_root/$skill"
 done
+printf '%s  %s\n' "$tag_object" refs/tags/v0.8.0 > "$backup_root/tag-pin.txt"
+printf '%s  %s\n' "$tag_commit" refs/tags/v0.8.0^{commit} >> "$backup_root/tag-pin.txt"
+for skill in deep-research learn-from-papers evidence-appraisal research-knowledge-network network-gap-discovery scholar-discovery scholarly-source-acquisition scholarly-document-normalization research-workflow-retrospective curate-research-to-zotero repair-zotero-metadata research-network-publish; do
+  diff -qr "skills/$skill" "$install_root/$skill"
+done
+codex doctor --json > "$backup_root/codex-doctor.postinstall.json"
 ```
 
 默认循环故意不安装 `zotero-declarative-bridge`。需要本地 Zotero 受约束写入
@@ -106,8 +117,11 @@ cp -a skills/zotero-declarative-bridge ~/.codex/skills/zotero-declarative-bridge
 Zotero 可见的 Add-ons UI 安装，并重新执行 capability、probe 与 readback 门；
 离线 XPI 构建或单元测试仍不是启用证据。
 
-固定 tag、保留旧安装备份并复制实体目录，避免开发分支漂移或重复技能根。
-重启 Codex 会话后技能才会被重新发现。
+固定并记录 tag object/peeled commit；旧安装备份必须留在 loader 根之外，避免被
+当作重复技能发现。上述 `mv --no-copy` 还会在跨文件系统时失败，而不是静默复制；
+若中途失败，从 `$backup_root` 恢复未完成项，再在同一文件系统重试。安装后保留
+tag pin、逐技能字节比较与脱敏 `codex doctor` 回读。重启 Codex 会话后技能才会被
+重新发现。
 
 ## 使用示例
 
