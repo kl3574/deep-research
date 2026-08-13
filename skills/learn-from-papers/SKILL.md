@@ -72,6 +72,10 @@ authorization and review.
    `PaperReadingReportSet/v2` only for machine handoff. Use
    [reading-dossier.md](references/reading-dossier.md) for attestation commands
    and [contracts.md](references/contracts.md) for schemas and failure rules.
+   When downstream review needs evidence from several papers, keep each dossier
+   and report set single-source and finalized, then aggregate those immutable
+   owners in `PaperReadingEvidenceCollection/v1`. The collection is a replay
+   envelope, not a multi-paper dossier or a new scientific verdict.
 10. `PaperUnderstanding/v1` is the dedicated non-network handoff artifact for
     deep, non-map outputs. Project to
     `PaperUnderstandingNoteInput/v1` only with `project-note-input`, and only

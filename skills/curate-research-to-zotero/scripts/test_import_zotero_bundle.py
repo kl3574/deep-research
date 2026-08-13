@@ -57,7 +57,11 @@ class MetadataOnlyImportTests(unittest.TestCase):
             "access_level": "metadata_only",
             "metadata_only_reason": "No lawful full text was acquired.",
             "target": {"group_id": 1},
-            "item": {"title": "A paper", "DOI": "10.1/example"},
+            "item": {
+                "itemType": "journalArticle",
+                "title": "A paper",
+                "DOI": "10.1/example",
+            },
             "pdf": pdf,
             "note": {
                 "html_path": str(note),
@@ -76,6 +80,15 @@ class MetadataOnlyImportTests(unittest.TestCase):
             self.assertIsNone(pdf_path)
             self.assertIsNone(pdf_hash)
             self.assertEqual(actual_note, note_path)
+
+    def test_bundle_requires_explicit_item_type(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            bundle_path, _ = self.make_bundle(Path(temp))
+            bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+            bundle["item"].pop("itemType")
+            bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
+            with self.assertRaisesRegex(module.BundleError, "itemType"):
+                module.load_and_validate(bundle_path)
 
     def test_metadata_only_bundle_refuses_declared_pdf(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

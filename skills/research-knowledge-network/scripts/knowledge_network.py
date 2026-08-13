@@ -14,6 +14,7 @@ import stat
 import sys
 import tempfile
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,7 +32,43 @@ LEDGER_NAMES = (
     "events",
 )
 
+_ATOMIC_NETWORK_PATCH_CONTEXT: ContextVar[bool] = ContextVar(
+    "rkn_atomic_network_patch_context", default=False
+)
+
+
+@contextmanager
+def _network_patch_atomic_context():
+    """Mark in-process operations as isolated by network_patch staging."""
+
+    token = _ATOMIC_NETWORK_PATCH_CONTEXT.set(True)
+    try:
+        yield
+    finally:
+        _ATOMIC_NETWORK_PATCH_CONTEXT.reset(token)
+
+
+def _require_projection_execution_context(
+    projection: dict[str, Any], proposal: dict[str, Any] | None = None
+) -> None:
+    high_impact_v1 = any(
+        isinstance(action, dict)
+        and isinstance(action.get("target_claim"), dict)
+        and action["target_claim"].get("impact") == "high"
+        for action in (proposal or {}).get("actions", [])
+    )
+    if (
+        projection.get("schema") == "EvidenceAppraisalNetworkProjection/v2"
+        or high_impact_v1
+    ) and not _ATOMIC_NETWORK_PATCH_CONTEXT.get():
+        raise ValueError(
+            "multi-gap or high-impact scientific operations require the staged "
+            "network_patch apply transaction"
+        )
+
+
 ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{1,62}")
+EVIDENCE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{1,254}")
 GAP_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{1,254}")
 SNAPSHOT_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 ZOTERO_SNAPSHOT_SCHEMA = "ZoteroCorpusSnapshot/v1"
@@ -840,6 +877,13 @@ def _validate_id(value: str, field: str) -> str:
     return value
 
 
+def _validate_evidence_id(value: str, field: str) -> str:
+    value = _ensure_value(value, field)
+    if not EVIDENCE_ID_RE.fullmatch(value):
+        raise ValueError(f"{field} invalid format: {value}")
+    return value
+
+
 def _validate_gap_id(value: str, field: str) -> str:
     value = _ensure_value(value, field)
     if not GAP_ID_RE.fullmatch(value):
@@ -1101,11 +1145,13 @@ def _parse_jsonl_bytes(path: Path, content: bytes) -> list[dict[str, Any]]:
 
 def _replace_files_transactionally(
     contents: dict[Path, str],
-    ledger_updates: dict[
-        Path,
-        tuple[list[dict[str, Any]], list[dict[str, Any]]],
-    ]
-    | None = None,
+    ledger_updates: (
+        dict[
+            Path,
+            tuple[list[dict[str, Any]], list[dict[str, Any]]],
+        ]
+        | None
+    ) = None,
 ) -> None:
     """Commit ordinary replacements and physical-prefix ledger appends.
 
@@ -1625,6 +1671,7 @@ def _require_scientific_mutation_gate(
         binding["network_ref"],
         _claim_scopes_from_records(records, prefix_counts=prefix_counts),
     )
+    _require_projection_execution_context(projection, gate["proposal"])
     consumed = _validate_guard_prefix(paths, records, gate)
     return module.authorize_mutation(
         gate,
@@ -2234,7 +2281,7 @@ def _validate_evidence_record(
     if row.get("schema_version") != SCHEMA_VERSION:
         errors.append("evidence record schema_version mismatch")
     evidence_id = row.get("evidence_id")
-    if not ID_RE.fullmatch(str(evidence_id or "")):
+    if not EVIDENCE_ID_RE.fullmatch(str(evidence_id or "")):
         errors.append(f"invalid evidence_id: {evidence_id!r}")
     if row.get("record_id") != _record_id("evidence", str(evidence_id or "")):
         errors.append(f"evidence record_id mismatch: {row.get('record_id')}")
@@ -2719,9 +2766,11 @@ def _validate_appraised_mutation_event(
                 "recorded_at",
             }
         }
-        expected_mutation_digest = _sha256_json(
-            {"operation_type": operation_type, "payload": payload}
-        ).split(":", 1)[1]
+        expected_mutation_digest = (
+            _load_appraisal_binding_module().mutation_subject_digest(
+                str(operation_type), payload
+            )
+        )
         if row.get("mutation_subject_digest") != expected_mutation_digest:
             errors.append(f"{label} mutation_subject_digest mismatch")
         if int(target.get("sequence") or 0) >= int(row.get("sequence") or 0):
@@ -2821,7 +2870,9 @@ def _validate_patch_decision_event(
                 appraisal_gate.get("approval_ref"), dict
             ) and appraisal_gate["expected_authority_sha256"] != appraisal_gate[
                 "approval_ref"
-            ].get("authority_digest"):
+            ].get(
+                "authority_digest"
+            ):
                 errors.append(f"{label} expected authority/approval mismatch")
             _validate_digest_ref(
                 appraisal_gate.get("binding_ref"),
@@ -3131,7 +3182,8 @@ def _valid_ref(ref: Any) -> bool:
     head, _, tail = ref.partition(":")
     if head not in {"claim", "evidence"}:
         return False
-    return bool(tail) and ID_RE.fullmatch(tail)
+    validator = EVIDENCE_ID_RE if head == "evidence" else ID_RE
+    return bool(tail) and validator.fullmatch(tail)
 
 
 def _is_claim_or_evidence_ref(ref: Any) -> bool:
@@ -3228,10 +3280,16 @@ def _derive_status_summary(
     )
     active_claims = _active_records(records["claims"], "claim_id")
     active_evidence = _active_records(records["evidence"], "evidence_id")
+    active_sources = _active_records(records["sources"], "source_id")
     claim_map = _collect_claim_map(active_claims)
     by_claim = _group_evidence_by_claim(active_evidence)
+    source_map = {
+        row["source_id"]: row
+        for row in active_sources
+        if isinstance(row.get("source_id"), str)
+    }
     open_conflicts = _derive_conflicts(records)
-    high_impact_open = _count_high_impact_open_claims(claim_map, by_claim)
+    high_impact_open = _count_high_impact_open_claims(claim_map, by_claim, source_map)
     open_gaps = _collect_open_gaps(records["gaps"])
     blocking_explicit_gaps = _collect_blocking_open_explicit_gaps(records["gaps"])
     coverage = _collect_aggregate_coverage(
@@ -3310,6 +3368,7 @@ def _group_evidence_by_claim(
 def _count_high_impact_open_claims(
     claim_map: dict[str | None, dict[str, Any]],
     by_claim: dict[str, list[dict[str, Any]]],
+    source_map: dict[str, dict[str, Any]],
 ) -> int:
     count = 0
     for claim_id, claim in claim_map.items():
@@ -3319,14 +3378,28 @@ def _count_high_impact_open_claims(
         if not evidences:
             count += 1
             continue
-        decisive = {
-            row.get("polarity")
-            for row in evidences
-            if row.get("polarity") in DECISIVE_COVERAGE_POLARITIES
-        }
-        if not decisive:
+        source_ids, has_full_text = _decisive_source_coverage(
+            evidences, source_map
+        )
+        if len(source_ids) < 2 or not has_full_text:
             count += 1
     return count
+
+
+def _decisive_source_coverage(
+    evidences: list[dict[str, Any]],
+    source_map: dict[str, dict[str, Any]],
+) -> tuple[set[str], bool]:
+    source_ids = {
+        str(row["source_id"])
+        for row in evidences
+        if row.get("polarity") in DECISIVE_COVERAGE_POLARITIES
+        and isinstance(row.get("source_id"), str)
+    }
+    return source_ids, any(
+        source_map.get(source_id, {}).get("read_depth") == "full"
+        for source_id in source_ids
+    )
 
 
 def _collect_open_gaps(gaps: list[dict[str, Any]]) -> list[str]:
@@ -3433,21 +3506,16 @@ def _derive_gaps_payload_for_claim(
     claim_id: str,
     claim: dict[str, Any],
     evidences: list[dict[str, Any]],
+    source_map: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
     payloads: list[dict[str, Any]] = []
-    decisive = {
-        row.get("polarity")
-        for row in evidences
-        if row.get("polarity") in DECISIVE_COVERAGE_POLARITIES
-    }
-    groups = {
-        row.get("independence_group")
-        for row in evidences
-        if isinstance(row.get("independence_group"), str)
-        and row.get("polarity") in DECISIVE_COVERAGE_POLARITIES
-    }
+    decisive_source_ids, has_full_text = _decisive_source_coverage(
+        evidences, source_map
+    )
 
-    if claim.get("impact") == "high" and not decisive:
+    if claim.get("impact") == "high" and (
+        len(decisive_source_ids) < 2 or not has_full_text
+    ):
         payloads.append(
             {
                 "gap_id": _make_gap_id("derived_unsupported_high_impact", claim_id),
@@ -3456,14 +3524,18 @@ def _derive_gaps_payload_for_claim(
                 "impact": "high",
                 "status": "open",
                 "description": (
-                    f"No decisive evidence for high-impact claim {claim_id}."
+                    f"High-impact claim {claim_id} lacks required decisive "
+                    "coverage from at least two distinct source IDs with at "
+                    f"least one full-text source; source_count="
+                    f"{len(decisive_source_ids)}, has_full_text="
+                    f"{str(has_full_text).lower()}."
                 ),
                 "derivation_source": "derive-gaps",
                 "derivation_rule": "unsupported_high_impact",
             }
         )
 
-    if len(groups) == 1:
+    if len(decisive_source_ids) == 1:
         payloads.append(
             {
                 "gap_id": _make_gap_id("derived_single_source", claim_id),
@@ -3472,7 +3544,7 @@ def _derive_gaps_payload_for_claim(
                 "impact": "medium" if claim.get("impact") != "high" else "high",
                 "status": "open",
                 "description": (
-                    f"Claim {claim_id} currently has one independent source stream."
+                    f"Claim {claim_id} currently has one decisive source ID."
                 ),
                 "derivation_source": "derive-gaps",
                 "derivation_rule": "single_independent_source",
@@ -3500,9 +3572,9 @@ def _derive_gaps_payload_for_claim(
                 "claim_id": claim_id,
                 "impact": "high",
                 "status": "open",
-                "conflict_independence": "multi_stream"
-                if len(groups) > 1
-                else "single_stream",
+                "conflict_independence": (
+                    "multi_stream" if len(groups) > 1 else "single_stream"
+                ),
                 "group_count": len(groups),
                 "severity": "high" if len(groups) > 1 else "medium",
                 "independence_groups": groups,
@@ -3771,7 +3843,7 @@ def command_add_evidence(args: argparse.Namespace) -> int:
             print("source_id unknown", file=sys.stderr)
             return 1
         if args.supersedes:
-            if _validate_id(args.supersedes, "supersedes") not in {
+            if _validate_evidence_id(args.supersedes, "supersedes") not in {
                 row.get("evidence_id") for row in records["evidence"]
             }:
                 print("supersedes target is unknown", file=sys.stderr)
@@ -3779,7 +3851,7 @@ def command_add_evidence(args: argparse.Namespace) -> int:
         if args.supersedes and args.evidence_id == args.supersedes:
             print("supersedes cannot point to itself", file=sys.stderr)
             return 1
-        evidence_id = _validate_id(args.evidence_id, "evidence_id")
+        evidence_id = _validate_evidence_id(args.evidence_id, "evidence_id")
         payload = {
             "evidence_id": evidence_id,
             "claim_id": claim_id,
@@ -4000,7 +4072,7 @@ def command_transition_gap(args: argparse.Namespace) -> int:
             if isinstance(row.get("evidence_id"), str)
         }
         for evidence_ref in evidence_refs:
-            _validate_id(evidence_ref, "evidence_ref")
+            _validate_evidence_id(evidence_ref, "evidence_ref")
             if evidence_ref not in evidence_by_id:
                 print(f"unknown evidence_ref: {evidence_ref}", file=sys.stderr)
                 return 1
@@ -4963,7 +5035,13 @@ def _build_derived_gap_payloads(
 ) -> list[dict[str, Any]]:
     active_claims = _active_records(records["claims"], "claim_id")
     active_evidence = _active_records(records["evidence"], "evidence_id")
+    active_sources = _active_records(records["sources"], "source_id")
     claim_evidence = _group_evidence_by_claim(active_evidence)
+    source_map = {
+        row["source_id"]: row
+        for row in active_sources
+        if isinstance(row.get("source_id"), str)
+    }
     payloads: list[dict[str, Any]] = []
     for claim in sorted(active_claims, key=lambda row: str(row.get("claim_id"))):
         claim_id = claim.get("claim_id")
@@ -4974,6 +5052,7 @@ def _build_derived_gap_payloads(
                 claim_id,
                 claim,
                 claim_evidence.get(claim_id, []),
+                source_map,
             )
         )
     topology_records = dict(records)
@@ -5617,6 +5696,12 @@ def _export_gaps(
             ),
             "description": str(row.get("description") or "review gap"),
             "novelty_claimed": False,
+            "record_ref": {
+                "record_id": str(row["record_id"]),
+                "sequence": int(row["sequence"]),
+                "status": status,
+                "sha256": _sha256_json(row).split(":", 1)[1],
+            },
         }
         if row.get("priority") in GAP_PRIORITIES:
             output["declared_priority"] = str(row["priority"])
@@ -5637,9 +5722,7 @@ def _export_gaps(
                     "defeaters": (
                         defeaters
                         if isinstance(defeaters, list)
-                        else [str(defeaters)]
-                        if str(defeaters or "").strip()
-                        else []
+                        else [str(defeaters)] if str(defeaters or "").strip() else []
                     ),
                     "search_test": str(row.get("search_test") or ""),
                 }
@@ -5801,6 +5884,14 @@ def _knowledge_network_export(
         "schema": "KnowledgeNetwork/v1",
         "network_id": paths.network_id,
         "snapshot_id": f"{paths.network_id}-S{internal_digest[:16]}",
+        "requirements": {
+            "required_dimensions": sorted(
+                _sort_items(state.get("required_dimensions", []))
+            ),
+            "required_benchmark_profiles": sorted(
+                _sort_items(state.get("required_benchmark_profiles", []))
+            ),
+        },
         "corpus_snapshot": {
             "source": "zotero" if zotero_bound else "local",
             "target_ref": (

@@ -14,9 +14,20 @@ from pathlib import Path
 from typing import Any
 
 BINDING_SCHEMA = "EvidenceAppraisalBinding/v1"
+BINDING_V2_SCHEMA = "EvidenceAppraisalBinding/v2"
 PROJECTION_SCHEMA = "EvidenceAppraisalNetworkProjection/v1"
+PROJECTION_V2_SCHEMA = "EvidenceAppraisalNetworkProjection/v2"
 PROJECTION_REVIEW_SCHEMA = "EvidenceAppraisalProjectionReview/v1"
+PROJECTION_REVIEW_V2_SCHEMA = "EvidenceAppraisalProjectionReview/v2"
 SCHEMA_VERSION = "1.0"
+V2_SCHEMA_VERSION = "2.0"
+PATCH_V2_SCHEMA = "NetworkPatchProposal/v2"
+PATCH_V3_SCHEMA = "NetworkPatchProposal/v3"
+PATCH_V4_SCHEMA = "NetworkPatchProposal/v4"
+TARGET_CLAIM_V2_SCHEMA = "NetworkPatchTargetClaim/v2"
+EXISTING_CLAIM_REF_SCHEMA = "NetworkPatchExistingClaimRef/v1"
+COLLECTION_CONSUMPTION_REF_SCHEMA = "ReviewedEvidenceCollectionConsumption/v1"
+DIRECT_REVIEWED_SELECTION_ROUTE = "direct_reviewed_selection"
 HEX64_RE = re.compile(r"[0-9a-f]{64}")
 UTC_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 LEDGER_NAMES = (
@@ -57,6 +68,53 @@ GAP_TRANSITION_FIELDS = {
     "basis_appraisal_refs",
     "basis_need_refs",
 }
+ORIGIN_GAP_REF_FIELDS = {
+    "gap_id",
+    "record_id",
+    "sequence",
+    "status",
+    "sha256",
+}
+READING_GROUP_REF_FIELDS = {
+    "reading_group_id",
+    "reading_group_digest",
+    "source_id",
+    "report_set_id",
+    "report_set_digest",
+}
+REPORT_CLAIM_REF_FIELDS = {
+    "basis_id",
+    "basis_digest",
+    "reading_group_id",
+    "claim_id",
+    "claim_digest",
+    "reading_report_id",
+    "reading_report_digest",
+}
+CLAIM_RECORD_REF_FIELDS = {"record_id", "sequence", "sha256"}
+CLAIM_SEMANTIC_FIELDS = {
+    "claim_text",
+    "entity_id",
+    "impact",
+    "is_factual",
+    "scope_statement",
+    "assumptions",
+    "conditions",
+    "units",
+    "exclusions",
+    "defeaters",
+    "coverage_dimensions",
+    "benchmark_profiles",
+    "supersedes",
+}
+COLLECTION_CONSUMPTION_REF_FIELDS = {
+    "schema",
+    "route",
+    "authority_id",
+    "authority_digest",
+    "authority_file_sha256",
+    "consumed_hypotheses_sha256",
+}
 
 
 class BindingError(ValueError):
@@ -75,6 +133,22 @@ def canonical_bytes(value: Any) -> bytes:
 
 def digest_json(value: Any) -> str:
     return hashlib.sha256(canonical_bytes(value)).hexdigest()
+
+
+def proposal_canonical_bytes(value: Any) -> bytes:
+    """Match the UTF-8 canonicalization used by NGD and network_patch."""
+
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def proposal_digest_json(value: Any) -> str:
+    return hashlib.sha256(proposal_canonical_bytes(value)).hexdigest()
 
 
 def without(value: dict[str, Any], *fields: str) -> dict[str, Any]:
@@ -123,6 +197,18 @@ def _timestamp(value: Any, label: str) -> str:
 def _unique(values: list[str], label: str) -> None:
     if len(values) != len(set(values)):
         raise BindingError(f"{label} contains duplicates")
+
+
+def _string_list(value: Any, label: str, *, nonempty: bool = False) -> list[str]:
+    if not isinstance(value, list) or any(
+        not isinstance(item, str) or not item.strip() or item != item.strip()
+        for item in value
+    ):
+        raise BindingError(f"{label} must be a canonical string list")
+    if nonempty and not value:
+        raise BindingError(f"{label} must be non-empty")
+    _unique(value, label)
+    return value
 
 
 def _attach(
@@ -189,6 +275,35 @@ def validate_network_ref(value: Any, label: str = "network_ref") -> dict[str, st
     }
 
 
+def validate_collection_consumption_ref(
+    value: Any, label: str = "proposal.consumption_ref"
+) -> dict[str, str]:
+    ref = _object(value, label)
+    _keys(ref, COLLECTION_CONSUMPTION_REF_FIELDS, label)
+    if ref["schema"] != COLLECTION_CONSUMPTION_REF_SCHEMA:
+        raise BindingError(f"{label}.schema is invalid")
+    if ref["route"] != DIRECT_REVIEWED_SELECTION_ROUTE:
+        raise BindingError(f"{label}.route must be direct_reviewed_selection")
+    authority_digest = _digest(ref["authority_digest"], f"{label}.authority_digest")
+    if ref["authority_id"] != (
+        "reviewed-collection-consumption-authority-" + authority_digest[:16]
+    ):
+        raise BindingError(f"{label}.authority_id does not match authority_digest")
+    return {
+        "schema": ref["schema"],
+        "route": ref["route"],
+        "authority_id": ref["authority_id"],
+        "authority_digest": authority_digest,
+        "authority_file_sha256": _digest(
+            ref["authority_file_sha256"], f"{label}.authority_file_sha256"
+        ),
+        "consumed_hypotheses_sha256": _digest(
+            ref["consumed_hypotheses_sha256"],
+            f"{label}.consumed_hypotheses_sha256",
+        ),
+    }
+
+
 def validate_prefix_guard(value: Any) -> dict[str, Any]:
     guard = _object(value, "binding.network_guard")
     _keys(guard, {"state", "ledgers"}, "binding.network_guard")
@@ -218,7 +333,7 @@ def validate_prefix_guard(value: Any) -> dict[str, Any]:
     return copy.deepcopy(guard)
 
 
-def validate_proposal_integrity(value: Any) -> dict[str, Any]:
+def _validate_proposal_v2_integrity(value: Any) -> dict[str, Any]:
     proposal = _object(value, "proposal")
     _keys(
         proposal,
@@ -237,10 +352,7 @@ def validate_proposal_integrity(value: Any) -> dict[str, Any]:
         },
         "proposal",
     )
-    if (
-        proposal["schema"] != "NetworkPatchProposal/v2"
-        or proposal["schema_version"] != "2.0"
-    ):
+    if proposal["schema"] != PATCH_V2_SCHEMA or proposal["schema_version"] != "2.0":
         raise BindingError("appraisal binding requires NetworkPatchProposal/v2")
     validate_network_ref(proposal["network_ref"], "proposal.network_ref")
     actions = proposal["actions"]
@@ -253,7 +365,10 @@ def validate_proposal_integrity(value: Any) -> dict[str, Any]:
         action_digest = _digest(action.get("action_digest"), f"{label}.action_digest")
         if action.get("action_id") != "network-patch-action-" + action_digest[:16]:
             raise BindingError(f"{label}.action_id mismatch")
-        if digest_json(without(action, "action_id", "action_digest")) != action_digest:
+        if (
+            proposal_digest_json(without(action, "action_id", "action_digest"))
+            != action_digest
+        ):
             raise BindingError(f"{label}.action_digest mismatch")
         bases = action.get("reviewed_evidence")
         if not isinstance(bases, list) or not bases:
@@ -266,24 +381,568 @@ def validate_proposal_integrity(value: Any) -> dict[str, Any]:
             )
             if basis.get("basis_id") != "network-patch-basis-" + basis_digest[:16]:
                 raise BindingError(f"{basis_label}.basis_id mismatch")
-            if digest_json(without(basis, "basis_id", "basis_digest")) != basis_digest:
+            if (
+                proposal_digest_json(without(basis, "basis_id", "basis_digest"))
+                != basis_digest
+            ):
                 raise BindingError(f"{basis_label}.basis_digest mismatch")
         if action.get("action_type") == "propose_relation":
             target = _object(action.get("target_claim"), f"{label}.target_claim")
             scope = _object(target.get("scope"), f"{label}.target_claim.scope")
-            if target.get("scope_digest") != digest_json(scope):
+            if target.get("scope_digest") != proposal_digest_json(scope):
                 raise BindingError(f"{label}.target_claim.scope_digest mismatch")
         action_ids.append(str(action["action_id"]))
     _unique(action_ids, "proposal action IDs")
     proposal_digest = _digest(proposal["proposal_digest"], "proposal.proposal_digest")
     if (
-        digest_json(without(proposal, "proposal_id", "proposal_digest"))
+        proposal_digest_json(without(proposal, "proposal_id", "proposal_digest"))
         != proposal_digest
     ):
         raise BindingError("proposal.proposal_digest mismatch")
     if proposal["proposal_id"] != "network-patch-proposal-" + proposal_digest[:16]:
         raise BindingError("proposal.proposal_id mismatch")
     return proposal
+
+
+def _validate_subject_ref(value: Any, label: str) -> dict[str, str]:
+    ref = _object(value, label)
+    _keys(ref, {"subject_id", "subject_digest"}, label)
+    return {
+        "subject_id": _string(ref["subject_id"], f"{label}.subject_id"),
+        "subject_digest": _digest(ref["subject_digest"], f"{label}.subject_digest"),
+    }
+
+
+def _validate_origin_gap_refs(value: Any, label: str) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not value:
+        raise BindingError(f"{label} must be a non-empty list")
+    refs: list[dict[str, Any]] = []
+    for index, raw in enumerate(value):
+        item_label = f"{label}[{index}]"
+        item = _object(raw, item_label)
+        _keys(item, ORIGIN_GAP_REF_FIELDS, item_label)
+        sequence = item["sequence"]
+        if type(sequence) is not int or sequence < 0:
+            raise BindingError(f"{item_label}.sequence must be a non-negative integer")
+        status = _string(item["status"], f"{item_label}.status")
+        if status not in {"open", "blocked"}:
+            raise BindingError(f"{item_label}.status must be open or blocked")
+        gap_id = _string(item["gap_id"], f"{item_label}.gap_id")
+        if gap_id.startswith("KGH-"):
+            raise BindingError(f"{item_label}.gap_id must be a live network gap")
+        refs.append(
+            {
+                "gap_id": gap_id,
+                "record_id": _string(item["record_id"], f"{item_label}.record_id"),
+                "sequence": sequence,
+                "status": status,
+                "sha256": _digest(item["sha256"], f"{item_label}.sha256"),
+            }
+        )
+    _unique([item["gap_id"] for item in refs], f"{label} gap IDs")
+    _unique([item["record_id"] for item in refs], f"{label} record IDs")
+    return refs
+
+
+def _validate_reading_group_refs(value: Any, label: str) -> list[dict[str, str]]:
+    if not isinstance(value, list) or len(value) < 2:
+        raise BindingError(f"{label} must contain at least two reading groups")
+    refs: list[dict[str, str]] = []
+    for index, raw in enumerate(value):
+        item_label = f"{label}[{index}]"
+        item = _object(raw, item_label)
+        _keys(item, READING_GROUP_REF_FIELDS, item_label)
+        refs.append(
+            {
+                "reading_group_id": _string(
+                    item["reading_group_id"], f"{item_label}.reading_group_id"
+                ),
+                "reading_group_digest": _digest(
+                    item["reading_group_digest"],
+                    f"{item_label}.reading_group_digest",
+                ),
+                "source_id": _string(item["source_id"], f"{item_label}.source_id"),
+                "report_set_id": _string(
+                    item["report_set_id"], f"{item_label}.report_set_id"
+                ),
+                "report_set_digest": _digest(
+                    item["report_set_digest"],
+                    f"{item_label}.report_set_digest",
+                ),
+            }
+        )
+    for field in READING_GROUP_REF_FIELDS:
+        _unique([item[field] for item in refs], f"{label} {field}")
+    return refs
+
+
+def _validate_v3_target_claim(
+    action: dict[str, Any],
+    reviewed: list[dict[str, Any]],
+    reading_groups: list[dict[str, str]],
+    label: str,
+) -> dict[str, Any]:
+    target_label = f"{label}.target_claim"
+    target = _object(action.get("target_claim"), target_label)
+    _keys(
+        target,
+        {
+            "schema",
+            "schema_version",
+            "claim_id",
+            "claim_text",
+            "entity_id",
+            "impact",
+            "coverage_dimensions",
+            "benchmark_profiles",
+            "supersedes",
+            "target_signature",
+            "subject_ref",
+            "origin_gap_refs",
+            "report_claim_refs",
+            "scope",
+            "scope_digest",
+            "target_claim_digest",
+        },
+        target_label,
+    )
+    if (
+        target["schema"] != TARGET_CLAIM_V2_SCHEMA
+        or target["schema_version"] != V2_SCHEMA_VERSION
+    ):
+        raise BindingError(f"{target_label} schema/version invalid")
+    _string(target["claim_text"], f"{target_label}.claim_text")
+    if target["entity_id"] is not None:
+        _string(target["entity_id"], f"{target_label}.entity_id")
+    if target["impact"] not in {"low", "medium", "high"}:
+        raise BindingError(f"{target_label}.impact invalid")
+    if target["supersedes"] is not None:
+        raise BindingError(f"{target_label}.supersedes must be null")
+    for field in ("coverage_dimensions", "benchmark_profiles"):
+        _string_list(target[field], f"{target_label}.{field}")
+    if target["target_signature"] != action["target_signature"]:
+        raise BindingError(f"{target_label}.target_signature mismatch")
+    if (
+        _validate_subject_ref(target["subject_ref"], f"{target_label}.subject_ref")
+        != action["subject_ref"]
+    ):
+        raise BindingError(f"{target_label}.subject_ref mismatch")
+    if target["origin_gap_refs"] != action["origin_gap_refs"]:
+        raise BindingError(f"{target_label}.origin_gap_refs mismatch")
+
+    scope = _object(target["scope"], f"{target_label}.scope")
+    _keys(scope, set(NETWORK_SCOPE_FIELDS), f"{target_label}.scope")
+    _string(scope["scope_statement"], f"{target_label}.scope.scope_statement")
+    for field in NETWORK_SCOPE_FIELDS[1:]:
+        _string_list(scope[field], f"{target_label}.scope.{field}")
+    if (
+        scope["coverage_dimensions"] != target["coverage_dimensions"]
+        or scope["benchmark_profiles"] != target["benchmark_profiles"]
+    ):
+        raise BindingError(f"{target_label} scope/profile mismatch")
+    if target["scope_digest"] != proposal_digest_json(scope):
+        raise BindingError(f"{target_label}.scope_digest mismatch")
+
+    report_refs = target["report_claim_refs"]
+    if not isinstance(report_refs, list) or len(report_refs) != len(reviewed):
+        raise BindingError(f"{target_label}.report_claim_refs must cover every basis")
+    groups = {
+        (item["source_id"], item["report_set_id"], item["report_set_digest"]): item
+        for item in reading_groups
+    }
+    basis_ids: list[str] = []
+    for index, (raw, basis) in enumerate(zip(report_refs, reviewed)):
+        ref_label = f"{target_label}.report_claim_refs[{index}]"
+        ref = _object(raw, ref_label)
+        _keys(ref, REPORT_CLAIM_REF_FIELDS, ref_label)
+        for field in REPORT_CLAIM_REF_FIELDS:
+            if field in {"basis_digest", "claim_digest", "reading_report_digest"}:
+                _digest(ref[field], f"{ref_label}.{field}")
+            else:
+                _string(ref[field], f"{ref_label}.{field}")
+        group = groups.get(
+            (basis["source_id"], basis["report_set_id"], basis["report_set_digest"])
+        )
+        expected = {
+            "basis_id": basis["basis_id"],
+            "basis_digest": basis["basis_digest"],
+            "reading_group_id": group["reading_group_id"] if group else None,
+            "claim_id": basis["claim_id"],
+            "claim_digest": basis["claim_digest"],
+            "reading_report_id": basis["reading_report_id"],
+            "reading_report_digest": basis["reading_report_digest"],
+        }
+        if group is None or ref != expected:
+            raise BindingError(f"{ref_label} does not exactly project its basis")
+        basis_ids.append(ref["basis_id"])
+    _unique(basis_ids, f"{target_label}.report_claim_refs basis IDs")
+    target_digest = _digest(
+        target["target_claim_digest"], f"{target_label}.target_claim_digest"
+    )
+    if (
+        proposal_digest_json(without(target, "claim_id", "target_claim_digest"))
+        != target_digest
+    ):
+        raise BindingError(f"{target_label}.target_claim_digest mismatch")
+    if target["claim_id"] != "claim-target-" + target_digest[:16]:
+        raise BindingError(f"{target_label}.claim_id mismatch")
+    return target
+
+
+def _validate_existing_claim_ref(value: Any, label: str) -> dict[str, Any]:
+    ref = _object(value, label)
+    _keys(
+        ref,
+        {
+            "schema",
+            "schema_version",
+            "claim_id",
+            "claim_record_ref",
+            "claim_semantics",
+            "scope_digest",
+            "claim_semantic_digest",
+        },
+        label,
+    )
+    if (
+        ref["schema"] != EXISTING_CLAIM_REF_SCHEMA
+        or ref["schema_version"] != SCHEMA_VERSION
+    ):
+        raise BindingError(f"{label} schema/version invalid")
+    claim_id = _string(ref["claim_id"], f"{label}.claim_id")
+    record_ref = _object(ref["claim_record_ref"], f"{label}.claim_record_ref")
+    _keys(record_ref, CLAIM_RECORD_REF_FIELDS, f"{label}.claim_record_ref")
+    if record_ref["record_id"] != "claim:" + claim_id:
+        raise BindingError(f"{label}.claim_record_ref.record_id mismatch")
+    if type(record_ref["sequence"]) is not int or record_ref["sequence"] < 0:
+        raise BindingError(
+            f"{label}.claim_record_ref.sequence must be a non-negative integer"
+        )
+    _digest(record_ref["sha256"], f"{label}.claim_record_ref.sha256")
+
+    semantics = _object(ref["claim_semantics"], f"{label}.claim_semantics")
+    _keys(semantics, CLAIM_SEMANTIC_FIELDS, f"{label}.claim_semantics")
+    _string(semantics["claim_text"], f"{label}.claim_semantics.claim_text")
+    if semantics["entity_id"] is not None:
+        _string(semantics["entity_id"], f"{label}.claim_semantics.entity_id")
+    if semantics["impact"] not in {"low", "medium", "high"}:
+        raise BindingError(f"{label}.claim_semantics.impact invalid")
+    if semantics["is_factual"] is not False:
+        raise BindingError(f"{label}.claim_semantics.is_factual must be false")
+    if not isinstance(semantics["scope_statement"], str):
+        raise BindingError(f"{label}.claim_semantics.scope_statement must be a string")
+    for field in NETWORK_SCOPE_FIELDS[1:]:
+        _string_list(semantics[field], f"{label}.claim_semantics.{field}")
+    if semantics["supersedes"] is not None:
+        _string(semantics["supersedes"], f"{label}.claim_semantics.supersedes")
+    scope = {field: copy.deepcopy(semantics[field]) for field in NETWORK_SCOPE_FIELDS}
+    if ref["scope_digest"] != proposal_digest_json(scope):
+        raise BindingError(f"{label}.scope_digest mismatch")
+    if ref["claim_semantic_digest"] != proposal_digest_json(semantics):
+        raise BindingError(f"{label}.claim_semantic_digest mismatch")
+    return ref
+
+
+def _validate_proposal_v3_integrity(
+    value: Any,
+    *,
+    expected_schema: str = PATCH_V3_SCHEMA,
+    expected_version: str = "3.0",
+) -> dict[str, Any]:
+    proposal = _object(value, "proposal")
+    _keys(
+        proposal,
+        {
+            "schema",
+            "schema_version",
+            "proposal_id",
+            "proposal_digest",
+            "network_ref",
+            "request_ref",
+            "consumption_ref",
+            "reading_collection_ref",
+            "generated_at",
+            "proposal_only",
+            "novelty_claimed",
+            "review_gate",
+            "actions",
+        },
+        "proposal",
+    )
+    if (
+        proposal["schema"] != expected_schema
+        or proposal["schema_version"] != expected_version
+    ):
+        raise BindingError("proposal schema/version invalid")
+    validate_network_ref(proposal["network_ref"], "proposal.network_ref")
+    request_ref = _object(proposal["request_ref"], "proposal.request_ref")
+    _keys(
+        request_ref,
+        {
+            "request_set_id",
+            "request_set_digest",
+            "review_request_set_id",
+            "review_request_set_digest",
+        },
+        "proposal.request_ref",
+    )
+    for field in ("request_set_id", "review_request_set_id"):
+        _string(request_ref[field], f"proposal.request_ref.{field}")
+    for field in ("request_set_digest", "review_request_set_digest"):
+        _digest(request_ref[field], f"proposal.request_ref.{field}")
+    validate_collection_consumption_ref(proposal["consumption_ref"])
+    collection_ref = _object(
+        proposal["reading_collection_ref"], "proposal.reading_collection_ref"
+    )
+    _keys(
+        collection_ref,
+        {"collection_id", "collection_digest"},
+        "proposal.reading_collection_ref",
+    )
+    _string(
+        collection_ref["collection_id"],
+        "proposal.reading_collection_ref.collection_id",
+    )
+    _digest(
+        collection_ref["collection_digest"],
+        "proposal.reading_collection_ref.collection_digest",
+    )
+    _timestamp(proposal["generated_at"], "proposal.generated_at")
+    if (
+        proposal["proposal_only"] is not True
+        or proposal["novelty_claimed"] is not False
+    ):
+        raise BindingError("proposal must remain proposal-only and non-novelty")
+    if proposal["review_gate"] != "pending_research_knowledge_network_acceptance":
+        raise BindingError("proposal.review_gate invalid")
+    actions = proposal["actions"]
+    if not isinstance(actions, list) or not actions:
+        raise BindingError("proposal.actions must be non-empty")
+    action_ids: list[str] = []
+    subject_ids: list[str] = []
+    hypothesis_ids: list[str] = []
+    origin_gap_ids: list[str] = []
+    proposal_evidence_ids: list[str] = []
+    target_claim_ids: list[str] = []
+    is_v4 = expected_schema == PATCH_V4_SCHEMA
+    for action_index, raw_action in enumerate(actions):
+        label = f"proposal.actions[{action_index}]"
+        action = _object(raw_action, label)
+        common_action_fields = {
+            "action_id",
+            "action_digest",
+            "action_type",
+            "action_status",
+            "hypothesis_id",
+            "target_signature",
+            "hypothesis",
+            "subject_ref",
+            "origin_gap_refs",
+            "reading_group_refs",
+            "reviewed_evidence",
+        }
+        action_type = action.get("action_type")
+        if is_v4 and action_type == "propose_evidence_extension":
+            expected_action_fields = common_action_fields | {"existing_claim_ref"}
+        else:
+            expected_action_fields = common_action_fields | {"target_claim"}
+        _keys(
+            action,
+            expected_action_fields,
+            label,
+        )
+        allowed_action_types = (
+            {"propose_relation", "propose_evidence_extension"}
+            if is_v4
+            else {"propose_relation"}
+        )
+        if (
+            action_type not in allowed_action_types
+            or action["action_status"] != "proposed"
+        ):
+            raise BindingError(f"{label} action type/status invalid")
+        _string(action["hypothesis_id"], f"{label}.hypothesis_id")
+        _string(action["hypothesis"], f"{label}.hypothesis")
+        signature = _object(action["target_signature"], f"{label}.target_signature")
+        _keys(signature, {"target_kind", "signature"}, f"{label}.target_signature")
+        if signature["target_kind"] != "relation":
+            raise BindingError(f"{label}.target_signature must target a relation")
+        _string(signature["signature"], f"{label}.target_signature.signature")
+        action["subject_ref"] = _validate_subject_ref(
+            action["subject_ref"], f"{label}.subject_ref"
+        )
+        action["origin_gap_refs"] = _validate_origin_gap_refs(
+            action["origin_gap_refs"], f"{label}.origin_gap_refs"
+        )
+        action["reading_group_refs"] = _validate_reading_group_refs(
+            action["reading_group_refs"], f"{label}.reading_group_refs"
+        )
+        reviewed = action["reviewed_evidence"]
+        if not isinstance(reviewed, list) or len(reviewed) < 2:
+            raise BindingError(f"{label}.reviewed_evidence must contain multiple bases")
+        basis_ids: list[str] = []
+        basis_digests: list[str] = []
+        evidence_ids: list[str] = []
+        source_ids: set[str] = set()
+        for basis_index, raw_basis in enumerate(reviewed):
+            basis_label = f"{label}.reviewed_evidence[{basis_index}]"
+            basis = _object(raw_basis, basis_label)
+            basis_digest = _digest(
+                basis.get("basis_digest"), f"{basis_label}.basis_digest"
+            )
+            if basis.get("basis_id") != "network-patch-basis-" + basis_digest[:16]:
+                raise BindingError(f"{basis_label}.basis_id mismatch")
+            if (
+                proposal_digest_json(without(basis, "basis_id", "basis_digest"))
+                != basis_digest
+            ):
+                raise BindingError(f"{basis_label}.basis_digest mismatch")
+            for field in (
+                "source_id",
+                "report_set_id",
+                "report_set_digest",
+                "claim_id",
+                "claim_digest",
+                "reading_report_id",
+                "reading_report_digest",
+                "evidence_id",
+            ):
+                if field.endswith("_digest"):
+                    _digest(basis.get(field), f"{basis_label}.{field}")
+                else:
+                    _string(basis.get(field), f"{basis_label}.{field}")
+            basis_ids.append(basis["basis_id"])
+            basis_digests.append(basis_digest)
+            evidence_ids.append(basis["evidence_id"])
+            source_ids.add(basis["source_id"])
+        _unique(basis_ids, f"{label} basis IDs")
+        _unique(basis_digests, f"{label} basis digests")
+        _unique(evidence_ids, f"{label} evidence IDs")
+        if len(source_ids) < 2:
+            raise BindingError(f"{label} requires at least two distinct source IDs")
+        group_order: list[dict[str, str]] = []
+        for basis in reviewed:
+            matches = [
+                group
+                for group in action["reading_group_refs"]
+                if (
+                    group["source_id"],
+                    group["report_set_id"],
+                    group["report_set_digest"],
+                )
+                == (
+                    basis["source_id"],
+                    basis["report_set_id"],
+                    basis["report_set_digest"],
+                )
+            ]
+            if len(matches) != 1:
+                raise BindingError(f"{label} basis does not map to one reading group")
+            if not group_order or group_order[-1] != matches[0]:
+                group_order.append(matches[0])
+        if group_order != action["reading_group_refs"]:
+            raise BindingError(f"{label}.reviewed_evidence reorders reading groups")
+        if action_type == "propose_relation":
+            target = _validate_v3_target_claim(
+                action, reviewed, action["reading_group_refs"], label
+            )
+            network_claim_id = target["claim_id"]
+        else:
+            existing = _validate_existing_claim_ref(
+                action["existing_claim_ref"], f"{label}.existing_claim_ref"
+            )
+            if action["hypothesis"] != existing["claim_semantics"]["claim_text"]:
+                raise BindingError(f"{label}.hypothesis must match existing claim text")
+            network_claim_id = existing["claim_id"]
+        action_digest = _digest(action["action_digest"], f"{label}.action_digest")
+        if (
+            proposal_digest_json(without(action, "action_id", "action_digest"))
+            != action_digest
+        ):
+            raise BindingError(f"{label}.action_digest mismatch")
+        if action["action_id"] != "network-patch-action-" + action_digest[:16]:
+            raise BindingError(f"{label}.action_id mismatch")
+        action_ids.append(action["action_id"])
+        subject_ids.append(action["subject_ref"]["subject_id"])
+        hypothesis_ids.append(action["hypothesis_id"])
+        origin_gap_ids.extend(item["gap_id"] for item in action["origin_gap_refs"])
+        proposal_evidence_ids.extend(evidence_ids)
+        target_claim_ids.append(network_claim_id)
+    _unique(action_ids, "proposal action IDs")
+    _unique(subject_ids, "proposal subject IDs")
+    _unique(hypothesis_ids, "proposal hypothesis IDs")
+    _unique(origin_gap_ids, "proposal origin gap IDs")
+    _unique(proposal_evidence_ids, "proposal evidence IDs")
+    _unique(target_claim_ids, "proposal target claim IDs")
+    proposal_digest = _digest(proposal["proposal_digest"], "proposal.proposal_digest")
+    if (
+        proposal_digest_json(without(proposal, "proposal_id", "proposal_digest"))
+        != proposal_digest
+    ):
+        raise BindingError("proposal.proposal_digest mismatch")
+    if proposal["proposal_id"] != "network-patch-proposal-" + proposal_digest[:16]:
+        raise BindingError("proposal.proposal_id mismatch")
+    return proposal
+
+
+def validate_proposal_integrity(value: Any) -> dict[str, Any]:
+    schema = value.get("schema") if isinstance(value, dict) else None
+    if schema == PATCH_V2_SCHEMA:
+        return _validate_proposal_v2_integrity(value)
+    if schema == PATCH_V3_SCHEMA:
+        return _validate_proposal_v3_integrity(value)
+    if schema == PATCH_V4_SCHEMA:
+        return _validate_proposal_v3_integrity(
+            value,
+            expected_schema=PATCH_V4_SCHEMA,
+            expected_version="4.0",
+        )
+    raise BindingError("appraisal binding requires NetworkPatchProposal/v2, v3, or v4")
+
+
+def proposal_independence_errors(proposal: dict[str, Any]) -> list[str]:
+    """Return high-impact source gates for newly authorizable science."""
+
+    errors: list[str] = []
+    for index, action in enumerate(proposal.get("actions", [])):
+        if action.get("action_type") not in {
+            "propose_relation",
+            "propose_evidence_extension",
+        }:
+            continue
+        target = (
+            action.get("target_claim")
+            if action.get("action_type") == "propose_relation"
+            else action.get("existing_claim_ref", {}).get("claim_semantics")
+        )
+        if not isinstance(target, dict) or target.get("impact") != "high":
+            continue
+        bases = action.get("reviewed_evidence", [])
+        source_ids = {
+            basis.get("source_id")
+            for basis in bases
+            if isinstance(basis, dict) and isinstance(basis.get("source_id"), str)
+        }
+        has_full_text = any(
+            isinstance(basis, dict) and basis.get("access_level") == "full_text"
+            for basis in bases
+        )
+        if len(source_ids) < 2:
+            errors.append(
+                f"proposal.actions[{index}] high-impact target requires at least "
+                "two distinct source IDs"
+            )
+        if not has_full_text:
+            errors.append(
+                f"proposal.actions[{index}] high-impact target requires full text"
+            )
+    return errors
+
+
+def require_applicable_source_independence(proposal: dict[str, Any]) -> None:
+    errors = proposal_independence_errors(proposal)
+    if errors:
+        raise BindingError("; ".join(errors))
 
 
 def _validated_appraisal_package(
@@ -456,6 +1115,11 @@ def _network_scope(
 ) -> dict[str, Any]:
     if action.get("action_type") == "propose_relation":
         scope = action["target_claim"]["scope"]
+    elif action.get("action_type") == "propose_evidence_extension":
+        semantics = action["existing_claim_ref"]["claim_semantics"]
+        scope = {
+            field: copy.deepcopy(semantics[field]) for field in NETWORK_SCOPE_FIELDS
+        }
     else:
         scope = claim_scopes.get(str(basis.get("claim_id")))
         if scope is None:
@@ -465,6 +1129,14 @@ def _network_scope(
     scope = _object(scope, "network claim scope")
     _keys(scope, set(NETWORK_SCOPE_FIELDS), "network claim scope")
     return copy.deepcopy(scope)
+
+
+def _action_network_claim_id(action: dict[str, Any], basis: dict[str, Any]) -> str:
+    if action.get("action_type") == "propose_relation":
+        return str(action["target_claim"]["claim_id"])
+    if action.get("action_type") == "propose_evidence_extension":
+        return str(action["existing_claim_ref"]["claim_id"])
+    return str(basis["claim_id"])
 
 
 def mutation_subject_digest(operation_type: str, payload: dict[str, Any]) -> str:
@@ -483,7 +1155,7 @@ def _relation_id(action: dict[str, Any], basis: dict[str, Any], relation: str) -
         + digest_json(
             {
                 "target_signature": action["target_signature"],
-                "target_claim_id": action["target_claim"]["claim_id"],
+                "target_claim_id": _action_network_claim_id(action, basis),
                 "basis_id": basis["basis_id"],
                 "basis_digest": basis["basis_digest"],
                 "evidence_id": basis["evidence_id"],
@@ -652,9 +1324,22 @@ def _transition_route(
     relation_reviews: list[dict[str, Any]],
     transition_basis: dict[str, Any],
     label: str,
+    *,
+    origin_gap_ref: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    if transition["gap_id"] != action["hypothesis_id"]:
-        raise BindingError(f"{label} gap transition targets another action")
+    if origin_gap_ref is None:
+        if transition["gap_id"] != action["hypothesis_id"]:
+            raise BindingError(f"{label} gap transition targets another action")
+    elif (
+        transition["gap_id"],
+        transition["from_record_id"],
+        transition["from_status"],
+    ) != (
+        origin_gap_ref["gap_id"],
+        origin_gap_ref["record_id"],
+        origin_gap_ref["status"],
+    ):
+        raise BindingError(f"{label} does not bind its exact current action origin gap")
     action_rows = [rows[row_id] for row_id in action_binding["binding_row_ids"]]
     rows_by_appraisal = {
         (
@@ -701,6 +1386,24 @@ def _transition_route(
         if transition["basis_need_refs"] or not selected_rows:
             raise BindingError(
                 f"{label} resolved transition requires appraisal bases only"
+            )
+        if origin_gap_ref is not None:
+            expected_appraisal_refs = sorted(
+                [copy.deepcopy(row["appraisal_ref"]) for row in action_rows],
+                key=lambda item: (item["appraisal_id"], item["semantic_digest"]),
+            )
+            if appraisal_refs != expected_appraisal_refs:
+                raise BindingError(
+                    f"{label} resolved transition must bind every action appraisal"
+                )
+            selected_rows = action_rows
+        if (
+            action.get("action_type") == "propose_evidence_extension"
+            and transition["resolution_source"]
+            != action["existing_claim_ref"]["claim_id"]
+        ):
+            raise BindingError(
+                f"{label} extension resolution_source must be the existing claim"
             )
         if any(
             row["overall"] not in {"decisive_within_scope", "qualified_only"}
@@ -801,6 +1504,8 @@ def _build_rows_and_actions(
     claim_scopes: dict[str, dict[str, Any]],
     passed_attestation_lineages: dict[str, str],
     owner_lineage_ids: set[str],
+    *,
+    legacy_owner_lineage_independence: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     appraisals: dict[tuple[str, str], dict[str, Any]] = {}
     for appraisal in appraisal_set["relation_appraisals"]:
@@ -833,14 +1538,14 @@ def _build_rows_and_actions(
             )
             lineage_digest = digest_json({"owner_lineage_id": owner_lineage_id})
             relation = _allowed_relation(appraisal)
-            network_claim_ref = (
-                action["target_claim"]["claim_id"]
-                if action["action_type"] == "propose_relation"
-                else basis["claim_id"]
-            )
+            network_claim_ref = _action_network_claim_id(action, basis)
             row = _attach(
                 {
-                    "schema": "EvidenceAppraisalBindingRow/v1",
+                    "schema": (
+                        "EvidenceAppraisalBindingRow/v2"
+                        if proposal["schema"] in {PATCH_V3_SCHEMA, PATCH_V4_SCHEMA}
+                        else "EvidenceAppraisalBindingRow/v1"
+                    ),
                     "binding_row_id": "",
                     "binding_row_digest": "",
                     "action_id": action["action_id"],
@@ -863,7 +1568,11 @@ def _build_rows_and_actions(
                     ),
                     "owner_lineage_id": owner_lineage_id,
                     "source_lineage_digest": lineage_digest,
-                    "independence_group": "owner-lineage-" + lineage_digest[:16],
+                    "independence_group": (
+                        "owner-lineage-" + lineage_digest[:16]
+                        if legacy_owner_lineage_independence
+                        else basis["source_id"]
+                    ),
                     "allowed_relation": relation,
                     "mutation_eligible": relation
                     in {
@@ -913,6 +1622,8 @@ def _build_rows_and_actions(
                 )
             )
         if eligible:
+            evidence_routes: list[dict[str, Any]] = []
+            relation_routes: list[dict[str, Any]] = []
             for row, basis in action_rows:
                 relation = row["allowed_relation"]
                 evidence_payload = {
@@ -923,10 +1634,10 @@ def _build_rows_and_actions(
                     "exact_locator": basis["evidence_locator"],
                     "independence_group": row["independence_group"],
                     "summary": action["hypothesis"],
-                    "notes": "accepted from NetworkPatchProposal/v2",
+                    "notes": "accepted from " + proposal["schema"],
                     "supersedes": None,
                 }
-                routes.append(
+                evidence_routes.append(
                     _route(
                         "add-evidence",
                         evidence_payload,
@@ -939,7 +1650,10 @@ def _build_rows_and_actions(
                         },
                     )
                 )
-                if action["action_type"] == "propose_relation":
+                if action["action_type"] in {
+                    "propose_relation",
+                    "propose_evidence_extension",
+                }:
                     relation_payload = {
                         "relation_id": _relation_id(action, basis, relation),
                         "relation_type": relation,
@@ -948,7 +1662,7 @@ def _build_rows_and_actions(
                         "notes": "network-patch-action:" + action["action_digest"],
                         "supersedes": None,
                     }
-                    routes.append(
+                    relation_routes.append(
                         _route(
                             "add-relation",
                             relation_payload,
@@ -961,6 +1675,14 @@ def _build_rows_and_actions(
                             },
                         )
                     )
+            if proposal["schema"] in {PATCH_V3_SCHEMA, PATCH_V4_SCHEMA}:
+                routes.extend(evidence_routes)
+                routes.extend(relation_routes)
+            else:
+                for index, evidence_route in enumerate(evidence_routes):
+                    routes.append(evidence_route)
+                    if index < len(relation_routes):
+                        routes.append(relation_routes[index])
         action_bindings.append(
             _attach(
                 {
@@ -981,7 +1703,7 @@ def _build_rows_and_actions(
     return rows, action_bindings
 
 
-def create_binding(
+def _create_binding(
     package_value: Any,
     approval_value: Any,
     prepared_value: Any,
@@ -995,6 +1717,7 @@ def create_binding(
     claim_scopes: dict[str, dict[str, Any]],
     *,
     bound_at: str,
+    legacy_owner_lineage_independence: bool = False,
 ) -> dict[str, Any]:
     package = _validated_appraisal_package(
         package_value,
@@ -1038,10 +1761,19 @@ def create_binding(
         claim_scopes,
         passed_attestation_lineages,
         owner_lineage_ids,
+        legacy_owner_lineage_independence=legacy_owner_lineage_independence,
+    )
+    binding_schema = (
+        BINDING_V2_SCHEMA
+        if proposal["schema"] in {PATCH_V3_SCHEMA, PATCH_V4_SCHEMA}
+        else BINDING_SCHEMA
+    )
+    binding_version = (
+        V2_SCHEMA_VERSION if binding_schema == BINDING_V2_SCHEMA else SCHEMA_VERSION
     )
     value = {
-        "schema": BINDING_SCHEMA,
-        "schema_version": SCHEMA_VERSION,
+        "schema": binding_schema,
+        "schema_version": binding_version,
         "binding_id": "",
         "binding_digest": "",
         "network_ref": network_ref,
@@ -1091,6 +1823,39 @@ def create_binding(
     return _attach(value, "binding_id", "binding_digest", "evidence-appraisal-binding-")
 
 
+def create_binding(
+    package_value: Any,
+    approval_value: Any,
+    prepared_value: Any,
+    independent_review_value: Any,
+    owner_bundle_value: Any,
+    lineage_values: list[Any],
+    expected_authority_sha256: str,
+    proposal_value: Any,
+    network_ref_value: Any,
+    network_guard_value: Any,
+    claim_scopes: dict[str, dict[str, Any]],
+    *,
+    bound_at: str,
+) -> dict[str, Any]:
+    proposal = validate_proposal_integrity(proposal_value)
+    require_applicable_source_independence(proposal)
+    return _create_binding(
+        package_value,
+        approval_value,
+        prepared_value,
+        independent_review_value,
+        owner_bundle_value,
+        lineage_values,
+        expected_authority_sha256,
+        proposal,
+        network_ref_value,
+        network_guard_value,
+        claim_scopes,
+        bound_at=bound_at,
+    )
+
+
 def validate_binding(
     value: Any,
     package_value: Any,
@@ -1131,12 +1896,21 @@ def validate_binding(
         },
         "binding",
     )
-    if (
-        binding["schema"] != BINDING_SCHEMA
-        or binding["schema_version"] != SCHEMA_VERSION
-    ):
+    binding_versions = {
+        BINDING_SCHEMA: SCHEMA_VERSION,
+        BINDING_V2_SCHEMA: V2_SCHEMA_VERSION,
+    }
+    if binding_versions.get(binding["schema"]) != binding["schema_version"]:
         raise BindingError("binding schema/version invalid")
-    expected = create_binding(
+    proposal = validate_proposal_integrity(proposal_value)
+    expected_binding_schema = (
+        BINDING_V2_SCHEMA
+        if proposal["schema"] in {PATCH_V3_SCHEMA, PATCH_V4_SCHEMA}
+        else BINDING_SCHEMA
+    )
+    if binding["schema"] != expected_binding_schema:
+        raise BindingError("binding schema does not match proposal schema")
+    expected = _create_binding(
         package_value,
         approval_value,
         prepared_value,
@@ -1144,20 +1918,40 @@ def validate_binding(
         owner_bundle_value,
         lineage_values,
         expected_authority_sha256,
-        proposal_value,
+        proposal,
         network_ref_value,
         binding["network_guard"],
         claim_scopes,
         bound_at=binding["bound_at"],
     )
     if binding != expected:
+        if binding["schema"] == BINDING_SCHEMA:
+            legacy = _create_binding(
+                package_value,
+                approval_value,
+                prepared_value,
+                independent_review_value,
+                owner_bundle_value,
+                lineage_values,
+                expected_authority_sha256,
+                proposal,
+                network_ref_value,
+                binding["network_guard"],
+                claim_scopes,
+                bound_at=binding["bound_at"],
+                legacy_owner_lineage_independence=True,
+            )
+            if binding == legacy:
+                return binding
         raise BindingError("binding is not the owner-derived appraisal projection")
     return binding
 
 
 def _review_from_projection(projection: dict[str, Any]) -> dict[str, Any]:
+    is_v2 = projection.get("schema") == PROJECTION_V2_SCHEMA
+    transition_field = "gap_transitions" if is_v2 else "gap_transition"
     return {
-        "schema": PROJECTION_REVIEW_SCHEMA,
+        "schema": (PROJECTION_REVIEW_V2_SCHEMA if is_v2 else PROJECTION_REVIEW_SCHEMA),
         "binding_ref": projection["binding_ref"],
         "proposal_ref": projection["proposal_ref"],
         "reviewer": projection["reviewer"],
@@ -1170,7 +1964,7 @@ def _review_from_projection(projection: dict[str, Any]) -> dict[str, Any]:
                     "decision",
                     "rationale",
                     "relation_reviews",
-                    "gap_transition",
+                    transition_field,
                 )
             }
             for decision in projection["decisions"]
@@ -1187,13 +1981,21 @@ def create_reviewed_projection(
 ) -> dict[str, Any]:
     binding = _object(binding_value, "binding")
     proposal = validate_proposal_integrity(proposal_value)
+    require_applicable_source_independence(proposal)
+    is_v2 = proposal["schema"] in {PATCH_V3_SCHEMA, PATCH_V4_SCHEMA}
+    expected_binding_schema = BINDING_V2_SCHEMA if is_v2 else BINDING_SCHEMA
+    if binding.get("schema") != expected_binding_schema:
+        raise BindingError("projection binding schema does not match proposal schema")
     review = _object(review_value, "projection review")
     _keys(
         review,
         {"schema", "binding_ref", "proposal_ref", "reviewer", "decisions"},
         "projection review",
     )
-    if review["schema"] != PROJECTION_REVIEW_SCHEMA:
+    expected_review_schema = (
+        PROJECTION_REVIEW_V2_SCHEMA if is_v2 else PROJECTION_REVIEW_SCHEMA
+    )
+    if review["schema"] != expected_review_schema:
         raise BindingError("projection review schema invalid")
     binding_ref = {
         "binding_id": binding["binding_id"],
@@ -1222,6 +2024,7 @@ def create_reviewed_projection(
     ):
         label = f"projection review decisions[{index}]"
         decision = _object(raw, label)
+        transition_field = "gap_transitions" if is_v2 else "gap_transition"
         _keys(
             decision,
             {
@@ -1230,7 +2033,7 @@ def create_reviewed_projection(
                 "decision",
                 "rationale",
                 "relation_reviews",
-                "gap_transition",
+                transition_field,
             },
             label,
         )
@@ -1243,9 +2046,23 @@ def create_reviewed_projection(
             raise BindingError(f"{label}.decision invalid")
         _string(decision["rationale"], f"{label}.rationale")
         action_binding = action_bindings[action["action_id"]]
-        gap_transition = _validate_gap_transition_review(
-            decision["gap_transition"], f"{label}.gap_transition"
-        )
+        if is_v2:
+            raw_transitions = decision["gap_transitions"]
+            if not isinstance(raw_transitions, list):
+                raise BindingError(f"{label}.gap_transitions must be a list")
+            gap_transitions = [
+                _validate_gap_transition_review(
+                    raw_transition, f"{label}.gap_transitions[{transition_index}]"
+                )
+                for transition_index, raw_transition in enumerate(raw_transitions)
+            ]
+            if any(item is None for item in gap_transitions):
+                raise BindingError(f"{label}.gap_transitions cannot contain null")
+        else:
+            gap_transition = _validate_gap_transition_review(
+                decision["gap_transition"], f"{label}.gap_transition"
+            )
+            gap_transitions = [] if gap_transition is None else [gap_transition]
         relation_reviews = decision["relation_reviews"]
         if not isinstance(relation_reviews, list):
             raise BindingError(f"{label}.relation_reviews must be a list")
@@ -1288,6 +2105,15 @@ def create_reviewed_projection(
             row["projected_relation"] is not None for row in normalized
         )
         if decision["decision"] == "authorize":
+            if is_v2:
+                origin_gap_refs = action["origin_gap_refs"]
+                if len(gap_transitions) != len(origin_gap_refs) or [
+                    item["gap_id"] for item in gap_transitions
+                ] != [item["gap_id"] for item in origin_gap_refs]:
+                    raise BindingError(
+                        f"{label}.gap_transitions must exactly cover action "
+                        "origin_gap_refs in canonical order"
+                    )
             if relation_projection_requested:
                 for row_review in normalized:
                     binding_row = rows[row_review["binding_row_id"]]
@@ -1303,7 +2129,7 @@ def create_reviewed_projection(
                             "scope-mismatched, or relation-mismatched evidence"
                         )
                 authorized.extend(copy.deepcopy(action_binding["mutation_routes"]))
-            if gap_transition is not None:
+            for transition_index, gap_transition in enumerate(gap_transitions):
                 authorized.append(
                     _transition_route(
                         gap_transition,
@@ -1312,7 +2138,14 @@ def create_reviewed_projection(
                         rows,
                         normalized,
                         binding["transition_basis"],
-                        label,
+                        f"{label}.gap_transitions[{transition_index}]"
+                        if is_v2
+                        else label,
+                        origin_gap_ref=(
+                            action["origin_gap_refs"][transition_index]
+                            if is_v2
+                            else None
+                        ),
                     )
                 )
             if not authorized:
@@ -1320,7 +2153,7 @@ def create_reviewed_projection(
             authorization_digests.extend(
                 row["authorization_digest"] for row in authorized
             )
-        elif relation_projection_requested or gap_transition is not None:
+        elif relation_projection_requested or gap_transitions:
             raise BindingError(
                 f"{label} reject/defer cannot project a relation or gap transition"
             )
@@ -1329,8 +2162,8 @@ def create_reviewed_projection(
         )
     _unique(authorization_digests, "projection authorization digests")
     value = {
-        "schema": PROJECTION_SCHEMA,
-        "schema_version": SCHEMA_VERSION,
+        "schema": PROJECTION_V2_SCHEMA if is_v2 else PROJECTION_SCHEMA,
+        "schema_version": V2_SCHEMA_VERSION if is_v2 else SCHEMA_VERSION,
         "projection_id": "",
         "projection_digest": "",
         "network_ref": copy.deepcopy(binding["network_ref"]),
@@ -1380,11 +2213,20 @@ def validate_reviewed_projection(
         },
         "projection",
     )
-    if (
-        projection["schema"] != PROJECTION_SCHEMA
-        or projection["schema_version"] != SCHEMA_VERSION
-    ):
+    projection_versions = {
+        PROJECTION_SCHEMA: SCHEMA_VERSION,
+        PROJECTION_V2_SCHEMA: V2_SCHEMA_VERSION,
+    }
+    if projection_versions.get(projection["schema"]) != projection["schema_version"]:
         raise BindingError("projection schema/version invalid")
+    proposal = validate_proposal_integrity(proposal_value)
+    expected_projection_schema = (
+        PROJECTION_V2_SCHEMA
+        if proposal["schema"] in {PATCH_V3_SCHEMA, PATCH_V4_SCHEMA}
+        else PROJECTION_SCHEMA
+    )
+    if projection["schema"] != expected_projection_schema:
+        raise BindingError("projection schema does not match proposal schema")
     if (
         projection["review_status"] != "approved"
         or projection["mutation_authorized"] is not True
@@ -1392,7 +2234,7 @@ def validate_reviewed_projection(
         raise BindingError("projection is not explicitly reviewed and authorizing")
     expected = create_reviewed_projection(
         binding_value,
-        proposal_value,
+        proposal,
         _review_from_projection(projection),
         reviewed_at=projection["reviewed_at"],
     )
@@ -1422,6 +2264,23 @@ def gate_refs(binding: dict[str, Any], projection: dict[str, Any]) -> dict[str, 
     }
 
 
+def _require_source_independence_for_authorization(
+    binding: dict[str, Any], proposal: dict[str, Any]
+) -> None:
+    source_by_basis = {
+        (action["action_id"], basis["basis_id"]): basis["source_id"]
+        for action in proposal["actions"]
+        for basis in action["reviewed_evidence"]
+    }
+    for row in binding["relation_bindings"]:
+        expected = source_by_basis.get((row["action_id"], row["basis_id"]))
+        if expected is None or row["independence_group"] != expected:
+            raise BindingError(
+                "legacy owner-lineage independence bindings remain readable but "
+                "cannot authorize a new scientific mutation"
+            )
+
+
 def validate_gate(
     package_value: Any,
     approval_value: Any,
@@ -1437,6 +2296,7 @@ def validate_gate(
     claim_scopes: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     proposal = validate_proposal_integrity(proposal_value)
+    require_applicable_source_independence(proposal)
     binding = validate_binding(
         binding_value,
         package_value,
@@ -1450,6 +2310,7 @@ def validate_gate(
         network_ref_value,
         claim_scopes,
     )
+    _require_source_independence_for_authorization(binding, proposal)
     projection = validate_reviewed_projection(projection_value, binding, proposal)
     package = copy.deepcopy(_object(package_value, "appraisal package"))
     return {
@@ -1470,6 +2331,9 @@ def authorize_mutation(
     authorization_subject: dict[str, Any] | None = None,
     consumed_authorization_digests: set[str] | None = None,
 ) -> dict[str, Any]:
+    require_applicable_source_independence(
+        validate_proposal_integrity(gate.get("proposal"))
+    )
     subject_digest = mutation_subject_digest(operation_type, payload)
     authorization_digest = (
         digest_json(authorization_subject)

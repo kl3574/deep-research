@@ -113,6 +113,13 @@ Before delivery:
 
 Never attach a related citation to repair an unsupported claim.
 
+For a substantial report, project an atomic statement-to-source matrix following
+[research-runtime-controls.md](research-runtime-controls.md). Measure
+consequential-statement coverage, entailment precision, missing qualifiers,
+unused citations, primary-source fit, and represented counterevidence separately.
+Choose thresholds from the task risk and a disclosed grader calibration; do not
+infer quality from citation or source count alone.
+
 ## Network and delivery audit
 
 For Zotero-backed work, synthesize from the content-addressed

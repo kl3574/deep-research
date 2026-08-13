@@ -92,6 +92,14 @@ evidence in the handoff.
 
 ## Bounded parallel work
 
+First make the execution choice explicit using
+[research-runtime-controls.md](research-runtime-controls.md): prefer one
+controller for dependent reasoning and small shared context; use manager-workers
+only for independent gaps; use a fixed workflow for already-typed stable stages;
+reserve dynamic swarm behavior for breadth-first work whose expected gain
+justifies its coordination and token cost. Record the critical path, not only
+total calls.
+
 Parallelize independent gaps or independent retrieval routes, not several agents
 editing the same ledger row. Give each worker:
 
@@ -127,6 +135,12 @@ Use [run-state.md](run-state.md) only after durable workspace writes are authori
 The ledger is append-oriented and validates cross-references before finalization.
 
 ## Failure, budget, and stopping
+
+Choose and disclose a `simple`, `comparison`, or `complex` effort profile before
+starting a long run. Bind real limits for wall time, tool calls, subagents,
+critical-path steps, rounds, and tokens/cost when observable. A profile guides
+the initial envelope; it is never permission to exceed the user's accepted
+scope or budget.
 
 Classify failures such as `access_denied`, `not_found`, `version_mismatch`,
 `parse_failed`, `runtime_failed`, `worker_failed`, or `budget_exhausted`. Record the

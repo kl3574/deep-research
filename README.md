@@ -1,6 +1,6 @@
 # deep-research
 
-一套面向 Codex agent 的可审计深度调研技能，覆盖十一个核心能力和一个
+一套面向 Codex agent 的可审计深度调研技能，覆盖十二个核心能力和一个
 可选的受约束 Zotero 执行能力：
 
 ```text
@@ -13,6 +13,7 @@
   → $scholarly-document-normalization：本地PDF文本质量分类、OCR衍生与谱系验证
   → $learn-from-papers：对关键单篇论文进行证据级深读与重建
   → $evidence-appraisal：对已选主张-证据关系作对抗性审查并产生定向证据需要
+  → $research-workflow-retrospective：对完成与失败工作流做可防返工复盘
   → $curate-research-to-zotero：快照、下载、导入、读回，持续同步目标库
   → $repair-zotero-metadata：证据约束的 existing-parent 书目纠错审查
   → $research-network-publish：验证网络的隐私安全自包含 HTML 发布
@@ -20,7 +21,7 @@
 
 “深度”不是堆积来源，而是把时间和模型开销放在真正控制结论的瓶颈上；“可信”不是固定来源排行榜，而是版本、范围、局部适配和失败边界都能被持续验收。
 
-## 十一个核心技能与一个受约束执行器
+## 十二个核心技能与一个受约束执行器
 
 | 技能 | 职责 | 典型输入 | 核心产物 |
 | --- | --- | --- | --- |
@@ -32,29 +33,30 @@
 | `$scholarly-source-acquisition` | 将已接受候选合法获取为可复验全文资产 | DOI、开放URL、候选身份 | acquisition plan、PDF magic/大小/哈希、失败状态 |
 | `$scholarly-document-normalization` | 分类本地PDF文本质量并生成可追溯OCR衍生物 | 已获取PDF、可选source bundle | 逐页质量、显式skip或searchable PDF谱系、review gate |
 | `$evidence-appraisal` | 对已选关系执行 fail-closed 对抗性证据审查 | prepared request、独立 review、owner bundle | `EvidenceAppraisalSet/v1`、挑战、定向证据需要、批准 package |
+| `$research-workflow-retrospective` | 对已完成或失败工作流进行复盘并输出可测试改进建议 | 工作流事件、阶段证据、运行工况 | `ResearchWorkflowEvidenceBundle/v1`、`ResearchWorkflowReview/v1` |
 | `$curate-research-to-zotero` | 保存经审核的研究资产 | 来源清单、本地文件、Zotero 目标 | 文件哈希、ingestion manifest、PDF/元数据/笔记同步与 readback |
 | `$repair-zotero-metadata` | 审查已有 parent 的固定字段书目纠错 | 已验证身份、existing-parent 快照、字段证据 | 私有 reviewed repair source、重复冲突或 bridge handoff |
 | `$research-network-publish` | 将验证网络投影为可分享视图 | `KnowledgeNetwork/v1`、可选研究地图 | 自包含 HTML、coverage/gap/conflict 视图、隐私审计 |
 
-十一个技能可独立调用，或由 `$deep-research` 统筹。Google Scholar 仅支持用户
+十二个核心技能可独立调用，或由 `$deep-research` 统筹。Google Scholar 仅支持用户
 手工检索与导出导入；自主检索使用有正式接口的学术数据源，不能抓取 Scholar
 结果页或绕过 CAPTCHA。
 
 可选配套执行器 `$zotero-declarative-bridge` 只负责已审核 manifest 的
 existing-parent collection membership、书目 `shortTitle`、子笔记、单附件，
 以及来自 `$repair-zotero-metadata` 的独立固定 profile parent 修复
-事务。当前发布组合为仓库 `v0.7.0` 与 bridge `0.1.11`；候选 XPI 的
+事务。本文档对应的目标发布组合为仓库 `v0.8.0` 与 bridge `0.1.11`；候选 XPI 的
 确定性 SHA-256 为
 `a5aabab25da4b61d321172524a1e961a27420f5887bcb49c76e04e27c70d037c`。
 这个摘要只绑定候选构件，不替代真实运行回读。作为历史证据，`v0.6.1` 的
 bridge `0.1.4` 完成真实写入，`0.1.5` 在 Zotero `9.0.6` 中完成激活、受约束
 probe、正向回读和目标集合成员关系负向回读；详情见
-[v0.7.0 release notes](docs/releases/v0.7.0.md) 与
+[v0.8.0 release notes](docs/releases/v0.8.0.md)、[v0.7.0 release notes](docs/releases/v0.7.0.md) 与
 [historical v0.6.1 release notes](docs/releases/v0.6.1.md)。bridge 仍是显式
 opt-in，不扩大研究、选源、全文理解或 Zotero 内容决策职责。
 
 设计取舍与高质量外部方案的一手证据对照见
-[外部同类系统审计](docs/analogous-systems-review.md)。审计区分报告生成、科学
+[外部同类系统审计](docs/analogous-systems-review.md)、[agentic research systems review 2026](docs/agentic-research-systems-review-2026.md) 与 [v0.8.0 真实工作流复盘评估](docs/evaluations/v0.8.0-real-case-retrospective.md)。审计区分报告生成、科学
 RAG、主动筛选、研究知识图谱与完整 Zotero 读写闭环，避免把相邻能力夸大为等价实现。
 
 ## 核心方法
@@ -81,11 +83,11 @@ RAG、主动筛选、研究知识图谱与完整 Zotero 读写闭环，避免把
 ## 安装
 
 ```bash
-git clone --branch v0.7.0 --depth 1 https://github.com/kl3574/deep-research.git
+git clone --branch v0.8.0 --depth 1 https://github.com/kl3574/deep-research.git
 cd deep-research
 mkdir -p ~/.codex/skills
 stamp="$(date +%Y%m%d%H%M%S)"
-for skill in deep-research learn-from-papers evidence-appraisal research-knowledge-network network-gap-discovery scholar-discovery scholarly-source-acquisition scholarly-document-normalization curate-research-to-zotero repair-zotero-metadata research-network-publish; do
+for skill in deep-research learn-from-papers evidence-appraisal research-knowledge-network network-gap-discovery scholar-discovery scholarly-source-acquisition scholarly-document-normalization research-workflow-retrospective curate-research-to-zotero repair-zotero-metadata research-network-publish; do
   if [ -e "$HOME/.codex/skills/$skill" ] || [ -L "$HOME/.codex/skills/$skill" ]; then
     mv "$HOME/.codex/skills/$skill" "$HOME/.codex/skills/${skill}.backup-${stamp}"
   fi
@@ -189,6 +191,11 @@ skills/
 │   ├── agents/openai.yaml
 │   ├── references/
 │   └── scripts/
+├── research-workflow-retrospective/
+│   ├── SKILL.md
+│   ├── agents/openai.yaml
+│   ├── references/
+│   └── scripts/
 ├── research-network-publish/
 │   ├── SKILL.md
 │   ├── agents/openai.yaml
@@ -228,6 +235,7 @@ ruff check --no-cache skills evals scripts
 python scripts/check_public_privacy.py
 python -m unittest discover -s scripts -p 'test_*.py'
 python -m unittest discover -s skills/deep-research/scripts -p 'test_*.py'
+python -m unittest discover -s skills/research-workflow-retrospective/scripts -p 'test_*.py'
 python -m unittest discover -s skills/learn-from-papers/scripts -p 'test_*.py'
 python -m pytest -q skills/evidence-appraisal/scripts/test_evidence_appraisal_seam.py skills/evidence-appraisal/tests/test_contract_adversarial.py
 python skills/evidence-appraisal/scripts/quick_validate.py

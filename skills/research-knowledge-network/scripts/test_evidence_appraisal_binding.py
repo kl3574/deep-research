@@ -26,6 +26,13 @@ def attach(value: dict, id_field: str, digest_field: str, prefix: str) -> dict:
     return value
 
 
+def attach_patch(value: dict, id_field: str, digest_field: str, prefix: str) -> dict:
+    digest = PATCH.digest_json(PATCH.without(value, id_field, digest_field))
+    value[digest_field] = digest
+    value[id_field] = prefix + digest[:16]
+    return value
+
+
 def invoke(module, argv: list[str]):
     stdout = io.StringIO()
     stderr = io.StringIO()
@@ -54,6 +61,28 @@ class EvidenceAppraisalBindingTest(unittest.TestCase):
                     str(snapshot),
                     "--snapshot-digest",
                     KN._sha256_file(snapshot),
+                ]
+            )[0],
+            0,
+        )
+        self.assertEqual(
+            self.kn(
+                [
+                    "add-source",
+                    "--source-id",
+                    "source-02",
+                    "--canonical-identity",
+                    "doi:10.1000/anonymous-two",
+                    "--canonical-version",
+                    "v1",
+                    "--read-version",
+                    "full-v1",
+                    "--read-depth",
+                    "full",
+                    "--version-hash",
+                    "sha256:" + "b" * 64,
+                    "--role",
+                    "source",
                 ]
             )[0],
             0,
@@ -117,32 +146,40 @@ class EvidenceAppraisalBindingTest(unittest.TestCase):
         paths, state, records = self.state()
         return PATCH.current_network_ref(paths, state, records)
 
-    def basis(self, evidence_id: str = "evidence-01") -> dict:
+    def basis(
+        self,
+        evidence_id: str = "evidence-01",
+        *,
+        source_id: str = "source-01",
+        source_index: int = 1,
+    ) -> dict:
+        suffix = f"{source_index:02d}"
+        digest_char = "a" if source_index == 1 else "b"
         return attach(
             {
                 "basis_id": "",
                 "basis_digest": "",
-                "review_request_id": "review-request-01",
+                "review_request_id": f"review-request-{suffix}",
                 "review_request_digest": "1" * 64,
-                "report_set_id": "report-set-01",
-                "report_set_digest": "2" * 64,
-                "dossier_id": "dossier-01",
+                "report_set_id": f"report-set-{suffix}",
+                "report_set_digest": str(source_index + 1) * 64,
+                "dossier_id": f"dossier-{suffix}",
                 "dossier_digest": "3" * 64,
-                "reading_report_id": "reading-report-01",
+                "reading_report_id": f"reading-report-{suffix}",
                 "reading_report_digest": "4" * 64,
-                "source_bundle_id": "source-bundle-01",
+                "source_bundle_id": f"source-bundle-{suffix}",
                 "source_bundle_digest": "5" * 64,
-                "source_artifact_sha256": "a" * 64,
-                "source_id": "source-01",
+                "source_artifact_sha256": digest_char * 64,
+                "source_id": source_id,
                 "source_digest": "6" * 64,
                 "claim_id": "claim-01",
                 "claim_digest": "7" * 64,
                 "evidence_id": evidence_id,
                 "evidence_digest": "8" * 64,
-                "span_id": "span-01",
+                "span_id": f"span-{suffix}",
                 "span_hash": "9" * 64,
-                "source_ref": "anonymous-paper.txt",
-                "acquisition_locator": "https://doi.org/10.1000/anonymous",
+                "source_ref": f"anonymous-paper-{suffix}.txt",
+                "acquisition_locator": f"https://doi.org/10.1000/anonymous-{suffix}",
                 "evidence_locator": "pages/page-0001.txt#char=10-29",
                 "relation": "supports",
                 "access_level": "full_text",
@@ -164,7 +201,7 @@ class EvidenceAppraisalBindingTest(unittest.TestCase):
         actions = []
         for index, evidence_id in enumerate(evidence_ids):
             basis = self.basis(evidence_id)
-            action = attach(
+            action = attach_patch(
                 {
                     "action_id": "",
                     "action_digest": "",
@@ -183,7 +220,7 @@ class EvidenceAppraisalBindingTest(unittest.TestCase):
                 "network-patch-action-",
             )
             actions.append(action)
-        return attach(
+        return attach_patch(
             {
                 "schema": "NetworkPatchProposal/v2",
                 "schema_version": "2.0",
@@ -207,6 +244,312 @@ class EvidenceAppraisalBindingTest(unittest.TestCase):
             "network-patch-proposal-",
         )
 
+    def proposal_v2_high_impact(self) -> dict:
+        basis = self.basis("evidence-01")
+        target_signature = {
+            "target_kind": "relation",
+            "signature": "single-source-high-impact-target",
+        }
+        scope = {
+            "scope_statement": "A bounded high-impact single-source claim.",
+            "assumptions": ["The one source is internally valid."],
+            "conditions": ["Only one source lineage is available."],
+            "units": ["standardized effect"],
+            "exclusions": ["Independent external replication."],
+            "defeaters": ["A second independent source changes the result."],
+            "coverage_dimensions": [],
+            "benchmark_profiles": [],
+        }
+        hypothesis_id = "KGH-v2-high-impact-single-source"
+        target = attach_patch(
+            {
+                "schema": "NetworkPatchTargetClaim/v1",
+                "schema_version": "1.0",
+                "claim_id": "",
+                "claim_text": "A high-impact conclusion from one source.",
+                "entity_id": None,
+                "impact": "high",
+                "coverage_dimensions": [],
+                "benchmark_profiles": [],
+                "supersedes": None,
+                "epistemic_status": {
+                    "projection_status": basis["projection_status"],
+                    "claim_support_eligible": basis["claim_support_eligible"],
+                    "inspection_depth": basis["inspection_depth"],
+                    "relation": basis["relation"],
+                },
+                "gap_hypothesis_id": hypothesis_id,
+                "target_signature": target_signature,
+                "report_claim_id": basis["claim_id"],
+                "report_claim_digest": basis["claim_digest"],
+                "scope": scope,
+                "scope_digest": PATCH.digest_json(scope),
+                "target_claim_digest": "",
+            },
+            "claim_id",
+            "target_claim_digest",
+            "claim-target-",
+        )
+        action = attach_patch(
+            {
+                "action_id": "",
+                "action_digest": "",
+                "action_type": "propose_relation",
+                "action_status": "proposed",
+                "hypothesis_id": hypothesis_id,
+                "target_signature": target_signature,
+                "hypothesis": target["claim_text"],
+                "reviewed_evidence": [basis],
+                "target_claim": target,
+            },
+            "action_id",
+            "action_digest",
+            "network-patch-action-",
+        )
+        return attach_patch(
+            {
+                "schema": "NetworkPatchProposal/v2",
+                "schema_version": "2.0",
+                "proposal_id": "",
+                "proposal_digest": "",
+                "network_ref": self.network_ref(),
+                "request_ref": {
+                    "request_set_id": "request-set-v2-high-impact",
+                    "request_set_digest": "c" * 64,
+                    "review_request_set_id": "review-set-v2-high-impact",
+                    "review_request_set_digest": "d" * 64,
+                },
+                "generated_at": "2026-08-11T00:00:00Z",
+                "proposal_only": True,
+                "novelty_claimed": False,
+                "review_gate": "pending_research_knowledge_network_acceptance",
+                "actions": [action],
+            },
+            "proposal_id",
+            "proposal_digest",
+            "network-patch-proposal-",
+        )
+
+    def origin_gap_ref(self, gap_id: str) -> dict:
+        _, _, records = self.state()
+        row = max(
+            (item for item in records["gaps"] if item.get("gap_id") == gap_id),
+            key=lambda item: item["sequence"],
+        )
+        return {
+            "gap_id": gap_id,
+            "record_id": row["record_id"],
+            "sequence": row["sequence"],
+            "status": row["status"],
+            "sha256": BINDING.digest_json(row),
+        }
+
+    def proposal_v3(self, origin_gap_refs: list[dict]) -> dict:
+        bases = [
+            self.basis("evidence-01"),
+            self.basis("evidence-02", source_id="source-02", source_index=2),
+        ]
+        reading_groups = [
+            {
+                "reading_group_id": "reading-group-01",
+                "reading_group_digest": "a" * 64,
+                "source_id": "source-01",
+                "report_set_id": bases[0]["report_set_id"],
+                "report_set_digest": bases[0]["report_set_digest"],
+            },
+            {
+                "reading_group_id": "reading-group-02",
+                "reading_group_digest": "b" * 64,
+                "source_id": "source-02",
+                "report_set_id": bases[1]["report_set_id"],
+                "report_set_digest": bases[1]["report_set_digest"],
+            },
+        ]
+        subject_ref = {
+            "subject_id": "reviewed-gap-subject-01",
+            "subject_digest": "e" * 64,
+        }
+        target_signature = {
+            "target_kind": "relation",
+            "signature": "multi-source-bounded-effect",
+        }
+        scope = {
+            "scope_statement": "Bounded two-source effect under declared conditions.",
+            "assumptions": ["Both source models are correctly specified."],
+            "conditions": ["The estimand is shared across sources."],
+            "units": ["standardized effect"],
+            "exclusions": ["Unmeasured target changes."],
+            "defeaters": ["Source versions no longer match."],
+            "coverage_dimensions": ["multi-source support"],
+            "benchmark_profiles": ["bounded-effect benchmark"],
+        }
+        target = attach_patch(
+            {
+                "schema": "NetworkPatchTargetClaim/v2",
+                "schema_version": "2.0",
+                "claim_id": "",
+                "claim_text": "The bounded effect is supported by two sources.",
+                "entity_id": None,
+                "impact": "high",
+                "coverage_dimensions": copy.deepcopy(scope["coverage_dimensions"]),
+                "benchmark_profiles": copy.deepcopy(scope["benchmark_profiles"]),
+                "supersedes": None,
+                "target_signature": target_signature,
+                "subject_ref": subject_ref,
+                "origin_gap_refs": copy.deepcopy(origin_gap_refs),
+                "report_claim_refs": [
+                    {
+                        "basis_id": basis["basis_id"],
+                        "basis_digest": basis["basis_digest"],
+                        "reading_group_id": reading_group["reading_group_id"],
+                        "claim_id": basis["claim_id"],
+                        "claim_digest": basis["claim_digest"],
+                        "reading_report_id": basis["reading_report_id"],
+                        "reading_report_digest": basis["reading_report_digest"],
+                    }
+                    for basis, reading_group in zip(bases, reading_groups)
+                ],
+                "scope": scope,
+                "scope_digest": PATCH.digest_json(scope),
+                "target_claim_digest": "",
+            },
+            "claim_id",
+            "target_claim_digest",
+            "claim-target-",
+        )
+        action = attach_patch(
+            {
+                "action_id": "",
+                "action_digest": "",
+                "action_type": "propose_relation",
+                "action_status": "proposed",
+                "hypothesis_id": "KGH-review-routing-only",
+                "target_signature": target_signature,
+                "hypothesis": "Two-source evidence supports the bounded effect.",
+                "subject_ref": subject_ref,
+                "origin_gap_refs": copy.deepcopy(origin_gap_refs),
+                "reading_group_refs": reading_groups,
+                "reviewed_evidence": bases,
+                "target_claim": target,
+            },
+            "action_id",
+            "action_digest",
+            "network-patch-action-",
+        )
+        return attach_patch(
+            {
+                "schema": "NetworkPatchProposal/v3",
+                "schema_version": "3.0",
+                "proposal_id": "",
+                "proposal_digest": "",
+                "network_ref": self.network_ref(),
+                "request_ref": {
+                    "request_set_id": "request-set-v3-01",
+                    "request_set_digest": "c" * 64,
+                    "review_request_set_id": "review-set-v3-01",
+                    "review_request_set_digest": "d" * 64,
+                },
+                "consumption_ref": {
+                    "schema": "ReviewedEvidenceCollectionConsumption/v1",
+                    "route": "direct_reviewed_selection",
+                    "authority_id": (
+                        "reviewed-collection-consumption-authority-" + "9" * 16
+                    ),
+                    "authority_digest": "9" * 64,
+                    "authority_file_sha256": "8" * 64,
+                    "consumed_hypotheses_sha256": "7" * 64,
+                },
+                "reading_collection_ref": {
+                    "collection_id": "paper-reading-evidence-collection-01",
+                    "collection_digest": "f" * 64,
+                },
+                "generated_at": "2026-08-11T00:00:00Z",
+                "proposal_only": True,
+                "novelty_claimed": False,
+                "review_gate": "pending_research_knowledge_network_acceptance",
+                "actions": [action],
+            },
+            "proposal_id",
+            "proposal_digest",
+            "network-patch-proposal-",
+        )
+
+    def proposal_v4_extension(self, origin_gap_refs: list[dict]) -> dict:
+        proposal = self.proposal_v3(origin_gap_refs)
+        _, _, records = self.state()
+        claim = next(
+            row for row in records["claims"] if row.get("claim_id") == "claim-01"
+        )
+        scope = {
+            field: copy.deepcopy(claim[field])
+            for field in (
+                "scope_statement",
+                "assumptions",
+                "conditions",
+                "units",
+                "exclusions",
+                "defeaters",
+                "coverage_dimensions",
+                "benchmark_profiles",
+            )
+        }
+        claim_semantics = {
+            field: copy.deepcopy(claim[field])
+            for field in (
+                "claim_text",
+                "entity_id",
+                "impact",
+                "is_factual",
+                "scope_statement",
+                "assumptions",
+                "conditions",
+                "units",
+                "exclusions",
+                "defeaters",
+                "coverage_dimensions",
+                "benchmark_profiles",
+                "supersedes",
+            )
+        }
+        existing_claim_ref = {
+            "schema": "NetworkPatchExistingClaimRef/v1",
+            "schema_version": "1.0",
+            "claim_id": claim["claim_id"],
+            "claim_record_ref": {
+                "record_id": claim["record_id"],
+                "sequence": claim["sequence"],
+                "sha256": PATCH.digest_json(claim),
+            },
+            "claim_semantics": claim_semantics,
+            "scope_digest": PATCH.digest_json(scope),
+            "claim_semantic_digest": PATCH.digest_json(claim_semantics),
+        }
+        action = PATCH.without(
+            copy.deepcopy(proposal["actions"][0]),
+            "action_id",
+            "action_digest",
+            "target_claim",
+        )
+        action["action_type"] = "propose_evidence_extension"
+        action["hypothesis"] = claim["claim_text"]
+        action["existing_claim_ref"] = existing_claim_ref
+        proposal["actions"] = [
+            attach_patch(
+                action,
+                "action_id",
+                "action_digest",
+                "network-patch-action-",
+            )
+        ]
+        proposal["schema"] = "NetworkPatchProposal/v4"
+        proposal["schema_version"] = "4.0"
+        return attach_patch(
+            PATCH.without(proposal, "proposal_id", "proposal_digest"),
+            "proposal_id",
+            "proposal_digest",
+            "network-patch-proposal-",
+        )
+
     def relation_appraisal(
         self,
         evidence_id: str = "evidence-01",
@@ -215,8 +558,9 @@ class EvidenceAppraisalBindingTest(unittest.TestCase):
         relation: str = "supports",
         locator: str = "pages/page-0001.txt#char=10-29",
         lineage: str = "study-lineage-01",
+        source_id: str = "source-01",
     ) -> dict:
-        locator_ref = {"source_ref": "source-01", "locator": locator}
+        locator_ref = {"source_ref": source_id, "locator": locator}
         return {
             "schema": "EvidenceAppraisal/v1",
             "claim_ref": "claim-01",
@@ -239,7 +583,7 @@ class EvidenceAppraisalBindingTest(unittest.TestCase):
                 "setting": "simulation",
                 "boundary": "declared estimand",
             },
-            "source_lineage": ["source-01", lineage],
+            "source_lineage": [source_id, lineage],
             "locator_refs": [locator_ref],
             "attestation_refs": [
                 {
@@ -529,6 +873,100 @@ class EvidenceAppraisalBindingTest(unittest.TestCase):
         )
         return binding, projection
 
+    def resolved_v3_transitions(
+        self, proposal: dict, artifacts: dict[str, dict]
+    ) -> list[dict]:
+        appraisal_refs = sorted(
+            [
+                {
+                    "appraisal_id": item["appraisal_id"],
+                    "semantic_digest": item["semantic_digest"],
+                }
+                for item in artifacts["set"]["relation_appraisals"]
+            ],
+            key=lambda item: (item["appraisal_id"], item["semantic_digest"]),
+        )
+        evidence_refs = sorted(
+            basis["evidence_id"]
+            for basis in proposal["actions"][0]["reviewed_evidence"]
+        )
+        return [
+            {
+                "gap_id": origin["gap_id"],
+                "from_record_id": origin["record_id"],
+                "from_status": origin["status"],
+                "to_status": "resolved",
+                "reason": "The complete reviewed multi-source basis resolves this gap.",
+                "evidence_refs": copy.deepcopy(evidence_refs),
+                "resolution_source": "",
+                "basis_appraisal_refs": copy.deepcopy(appraisal_refs),
+                "basis_need_refs": [],
+            }
+            for origin in proposal["actions"][0]["origin_gap_refs"]
+        ]
+
+    def binding_and_projection_v3(
+        self,
+        proposal: dict,
+        artifacts: dict[str, dict],
+        transitions: list[dict],
+        *,
+        scope_alignment: str = "match",
+    ):
+        paths, _, records = self.state()
+        binding = BINDING.create_binding(
+            artifacts["package"],
+            artifacts["approval"],
+            artifacts["prepared"],
+            artifacts["review"],
+            artifacts["owner_bundle"],
+            [],
+            artifacts["approval"]["authority_digest"],
+            proposal,
+            proposal["network_ref"],
+            KN._scientific_binding_guard(paths, records),
+            KN._claim_scopes_from_records(records),
+            bound_at="2026-08-11T00:01:00Z",
+        )
+        action = proposal["actions"][0]
+        review = {
+            "schema": "EvidenceAppraisalProjectionReview/v2",
+            "binding_ref": {
+                "binding_id": binding["binding_id"],
+                "binding_digest": binding["binding_digest"],
+            },
+            "proposal_ref": binding["proposal_ref"],
+            "reviewer": {
+                "reviewer_id": "scientific-curator-v3-01",
+                "reviewer_role": "independent-appraisal-reviewer",
+            },
+            "decisions": [
+                {
+                    "action_id": action["action_id"],
+                    "action_digest": action["action_digest"],
+                    "decision": "authorize",
+                    "rationale": "Every source basis and origin gap was reviewed.",
+                    "relation_reviews": [
+                        {
+                            "binding_row_id": row["binding_row_id"],
+                            "binding_row_digest": row["binding_row_digest"],
+                            "scope_alignment": scope_alignment,
+                            "projected_relation": row["allowed_relation"],
+                        }
+                        for row in binding["relation_bindings"]
+                    ],
+                    "gap_transitions": copy.deepcopy(transitions),
+                }
+            ],
+        }
+        projection = BINDING.create_reviewed_projection(
+            binding,
+            proposal,
+            review,
+            reviewed_at="2026-08-11T00:02:00Z",
+        )
+        return binding, projection
+
     def write_gate(self, proposal, artifacts, binding, projection):
         values = {
             "proposal.json": proposal,
@@ -667,6 +1105,79 @@ class EvidenceAppraisalBindingTest(unittest.TestCase):
         )
         self.assertEqual(denied_candidate[0], 1)
         self.assertIn("EvidenceAppraisalPackage/v1", denied_candidate[2])
+
+    def test_non_ascii_appraised_mutation_event_validates(self) -> None:
+        summary = "Reviewed bounded evidence from Pötscher."
+        proposal = self.proposal()
+        action = PATCH.without(
+            copy.deepcopy(proposal["actions"][0]), "action_id", "action_digest"
+        )
+        action["hypothesis"] = summary
+        proposal["actions"][0] = attach_patch(
+            action,
+            "action_id",
+            "action_digest",
+            "network-patch-action-",
+        )
+        proposal = attach_patch(
+            PATCH.without(proposal, "proposal_id", "proposal_digest"),
+            "proposal_id",
+            "proposal_digest",
+            "network-patch-proposal-",
+        )
+        artifacts = self.appraisal_package([self.relation_appraisal()])
+        binding, projection = self.binding_and_projection(proposal, artifacts)
+        gate_paths = self.write_gate(proposal, artifacts, binding, projection)
+        payload = {
+            "evidence_id": "evidence-01",
+            "claim_id": "claim-01",
+            "source_id": "source-01",
+            "polarity": "supports",
+            "exact_locator": "pages/page-0001.txt#char=10-29",
+            "independence_group": binding["relation_bindings"][0][
+                "independence_group"
+            ],
+            "summary": summary,
+            "notes": "accepted from NetworkPatchProposal/v2",
+            "supersedes": None,
+        }
+
+        written = self.kn(
+            [
+                "add-evidence",
+                "--evidence-id",
+                payload["evidence_id"],
+                "--claim-id",
+                payload["claim_id"],
+                "--source-id",
+                payload["source_id"],
+                "--polarity",
+                payload["polarity"],
+                "--exact-locator",
+                payload["exact_locator"],
+                "--independence-group",
+                payload["independence_group"],
+                "--summary",
+                payload["summary"],
+                "--notes",
+                payload["notes"],
+                *self.gate_arguments(gate_paths),
+            ]
+        )
+        self.assertEqual(written[0], 0, written[2])
+        validated = self.kn(["validate"])
+        self.assertEqual(validated[0], 0, validated[2] or validated[1])
+
+        _, _, records = self.state()
+        event = next(
+            row
+            for row in records["events"]
+            if row.get("event_type") == "appraised_mutation"
+        )
+        self.assertEqual(
+            event["mutation_subject_digest"],
+            BINDING.mutation_subject_digest("add-evidence", payload),
+        )
 
     def test_direct_gate_replays_owner_files_despite_injected_cache(self) -> None:
         proposal = self.proposal()
@@ -1205,7 +1716,7 @@ class EvidenceAppraisalBindingTest(unittest.TestCase):
         ):
             self.appraisal_package([failed])
 
-    def test_free_source_lineage_never_becomes_independent(self) -> None:
+    def test_binding_independence_group_is_exact_basis_source_id(self) -> None:
         proposal = self.proposal(("evidence-01", "evidence-02"))
         artifacts = self.appraisal_package(
             [
@@ -1233,9 +1744,691 @@ class EvidenceAppraisalBindingTest(unittest.TestCase):
             bound_at="2026-08-10T00:05:00Z",
         )
         self.assertEqual(
-            len({row["independence_group"] for row in binding["relation_bindings"]}),
-            1,
+            {row["independence_group"] for row in binding["relation_bindings"]},
+            {"source-01"},
         )
+        self.assertTrue(
+            all(
+                row["owner_lineage_id"]
+                and row["independence_group"] != row["owner_lineage_id"]
+                for row in binding["relation_bindings"]
+            )
+        )
+
+    def test_v3_projection_binds_two_sources_and_all_origin_gaps_in_order(
+        self,
+    ) -> None:
+        for gap_id in ("gap-current-a", "gap-current-b"):
+            opened = self.kn(
+                [
+                    "record-gap",
+                    "--gap-id",
+                    gap_id,
+                    "--gap-type",
+                    "deterministic_structural",
+                    "--claim-id",
+                    "claim-01",
+                    "--impact",
+                    "high",
+                    "--status",
+                    "open",
+                    "--description",
+                    "Awaiting a complete multi-source appraisal.",
+                ]
+            )
+            self.assertEqual(opened[0], 0, opened[2])
+        proposal = self.proposal_v3(
+            [
+                self.origin_gap_ref("gap-current-a"),
+                self.origin_gap_ref("gap-current-b"),
+            ]
+        )
+        wrong_consumption_ref = copy.deepcopy(proposal)
+        wrong_consumption_ref["consumption_ref"]["authority_id"] = (
+            "reviewed-collection-consumption-authority-" + "0" * 16
+        )
+        wrong_consumption_ref = attach_patch(
+            PATCH.without(wrong_consumption_ref, "proposal_id", "proposal_digest"),
+            "proposal_id",
+            "proposal_digest",
+            "network-patch-proposal-",
+        )
+        with self.assertRaisesRegex(BINDING.BindingError, "authority_id"):
+            BINDING.validate_proposal_integrity(wrong_consumption_ref)
+        artifacts = self.appraisal_package(
+            [
+                self.relation_appraisal("evidence-01", source_id="source-01"),
+                self.relation_appraisal("evidence-02", source_id="source-02"),
+            ]
+        )
+        transitions = self.resolved_v3_transitions(proposal, artifacts)
+        binding, projection = self.binding_and_projection_v3(
+            proposal, artifacts, transitions
+        )
+
+        self.assertEqual(binding["schema"], "EvidenceAppraisalBinding/v2")
+        self.assertEqual(projection["schema"], "EvidenceAppraisalNetworkProjection/v2")
+        self.assertEqual(
+            [row["independence_group"] for row in binding["relation_bindings"]],
+            ["source-01", "source-02"],
+        )
+        decision = projection["decisions"][0]
+        self.assertEqual(
+            [item["gap_id"] for item in decision["gap_transitions"]],
+            ["gap-current-a", "gap-current-b"],
+        )
+        self.assertEqual(
+            [item["operation_type"] for item in decision["authorized_mutations"]],
+            [
+                "add-claim",
+                "add-evidence",
+                "add-evidence",
+                "add-relation",
+                "add-relation",
+                "transition-gap",
+                "transition-gap",
+            ],
+        )
+        paths, _, records = self.state()
+        self.assertEqual(
+            BINDING.validate_binding(
+                binding,
+                artifacts["package"],
+                artifacts["approval"],
+                artifacts["prepared"],
+                artifacts["review"],
+                artifacts["owner_bundle"],
+                [],
+                artifacts["approval"]["authority_digest"],
+                proposal,
+                proposal["network_ref"],
+                KN._claim_scopes_from_records(records),
+            ),
+            binding,
+        )
+        self.assertEqual(
+            BINDING.validate_reviewed_projection(projection, binding, proposal),
+            projection,
+        )
+        gate = BINDING.validate_gate(
+            artifacts["package"],
+            artifacts["approval"],
+            artifacts["prepared"],
+            artifacts["review"],
+            artifacts["owner_bundle"],
+            [],
+            artifacts["approval"]["authority_digest"],
+            proposal,
+            binding,
+            projection,
+            proposal["network_ref"],
+            KN._claim_scopes_from_records(records),
+        )
+        consumed: set[str] = set()
+        for transition in transitions:
+            authorization = BINDING.authorize_mutation(
+                gate,
+                "transition-gap",
+                {},
+                authorization_subject=BINDING._transition_subject(transition),
+                consumed_authorization_digests=consumed,
+            )
+            consumed.add(authorization["authorization_digest"])
+        self.assertEqual(len(consumed), 2)
+        with self.assertRaisesRegex(BINDING.BindingError, "already consumed"):
+            BINDING.authorize_mutation(
+                gate,
+                "transition-gap",
+                {},
+                authorization_subject=BINDING._transition_subject(transitions[0]),
+                consumed_authorization_digests=consumed,
+            )
+
+    def test_v4_extension_binds_new_evidence_to_existing_claim_without_add_claim(
+        self,
+    ) -> None:
+        opened = self.kn(
+            [
+                "record-gap",
+                "--gap-id",
+                "gap-existing-claim-evidence",
+                "--gap-type",
+                "explicit",
+                "--claim-id",
+                "claim-01",
+                "--impact",
+                "high",
+                "--status",
+                "open",
+                "--description",
+                "The existing claim needs another decisive source.",
+            ]
+        )
+        self.assertEqual(opened[0], 0, opened[2])
+        proposal = self.proposal_v4_extension(
+            [self.origin_gap_ref("gap-existing-claim-evidence")]
+        )
+        artifacts = self.appraisal_package(
+            [
+                self.relation_appraisal("evidence-01", source_id="source-01"),
+                self.relation_appraisal("evidence-02", source_id="source-02"),
+            ]
+        )
+        transitions = self.resolved_v3_transitions(proposal, artifacts)
+        transitions[0]["resolution_source"] = "claim-01"
+        binding, projection = self.binding_and_projection_v3(
+            proposal, artifacts, transitions
+        )
+
+        self.assertEqual(binding["schema"], "EvidenceAppraisalBinding/v2")
+        self.assertEqual(projection["schema"], "EvidenceAppraisalNetworkProjection/v2")
+        self.assertEqual(
+            [row["network_claim_ref"] for row in binding["relation_bindings"]],
+            ["claim-01", "claim-01"],
+        )
+        self.assertEqual(
+            [
+                mutation["operation_type"]
+                for mutation in projection["decisions"][0]["authorized_mutations"]
+            ],
+            [
+                "add-evidence",
+                "add-evidence",
+                "add-relation",
+                "add-relation",
+                "transition-gap",
+            ],
+        )
+        self.assertEqual(BINDING.validate_proposal_integrity(proposal), proposal)
+        self.assertEqual(
+            BINDING.validate_reviewed_projection(projection, binding, proposal),
+            projection,
+        )
+
+    def test_v4_extension_rejects_non_network_claim_and_ambiguous_routes(
+        self,
+    ) -> None:
+        opened = self.kn(
+            [
+                "record-gap",
+                "--gap-id",
+                "gap-existing-claim-negative",
+                "--gap-type",
+                "explicit",
+                "--claim-id",
+                "claim-01",
+                "--impact",
+                "high",
+                "--status",
+                "open",
+                "--description",
+                "The existing claim needs another decisive source.",
+            ]
+        )
+        self.assertEqual(opened[0], 0, opened[2])
+        proposal = self.proposal_v4_extension(
+            [self.origin_gap_ref("gap-existing-claim-negative")]
+        )
+
+        non_network_claim = copy.deepcopy(proposal)
+        action = PATCH.without(
+            non_network_claim["actions"][0], "action_id", "action_digest"
+        )
+        existing = copy.deepcopy(action["existing_claim_ref"])
+        existing["claim_semantics"]["is_factual"] = True
+        existing["claim_semantic_digest"] = PATCH.digest_json(
+            existing["claim_semantics"]
+        )
+        action["existing_claim_ref"] = existing
+        non_network_claim["actions"][0] = attach_patch(
+            action,
+            "action_id",
+            "action_digest",
+            "network-patch-action-",
+        )
+        non_network_claim = attach_patch(
+            PATCH.without(non_network_claim, "proposal_id", "proposal_digest"),
+            "proposal_id",
+            "proposal_digest",
+            "network-patch-proposal-",
+        )
+        with self.assertRaisesRegex(BINDING.BindingError, "is_factual must be false"):
+            BINDING.validate_proposal_integrity(non_network_claim)
+
+        ambiguous = copy.deepcopy(proposal)
+        ambiguous_action = PATCH.without(
+            ambiguous["actions"][0], "action_id", "action_digest"
+        )
+        ambiguous_action["target_claim"] = copy.deepcopy(
+            self.proposal_v3([self.origin_gap_ref("gap-existing-claim-negative")])[
+                "actions"
+            ][0]["target_claim"]
+        )
+        ambiguous["actions"][0] = attach_patch(
+            ambiguous_action,
+            "action_id",
+            "action_digest",
+            "network-patch-action-",
+        )
+        ambiguous = attach_patch(
+            PATCH.without(ambiguous, "proposal_id", "proposal_digest"),
+            "proposal_id",
+            "proposal_digest",
+            "network-patch-proposal-",
+        )
+        with self.assertRaisesRegex(BINDING.BindingError, "fields mismatch"):
+            BINDING.validate_proposal_integrity(ambiguous)
+
+        artifacts = self.appraisal_package(
+            [
+                self.relation_appraisal("evidence-01", source_id="source-01"),
+                self.relation_appraisal("evidence-02", source_id="source-02"),
+            ]
+        )
+        transitions = self.resolved_v3_transitions(proposal, artifacts)
+        transitions[0]["resolution_source"] = "claim-other"
+        with self.assertRaisesRegex(BINDING.BindingError, "existing claim"):
+            self.binding_and_projection_v3(proposal, artifacts, transitions)
+
+    def test_proposal_integrity_uses_patch_utf8_canonicalization(self) -> None:
+        self.assertNotEqual(
+            BINDING.digest_json({"claim_text": "中文测量主张"}),
+            PATCH.digest_json({"claim_text": "中文测量主张"}),
+        )
+
+        proposal_v2 = self.proposal()
+        action_v2 = PATCH.without(
+            copy.deepcopy(proposal_v2["actions"][0]),
+            "action_id",
+            "action_digest",
+        )
+        action_v2["hypothesis"] = "中文审查证据。"
+        proposal_v2["actions"][0] = attach_patch(
+            action_v2,
+            "action_id",
+            "action_digest",
+            "network-patch-action-",
+        )
+        proposal_v2 = attach_patch(
+            PATCH.without(proposal_v2, "proposal_id", "proposal_digest"),
+            "proposal_id",
+            "proposal_digest",
+            "network-patch-proposal-",
+        )
+        self.assertEqual(
+            PATCH.validate_proposal_v2(proposal_v2, proposal_v2["network_ref"]),
+            proposal_v2,
+        )
+        self.assertEqual(BINDING.validate_proposal_integrity(proposal_v2), proposal_v2)
+
+        for gap_id in ("gap-unicode-a", "gap-unicode-b"):
+            opened = self.kn(
+                [
+                    "record-gap",
+                    "--gap-id",
+                    gap_id,
+                    "--gap-type",
+                    "deterministic_structural",
+                    "--claim-id",
+                    "claim-01",
+                    "--impact",
+                    "high",
+                    "--status",
+                    "open",
+                    "--description",
+                    "UTF-8 proposal digest fixture.",
+                ]
+            )
+            self.assertEqual(opened[0], 0, opened[2])
+        proposal_v3 = self.proposal_v3(
+            [self.origin_gap_ref("gap-unicode-a"), self.origin_gap_ref("gap-unicode-b")]
+        )
+        action_v3 = PATCH.without(
+            copy.deepcopy(proposal_v3["actions"][0]),
+            "action_id",
+            "action_digest",
+        )
+        target = PATCH.without(
+            action_v3["target_claim"], "claim_id", "target_claim_digest"
+        )
+        target["claim_text"] = "中文测量主张由两个来源支持。"
+        target["scope"]["scope_statement"] = "中文限定范围。"
+        target["scope_digest"] = PATCH.digest_json(target["scope"])
+        action_v3["target_claim"] = attach_patch(
+            target,
+            "claim_id",
+            "target_claim_digest",
+            "claim-target-",
+        )
+        proposal_v3["actions"][0] = attach_patch(
+            action_v3,
+            "action_id",
+            "action_digest",
+            "network-patch-action-",
+        )
+        proposal_v3 = attach_patch(
+            PATCH.without(proposal_v3, "proposal_id", "proposal_digest"),
+            "proposal_id",
+            "proposal_digest",
+            "network-patch-proposal-",
+        )
+        self.assertEqual(
+            PATCH.validate_proposal_v3(proposal_v3, proposal_v3["network_ref"]),
+            proposal_v3,
+        )
+        self.assertEqual(BINDING.validate_proposal_integrity(proposal_v3), proposal_v3)
+
+    def test_v2_high_impact_single_source_cannot_reach_direct_write(self) -> None:
+        proposal = self.proposal_v2_high_impact()
+        self.assertEqual(
+            PATCH.validate_proposal_v2(proposal, proposal["network_ref"]),
+            proposal,
+        )
+        self.assertRegex(
+            "; ".join(BINDING.proposal_independence_errors(proposal)),
+            "at least two distinct source IDs",
+        )
+        artifacts = self.appraisal_package([self.relation_appraisal()])
+        paths, _, records = self.state()
+        with self.assertRaisesRegex(
+            BINDING.BindingError, "at least two distinct source IDs"
+        ):
+            BINDING.create_binding(
+                artifacts["package"],
+                artifacts["approval"],
+                artifacts["prepared"],
+                artifacts["review"],
+                artifacts["owner_bundle"],
+                [],
+                artifacts["approval"]["authority_digest"],
+                proposal,
+                proposal["network_ref"],
+                KN._scientific_binding_guard(paths, records),
+                KN._claim_scopes_from_records(records),
+                bound_at="2026-08-11T00:03:00Z",
+            )
+
+        # Reconstruct the legacy bytes the pre-gate implementation could emit.
+        # They remain structurally readable for audit, but cannot authorize a
+        # direct scientific write.
+        with mock.patch.object(
+            BINDING,
+            "require_applicable_source_independence",
+            return_value=None,
+        ):
+            binding, projection = self.binding_and_projection(proposal, artifacts)
+        self.assertEqual(
+            BINDING.validate_binding(
+                binding,
+                artifacts["package"],
+                artifacts["approval"],
+                artifacts["prepared"],
+                artifacts["review"],
+                artifacts["owner_bundle"],
+                [],
+                artifacts["approval"]["authority_digest"],
+                proposal,
+                proposal["network_ref"],
+                KN._claim_scopes_from_records(records),
+            ),
+            binding,
+        )
+        with self.assertRaisesRegex(
+            BINDING.BindingError, "at least two distinct source IDs"
+        ):
+            BINDING.validate_gate(
+                artifacts["package"],
+                artifacts["approval"],
+                artifacts["prepared"],
+                artifacts["review"],
+                artifacts["owner_bundle"],
+                [],
+                artifacts["approval"]["authority_digest"],
+                proposal,
+                binding,
+                projection,
+                proposal["network_ref"],
+                KN._claim_scopes_from_records(records),
+            )
+
+        gate_paths = self.write_gate(proposal, artifacts, binding, projection)
+        target = proposal["actions"][0]["target_claim"]
+        scope = target["scope"]
+        arguments = [
+            "add-claim",
+            "--claim-id",
+            target["claim_id"],
+            "--claim-text",
+            target["claim_text"],
+            "--impact",
+            target["impact"],
+            "--scope-statement",
+            scope["scope_statement"],
+        ]
+        for option, field in (
+            ("--assumption", "assumptions"),
+            ("--condition", "conditions"),
+            ("--unit", "units"),
+            ("--exclusion", "exclusions"),
+            ("--defeater", "defeaters"),
+            ("--coverage-dimension", "coverage_dimensions"),
+            ("--benchmark-profile", "benchmark_profiles"),
+        ):
+            for item in scope[field]:
+                arguments.extend([option, item])
+        denied = self.kn([*arguments, *self.gate_arguments(gate_paths)])
+        self.assertNotEqual(denied[0], 0)
+        self.assertIn("at least two distinct source IDs", denied[2])
+        _, _, current_records = self.state()
+        self.assertNotIn(
+            target["claim_id"],
+            {row.get("claim_id") for row in current_records["claims"]},
+        )
+
+    def test_v3_projection_rejects_gap_subsets_reordering_and_partial_bases(
+        self,
+    ) -> None:
+        for gap_id in ("gap-exact-a", "gap-exact-b"):
+            opened = self.kn(
+                [
+                    "record-gap",
+                    "--gap-id",
+                    gap_id,
+                    "--gap-type",
+                    "deterministic_structural",
+                    "--claim-id",
+                    "claim-01",
+                    "--impact",
+                    "high",
+                    "--status",
+                    "open",
+                    "--description",
+                    "Exact transition coverage fixture.",
+                ]
+            )
+            self.assertEqual(opened[0], 0, opened[2])
+        proposal = self.proposal_v3(
+            [self.origin_gap_ref("gap-exact-a"), self.origin_gap_ref("gap-exact-b")]
+        )
+        duplicate_evidence = copy.deepcopy(proposal)
+        duplicate_action = BINDING.without(
+            duplicate_evidence["actions"][0], "action_id", "action_digest"
+        )
+        duplicate_basis = BINDING.without(
+            duplicate_action["reviewed_evidence"][1], "basis_id", "basis_digest"
+        )
+        duplicate_basis["evidence_id"] = "evidence-01"
+        duplicate_basis = attach(
+            duplicate_basis,
+            "basis_id",
+            "basis_digest",
+            "network-patch-basis-",
+        )
+        duplicate_action["reviewed_evidence"][1] = duplicate_basis
+        duplicate_target = BINDING.without(
+            duplicate_action["target_claim"], "claim_id", "target_claim_digest"
+        )
+        duplicate_target["report_claim_refs"][1]["basis_id"] = duplicate_basis[
+            "basis_id"
+        ]
+        duplicate_target["report_claim_refs"][1]["basis_digest"] = duplicate_basis[
+            "basis_digest"
+        ]
+        duplicate_action["target_claim"] = attach(
+            duplicate_target,
+            "claim_id",
+            "target_claim_digest",
+            "claim-target-",
+        )
+        duplicate_evidence["actions"][0] = attach(
+            duplicate_action,
+            "action_id",
+            "action_digest",
+            "network-patch-action-",
+        )
+        duplicate_evidence = attach(
+            BINDING.without(duplicate_evidence, "proposal_id", "proposal_digest"),
+            "proposal_id",
+            "proposal_digest",
+            "network-patch-proposal-",
+        )
+        with self.assertRaisesRegex(BINDING.BindingError, "evidence IDs"):
+            BINDING.validate_proposal_integrity(duplicate_evidence)
+
+        artifacts = self.appraisal_package(
+            [
+                self.relation_appraisal("evidence-01", source_id="source-01"),
+                self.relation_appraisal("evidence-02", source_id="source-02"),
+            ]
+        )
+        transitions = self.resolved_v3_transitions(proposal, artifacts)
+
+        with self.assertRaisesRegex(BINDING.BindingError, "exactly cover"):
+            self.binding_and_projection_v3(proposal, artifacts, transitions[:1])
+        with self.assertRaisesRegex(BINDING.BindingError, "canonical order"):
+            self.binding_and_projection_v3(
+                proposal, artifacts, list(reversed(transitions))
+            )
+
+        hypothesis_transition = copy.deepcopy(transitions)
+        hypothesis_transition[0]["gap_id"] = proposal["actions"][0]["hypothesis_id"]
+        with self.assertRaisesRegex(BINDING.BindingError, "exactly cover"):
+            self.binding_and_projection_v3(proposal, artifacts, hypothesis_transition)
+
+        partial_appraisal = copy.deepcopy(transitions)
+        partial_appraisal[0]["basis_appraisal_refs"] = partial_appraisal[0][
+            "basis_appraisal_refs"
+        ][:1]
+        with self.assertRaisesRegex(BINDING.BindingError, "every action appraisal"):
+            self.binding_and_projection_v3(proposal, artifacts, partial_appraisal)
+
+        partial_evidence = copy.deepcopy(transitions)
+        partial_evidence[0]["evidence_refs"] = partial_evidence[0]["evidence_refs"][:1]
+        with self.assertRaisesRegex(BINDING.BindingError, "exactly match"):
+            self.binding_and_projection_v3(proposal, artifacts, partial_evidence)
+
+        with self.assertRaisesRegex(BINDING.BindingError, "scope-mismatched"):
+            self.binding_and_projection_v3(
+                proposal, artifacts, transitions, scope_alignment="mismatch"
+            )
+
+    def test_v1_binding_validator_retains_legacy_owner_lineage_artifacts(
+        self,
+    ) -> None:
+        proposal = self.proposal()
+        artifacts = self.appraisal_package([self.relation_appraisal()])
+        paths, _, records = self.state()
+        legacy = BINDING._create_binding(
+            artifacts["package"],
+            artifacts["approval"],
+            artifacts["prepared"],
+            artifacts["review"],
+            artifacts["owner_bundle"],
+            [],
+            artifacts["approval"]["authority_digest"],
+            proposal,
+            proposal["network_ref"],
+            KN._scientific_binding_guard(paths, records),
+            KN._claim_scopes_from_records(records),
+            bound_at="2026-08-10T00:05:30Z",
+            legacy_owner_lineage_independence=True,
+        )
+        self.assertTrue(
+            legacy["relation_bindings"][0]["independence_group"].startswith(
+                "owner-lineage-"
+            )
+        )
+        self.assertEqual(
+            BINDING.validate_binding(
+                legacy,
+                artifacts["package"],
+                artifacts["approval"],
+                artifacts["prepared"],
+                artifacts["review"],
+                artifacts["owner_bundle"],
+                [],
+                artifacts["approval"]["authority_digest"],
+                proposal,
+                proposal["network_ref"],
+                KN._claim_scopes_from_records(records),
+            ),
+            legacy,
+        )
+        row = legacy["relation_bindings"][0]
+        legacy_review = {
+            "schema": "EvidenceAppraisalProjectionReview/v1",
+            "binding_ref": {
+                "binding_id": legacy["binding_id"],
+                "binding_digest": legacy["binding_digest"],
+            },
+            "proposal_ref": legacy["proposal_ref"],
+            "reviewer": {
+                "reviewer_id": "legacy-reader-01",
+                "reviewer_role": "scientific-curator",
+            },
+            "decisions": [
+                {
+                    "action_id": proposal["actions"][0]["action_id"],
+                    "action_digest": proposal["actions"][0]["action_digest"],
+                    "decision": "authorize",
+                    "rationale": "Historical replay fixture only.",
+                    "relation_reviews": [
+                        {
+                            "binding_row_id": row["binding_row_id"],
+                            "binding_row_digest": row["binding_row_digest"],
+                            "scope_alignment": "match",
+                            "projected_relation": row["allowed_relation"],
+                        }
+                    ],
+                    "gap_transition": None,
+                }
+            ],
+        }
+        legacy_projection = BINDING.create_reviewed_projection(
+            legacy,
+            proposal,
+            legacy_review,
+            reviewed_at="2026-08-10T00:05:31Z",
+        )
+        self.assertEqual(
+            BINDING.validate_reviewed_projection(legacy_projection, legacy, proposal),
+            legacy_projection,
+        )
+        with self.assertRaisesRegex(BINDING.BindingError, "remain readable"):
+            BINDING.validate_gate(
+                artifacts["package"],
+                artifacts["approval"],
+                artifacts["prepared"],
+                artifacts["review"],
+                artifacts["owner_bundle"],
+                [],
+                artifacts["approval"]["authority_digest"],
+                proposal,
+                legacy,
+                legacy_projection,
+                proposal["network_ref"],
+                KN._claim_scopes_from_records(records),
+            )
 
     def test_cross_trusted_owner_lineage_fails_closed(self) -> None:
         proposal = self.proposal()

@@ -26,12 +26,20 @@ import evidence_appraisal_binding as appraisal_binding
 
 PATCH_V1_SCHEMA = "NetworkPatchProposal/v1"
 PATCH_V2_SCHEMA = "NetworkPatchProposal/v2"
+PATCH_V3_SCHEMA = "NetworkPatchProposal/v3"
+PATCH_V4_SCHEMA = "NetworkPatchProposal/v4"
 PLAN_SCHEMA = "NetworkPatchPlan/v1"
 ACCEPTANCE_SCHEMA = "NetworkPatchAcceptance/v1"
 VALIDATION_SCHEMA = "NetworkPatchValidation/v1"
 APPLICATION_SCHEMA = "NetworkPatchApplicationResult/v1"
 EVIDENCE_PACK_SCHEMA = "NetworkPatchEvidencePack/v1"
+EVIDENCE_PACK_V2_SCHEMA = "NetworkPatchEvidencePack/v2"
 TARGET_CLAIM_SCHEMA = "NetworkPatchTargetClaim/v1"
+TARGET_CLAIM_V2_SCHEMA = "NetworkPatchTargetClaim/v2"
+EXISTING_CLAIM_REF_SCHEMA = "NetworkPatchExistingClaimRef/v1"
+READING_COLLECTION_SCHEMA = "PaperReadingEvidenceCollection/v1"
+COLLECTION_CONSUMPTION_REF_SCHEMA = "ReviewedEvidenceCollectionConsumption/v1"
+DIRECT_REVIEWED_SELECTION_ROUTE = "direct_reviewed_selection"
 
 HEX64_RE = re.compile(r"[0-9a-f]{64}")
 UTC_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
@@ -70,6 +78,73 @@ EVIDENCE_PACK_FILE_ROLES = {
     "dossier",
     "source_bundle",
     "source_artifact",
+}
+
+EVIDENCE_PACK_V2_FILE_ROLES = {
+    "preconsumption_hypotheses",
+    "review_requests",
+    "reading_collection",
+    "consumption_authority",
+}
+
+COLLECTION_CONSUMPTION_REF_FIELDS = {
+    "schema",
+    "route",
+    "authority_id",
+    "authority_digest",
+    "authority_file_sha256",
+    "consumed_hypotheses_sha256",
+}
+
+ORIGIN_GAP_REF_FIELDS = {
+    "gap_id",
+    "record_id",
+    "sequence",
+    "status",
+    "sha256",
+}
+READING_GROUP_REF_FIELDS = {
+    "reading_group_id",
+    "reading_group_digest",
+    "source_id",
+    "report_set_id",
+    "report_set_digest",
+}
+SUBJECT_REF_FIELDS = {"subject_id", "subject_digest"}
+CLAIM_RECORD_REF_FIELDS = {"record_id", "sequence", "sha256"}
+CLAIM_SEMANTIC_FIELDS = {
+    "claim_text",
+    "entity_id",
+    "impact",
+    "is_factual",
+    "scope_statement",
+    "assumptions",
+    "conditions",
+    "units",
+    "exclusions",
+    "defeaters",
+    "coverage_dimensions",
+    "benchmark_profiles",
+    "supersedes",
+}
+CLAIM_SCOPE_FIELDS = {
+    "scope_statement",
+    "assumptions",
+    "conditions",
+    "units",
+    "exclusions",
+    "defeaters",
+    "coverage_dimensions",
+    "benchmark_profiles",
+}
+REPORT_CLAIM_REF_FIELDS = {
+    "basis_id",
+    "basis_digest",
+    "reading_group_id",
+    "claim_id",
+    "claim_digest",
+    "reading_report_id",
+    "reading_report_digest",
 }
 
 OPERATION_PAYLOAD_FIELDS = {
@@ -193,6 +268,13 @@ def require_string(value: Any, label: str) -> str:
     return value
 
 
+def require_evidence_id(value: Any, label: str) -> str:
+    evidence_id = require_string(value, label)
+    if not kn.EVIDENCE_ID_RE.fullmatch(evidence_id):
+        raise ValueError(f"{label} is not a materializable evidence ID")
+    return evidence_id
+
+
 def require_digest(value: Any, label: str) -> str:
     digest = require_string(value, label)
     if not HEX64_RE.fullmatch(digest):
@@ -216,7 +298,26 @@ def require_unique(values: list[str], label: str) -> None:
         raise ValueError(f"{label} contains duplicates")
 
 
+def require_string_list(value: Any, label: str, *, nonempty: bool = False) -> list[str]:
+    if not isinstance(value, list) or any(
+        not isinstance(item, str) or not item.strip() or item != item.strip()
+        for item in value
+    ):
+        raise ValueError(f"{label} must be a canonical string list")
+    if nonempty and not value:
+        raise ValueError(f"{label} must be non-empty")
+    require_unique(value, label)
+    return value
+
+
 def target_claim_id(action: dict[str, Any]) -> str:
+    if action.get("action_type") == "propose_evidence_extension":
+        existing = action.get("existing_claim_ref")
+        if not isinstance(existing, dict):
+            raise ValueError(
+                "propose_evidence_extension requires an existing_claim_ref"
+            )
+        return require_string(existing.get("claim_id"), "existing_claim_ref.claim_id")
     target_claim = action.get("target_claim")
     if not isinstance(target_claim, dict):
         raise ValueError("propose_relation requires a closed target_claim payload")
@@ -357,6 +458,457 @@ def validate_target_claim(
     ):
         raise ValueError(f"{label}.target_claim epistemic status mismatch")
 
+    expected = digest_json(without(target, "claim_id", "target_claim_digest"))
+    if target["target_claim_digest"] != expected:
+        raise ValueError(f"{label}.target_claim_digest mismatch")
+    if target["claim_id"] != f"claim-target-{expected[:16]}":
+        raise ValueError(f"{label}.target_claim.claim_id mismatch")
+    return target
+
+
+def validate_subject_ref(value: Any, label: str) -> dict[str, str]:
+    ref = require_object(value, label)
+    require_keys(ref, SUBJECT_REF_FIELDS, label)
+    return {
+        "subject_id": require_string(ref["subject_id"], f"{label}.subject_id"),
+        "subject_digest": require_digest(
+            ref["subject_digest"], f"{label}.subject_digest"
+        ),
+    }
+
+
+def _claim_scope_from_semantics(semantics: dict[str, Any]) -> dict[str, Any]:
+    return {
+        field: copy.deepcopy(semantics[field])
+        for field in (
+            "scope_statement",
+            "assumptions",
+            "conditions",
+            "units",
+            "exclusions",
+            "defeaters",
+            "coverage_dimensions",
+            "benchmark_profiles",
+        )
+    }
+
+
+def validate_existing_claim_ref(
+    value: Any,
+    live_network: dict[str, Any],
+    label: str = "existing_claim_ref",
+) -> dict[str, Any]:
+    """Bind an extension to one exact, active claim ledger row."""
+
+    ref = require_object(value, label)
+    require_keys(
+        ref,
+        {
+            "schema",
+            "schema_version",
+            "claim_id",
+            "claim_record_ref",
+            "claim_semantics",
+            "scope_digest",
+            "claim_semantic_digest",
+        },
+        label,
+    )
+    if ref["schema"] != EXISTING_CLAIM_REF_SCHEMA or ref["schema_version"] != "1.0":
+        raise ValueError(f"{label} schema/version mismatch")
+    claim_id = require_string(ref["claim_id"], f"{label}.claim_id")
+    if not kn.ID_RE.fullmatch(claim_id):
+        raise ValueError(f"{label}.claim_id is invalid")
+
+    record_ref = require_object(ref["claim_record_ref"], f"{label}.claim_record_ref")
+    require_keys(
+        record_ref,
+        CLAIM_RECORD_REF_FIELDS,
+        f"{label}.claim_record_ref",
+    )
+    sequence = record_ref["sequence"]
+    if type(sequence) is not int or sequence < 0:
+        raise ValueError(
+            f"{label}.claim_record_ref.sequence must be a non-negative integer"
+        )
+    normalized_record_ref = {
+        "record_id": require_string(
+            record_ref["record_id"], f"{label}.claim_record_ref.record_id"
+        ),
+        "sequence": sequence,
+        "sha256": require_digest(
+            record_ref["sha256"], f"{label}.claim_record_ref.sha256"
+        ),
+    }
+
+    semantics = require_object(ref["claim_semantics"], f"{label}.claim_semantics")
+    require_keys(semantics, CLAIM_SEMANTIC_FIELDS, f"{label}.claim_semantics")
+    require_string(semantics["claim_text"], f"{label}.claim_semantics.claim_text")
+    if semantics["entity_id"] is not None:
+        require_string(semantics["entity_id"], f"{label}.claim_semantics.entity_id")
+    if semantics["impact"] not in kn.IMPACTS:
+        raise ValueError(f"{label}.claim_semantics.impact is invalid")
+    if semantics["is_factual"] is not False:
+        raise ValueError(f"{label}.claim_semantics.is_factual must be false")
+    require_string(
+        semantics["scope_statement"],
+        f"{label}.claim_semantics.scope_statement",
+    )
+    for field in (
+        "assumptions",
+        "conditions",
+        "units",
+        "exclusions",
+        "defeaters",
+        "coverage_dimensions",
+        "benchmark_profiles",
+    ):
+        require_string_list(semantics[field], f"{label}.claim_semantics.{field}")
+    if semantics["supersedes"] is not None:
+        require_string(semantics["supersedes"], f"{label}.claim_semantics.supersedes")
+    scope = _claim_scope_from_semantics(semantics)
+    if ref["scope_digest"] != digest_json(scope):
+        raise ValueError(f"{label}.scope_digest mismatch")
+    if ref["claim_semantic_digest"] != digest_json(semantics):
+        raise ValueError(f"{label}.claim_semantic_digest mismatch")
+
+    claims = live_network.get("claims")
+    if not isinstance(claims, list):
+        raise ValueError("live network claims must be a list")
+    matches = [
+        row
+        for row in claims
+        if isinstance(row, dict) and row.get("claim_id") == claim_id
+    ]
+    if len(matches) != 1:
+        raise ValueError(f"{label} must bind exactly one live claim row")
+    if any(
+        isinstance(row, dict) and row.get("supersedes") == claim_id for row in claims
+    ):
+        raise ValueError(f"{label} cannot bind a superseded claim")
+    live_row = matches[0]
+    expected_record_ref = {
+        "record_id": live_row.get("record_id"),
+        "sequence": live_row.get("sequence"),
+        "sha256": digest_json(live_row),
+    }
+    if normalized_record_ref != expected_record_ref:
+        raise ValueError(f"{label}.claim_record_ref is stale or mismatched")
+    expected_semantics = {
+        field: copy.deepcopy(live_row.get(field)) for field in CLAIM_SEMANTIC_FIELDS
+    }
+    if semantics != expected_semantics:
+        raise ValueError(f"{label}.claim_semantics do not match the live claim row")
+    if ref["claim_id"] != live_row.get("claim_id"):
+        raise ValueError(f"{label}.claim_id mismatch")
+    return ref
+
+
+def _validate_existing_claim_subject(
+    action: dict[str, Any], existing: dict[str, Any], label: str
+) -> None:
+    semantics = existing["claim_semantics"]
+    if action["hypothesis"] != semantics["claim_text"]:
+        raise ValueError(
+            f"{label}.hypothesis must exactly equal the existing claim text"
+        )
+    subject = {
+        "hypothesis_id": action["hypothesis_id"],
+        "claim_text": semantics["claim_text"],
+        "impact": semantics["impact"],
+        "target_signature": action["target_signature"]["signature"],
+        **_claim_scope_from_semantics(semantics),
+        "origin_gap_refs": copy.deepcopy(action["origin_gap_refs"]),
+    }
+    expected_digest = digest_json(subject)
+    if action["subject_ref"] != {
+        "subject_id": "reviewed-gap-claim-subject-" + expected_digest[:16],
+        "subject_digest": expected_digest,
+    }:
+        raise ValueError(
+            f"{label}.subject_ref does not exactly bind the existing claim semantics"
+        )
+
+
+def _origin_claim_route(
+    origin_gap_refs: list[dict[str, Any]], live_network: dict[str, Any], label: str
+) -> tuple[str, str | None]:
+    gaps = live_network.get("gaps")
+    if not isinstance(gaps, list):
+        raise ValueError("live network gaps must be a list")
+    gap_rows = {
+        row.get("gap_id"): row
+        for row in gaps
+        if isinstance(row, dict) and isinstance(row.get("gap_id"), str)
+    }
+    claim_ids = [gap_rows[ref["gap_id"]].get("claim_id") for ref in origin_gap_refs]
+    if all(claim_id is None for claim_id in claim_ids):
+        return "new", None
+    if all(isinstance(claim_id, str) and claim_id for claim_id in claim_ids):
+        distinct = set(claim_ids)
+        if len(distinct) == 1:
+            return "extension", next(iter(distinct))
+    raise ValueError(
+        f"{label}.origin_gap_refs mix claimless or multiple existing-claim routes"
+    )
+
+
+def validate_collection_consumption_ref(
+    value: Any, label: str = "proposal.consumption_ref"
+) -> dict[str, str]:
+    """Validate the detached-authority receipt carried by proposal v3/v4."""
+
+    ref = require_object(value, label)
+    require_keys(ref, COLLECTION_CONSUMPTION_REF_FIELDS, label)
+    if ref["schema"] != COLLECTION_CONSUMPTION_REF_SCHEMA:
+        raise ValueError(f"{label}.schema is invalid")
+    if ref["route"] != DIRECT_REVIEWED_SELECTION_ROUTE:
+        raise ValueError(f"{label}.route must be direct_reviewed_selection")
+    authority_digest = require_digest(
+        ref["authority_digest"], f"{label}.authority_digest"
+    )
+    expected_authority_id = (
+        "reviewed-collection-consumption-authority-" + authority_digest[:16]
+    )
+    if ref["authority_id"] != expected_authority_id:
+        raise ValueError(f"{label}.authority_id does not match authority_digest")
+    return {
+        "schema": ref["schema"],
+        "route": ref["route"],
+        "authority_id": ref["authority_id"],
+        "authority_digest": authority_digest,
+        "authority_file_sha256": require_digest(
+            ref["authority_file_sha256"], f"{label}.authority_file_sha256"
+        ),
+        "consumed_hypotheses_sha256": require_digest(
+            ref["consumed_hypotheses_sha256"],
+            f"{label}.consumed_hypotheses_sha256",
+        ),
+    }
+
+
+def validate_origin_gap_refs(
+    value: Any,
+    label: str,
+    live_network: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"{label} must be a non-empty list")
+    live_gaps = {
+        gap.get("gap_id"): gap
+        for gap in (live_network or {}).get("gaps", [])
+        if isinstance(gap, dict) and isinstance(gap.get("gap_id"), str)
+    }
+    result: list[dict[str, Any]] = []
+    for index, raw in enumerate(value):
+        item_label = f"{label}[{index}]"
+        ref = require_object(raw, item_label)
+        require_keys(ref, ORIGIN_GAP_REF_FIELDS, item_label)
+        gap_id = require_string(ref["gap_id"], f"{item_label}.gap_id")
+        if gap_id.startswith("KGH-"):
+            raise ValueError(f"{item_label}.gap_id must be a live network gap")
+        sequence = ref["sequence"]
+        if type(sequence) is not int or sequence < 0:
+            raise ValueError(f"{item_label}.sequence must be a non-negative integer")
+        normalized = {
+            "gap_id": gap_id,
+            "record_id": require_string(ref["record_id"], f"{item_label}.record_id"),
+            "sequence": sequence,
+            "status": require_string(ref["status"], f"{item_label}.status"),
+            "sha256": require_digest(ref["sha256"], f"{item_label}.sha256"),
+        }
+        if live_network is not None:
+            gap = live_gaps.get(gap_id)
+            if gap is None:
+                raise ValueError(f"{item_label} is not present in the live export")
+            record_ref = require_object(
+                gap.get("record_ref"), f"live gap {gap_id}.record_ref"
+            )
+            require_keys(
+                record_ref,
+                {"record_id", "sequence", "status", "sha256"},
+                f"live gap {gap_id}.record_ref",
+            )
+            if {key: normalized[key] for key in record_ref} != record_ref:
+                raise ValueError(f"{item_label} does not bind the current gap record")
+            if normalized["status"] == "resolved":
+                raise ValueError(f"{item_label} cannot originate from a resolved gap")
+        result.append(normalized)
+    require_unique([item["gap_id"] for item in result], label)
+    require_unique([item["record_id"] for item in result], f"{label} record IDs")
+    return result
+
+
+def validate_reading_group_refs(value: Any, label: str) -> list[dict[str, str]]:
+    if not isinstance(value, list) or len(value) < 2:
+        raise ValueError(f"{label} must contain at least two reading groups")
+    result: list[dict[str, str]] = []
+    for index, raw in enumerate(value):
+        item_label = f"{label}[{index}]"
+        ref = require_object(raw, item_label)
+        require_keys(ref, READING_GROUP_REF_FIELDS, item_label)
+        result.append(
+            {
+                "reading_group_id": require_string(
+                    ref["reading_group_id"], f"{item_label}.reading_group_id"
+                ),
+                "reading_group_digest": require_digest(
+                    ref["reading_group_digest"],
+                    f"{item_label}.reading_group_digest",
+                ),
+                "source_id": require_string(
+                    ref["source_id"], f"{item_label}.source_id"
+                ),
+                "report_set_id": require_string(
+                    ref["report_set_id"], f"{item_label}.report_set_id"
+                ),
+                "report_set_digest": require_digest(
+                    ref["report_set_digest"], f"{item_label}.report_set_digest"
+                ),
+            }
+        )
+    for field in (
+        "reading_group_id",
+        "reading_group_digest",
+        "source_id",
+        "report_set_id",
+        "report_set_digest",
+    ):
+        require_unique([item[field] for item in result], f"{label} {field}")
+    return result
+
+
+def validate_target_claim_v2(
+    action: dict[str, Any],
+    reviewed: list[dict[str, Any]],
+    reading_group_refs: list[dict[str, str]],
+    label: str,
+) -> dict[str, Any]:
+    target = require_object(action.get("target_claim"), f"{label}.target_claim")
+    require_keys(
+        target,
+        {
+            "schema",
+            "schema_version",
+            "claim_id",
+            "claim_text",
+            "entity_id",
+            "impact",
+            "coverage_dimensions",
+            "benchmark_profiles",
+            "supersedes",
+            "target_signature",
+            "subject_ref",
+            "origin_gap_refs",
+            "report_claim_refs",
+            "scope",
+            "scope_digest",
+            "target_claim_digest",
+        },
+        f"{label}.target_claim",
+    )
+    if target["schema"] != TARGET_CLAIM_V2_SCHEMA or target["schema_version"] != "2.0":
+        raise ValueError(f"{label}.target_claim schema/version mismatch")
+    require_string(target["claim_text"], f"{label}.target_claim.claim_text")
+    if target["entity_id"] is not None:
+        require_string(target["entity_id"], f"{label}.target_claim.entity_id")
+    if target["impact"] not in kn.IMPACTS:
+        raise ValueError(f"{label}.target_claim.impact is invalid")
+    if target["supersedes"] is not None:
+        raise ValueError(f"{label}.target_claim.supersedes must be null")
+    for field in ("coverage_dimensions", "benchmark_profiles"):
+        require_string_list(target[field], f"{label}.target_claim.{field}")
+    if target["target_signature"] != action["target_signature"]:
+        raise ValueError(f"{label}.target_claim target signature mismatch")
+    if (
+        validate_subject_ref(target["subject_ref"], f"{label}.target_claim.subject_ref")
+        != action["subject_ref"]
+    ):
+        raise ValueError(f"{label}.target_claim subject_ref mismatch")
+    if target["origin_gap_refs"] != action["origin_gap_refs"]:
+        raise ValueError(f"{label}.target_claim origin_gap_refs mismatch")
+
+    scope = require_object(target["scope"], f"{label}.target_claim.scope")
+    require_keys(
+        scope,
+        {
+            "scope_statement",
+            "assumptions",
+            "conditions",
+            "units",
+            "exclusions",
+            "defeaters",
+            "coverage_dimensions",
+            "benchmark_profiles",
+        },
+        f"{label}.target_claim.scope",
+    )
+    require_string(
+        scope["scope_statement"], f"{label}.target_claim.scope.scope_statement"
+    )
+    for field in (
+        "assumptions",
+        "conditions",
+        "units",
+        "exclusions",
+        "defeaters",
+        "coverage_dimensions",
+        "benchmark_profiles",
+    ):
+        require_string_list(scope[field], f"{label}.target_claim.scope.{field}")
+    if (
+        scope["coverage_dimensions"] != target["coverage_dimensions"]
+        or scope["benchmark_profiles"] != target["benchmark_profiles"]
+    ):
+        raise ValueError(f"{label}.target_claim scope/profile projection mismatch")
+    if target["scope_digest"] != digest_json(scope):
+        raise ValueError(f"{label}.target_claim.scope_digest mismatch")
+
+    refs = target["report_claim_refs"]
+    if not isinstance(refs, list) or len(refs) != len(reviewed):
+        raise ValueError(
+            f"{label}.target_claim.report_claim_refs must cover every basis"
+        )
+    group_by_source_report = {
+        (group["source_id"], group["report_set_id"], group["report_set_digest"]): group
+        for group in reading_group_refs
+    }
+    normalized_refs: list[dict[str, str]] = []
+    for index, (raw_ref, basis) in enumerate(zip(refs, reviewed)):
+        ref_label = f"{label}.target_claim.report_claim_refs[{index}]"
+        ref = require_object(raw_ref, ref_label)
+        require_keys(ref, REPORT_CLAIM_REF_FIELDS, ref_label)
+        normalized = {
+            field: (
+                require_digest(ref[field], f"{ref_label}.{field}")
+                if field
+                in {
+                    "basis_digest",
+                    "claim_digest",
+                    "reading_report_digest",
+                }
+                else require_string(ref[field], f"{ref_label}.{field}")
+            )
+            for field in REPORT_CLAIM_REF_FIELDS
+        }
+        group = group_by_source_report.get(
+            (basis["source_id"], basis["report_set_id"], basis["report_set_digest"])
+        )
+        if group is None or normalized != {
+            "basis_id": basis["basis_id"],
+            "basis_digest": basis["basis_digest"],
+            "reading_group_id": group["reading_group_id"],
+            "claim_id": basis["claim_id"],
+            "claim_digest": basis["claim_digest"],
+            "reading_report_id": basis["reading_report_id"],
+            "reading_report_digest": basis["reading_report_digest"],
+        }:
+            raise ValueError(f"{ref_label} does not exactly project its basis")
+        normalized_refs.append(normalized)
+    require_unique(
+        [item["basis_id"] for item in normalized_refs],
+        f"{label}.target_claim.report_claim_refs basis IDs",
+    )
     expected = digest_json(without(target, "claim_id", "target_claim_digest"))
     if target["target_claim_digest"] != expected:
         raise ValueError(f"{label}.target_claim_digest mismatch")
@@ -647,7 +1199,6 @@ def validate_basis(value: Any, label: str) -> dict[str, Any]:
         "source_bundle_id",
         "source_id",
         "claim_id",
-        "evidence_id",
         "span_id",
         "source_ref",
         "acquisition_locator",
@@ -667,6 +1218,7 @@ def validate_basis(value: Any, label: str) -> dict[str, Any]:
     }
     for field in string_fields:
         require_string(basis[field], f"{label}.{field}")
+    require_evidence_id(basis["evidence_id"], f"{label}.evidence_id")
     for field in digest_fields:
         require_digest(basis[field], f"{label}.{field}")
     if (
@@ -846,6 +1398,348 @@ def validate_proposal_v2(value: Any, network_ref: dict[str, str]) -> dict[str, A
     return proposal
 
 
+def _validate_multi_reading_proposal(
+    value: Any,
+    network_ref: dict[str, str],
+    live_network: dict[str, Any] | None = None,
+    *,
+    expected_schema: str,
+    expected_version: str,
+    allow_existing_claim_extension: bool,
+) -> dict[str, Any]:
+    """Validate the shared atomic multi-reading envelope and its route union."""
+
+    proposal = require_object(value, "proposal")
+    require_keys(
+        proposal,
+        {
+            "schema",
+            "schema_version",
+            "proposal_id",
+            "proposal_digest",
+            "network_ref",
+            "request_ref",
+            "consumption_ref",
+            "reading_collection_ref",
+            "generated_at",
+            "proposal_only",
+            "novelty_claimed",
+            "review_gate",
+            "actions",
+        },
+        "proposal",
+    )
+    if (
+        proposal["schema"] != expected_schema
+        or proposal["schema_version"] != expected_version
+    ):
+        raise ValueError(
+            f"proposal must use {expected_schema} schema_version {expected_version}"
+        )
+    if allow_existing_claim_extension and live_network is None:
+        raise ValueError("NetworkPatchProposal/v4 requires the live network export")
+    validate_network_ref(proposal["network_ref"], network_ref, "proposal.network_ref")
+    request_ref = require_object(proposal["request_ref"], "proposal.request_ref")
+    require_keys(
+        request_ref,
+        {
+            "request_set_id",
+            "request_set_digest",
+            "review_request_set_id",
+            "review_request_set_digest",
+        },
+        "proposal.request_ref",
+    )
+    for field in ("request_set_id", "review_request_set_id"):
+        require_string(request_ref[field], f"proposal.request_ref.{field}")
+    for field in ("request_set_digest", "review_request_set_digest"):
+        require_digest(request_ref[field], f"proposal.request_ref.{field}")
+    proposal["consumption_ref"] = validate_collection_consumption_ref(
+        proposal["consumption_ref"]
+    )
+    collection_ref = require_object(
+        proposal["reading_collection_ref"], "proposal.reading_collection_ref"
+    )
+    require_keys(
+        collection_ref,
+        {"collection_id", "collection_digest"},
+        "proposal.reading_collection_ref",
+    )
+    require_string(
+        collection_ref["collection_id"],
+        "proposal.reading_collection_ref.collection_id",
+    )
+    require_digest(
+        collection_ref["collection_digest"],
+        "proposal.reading_collection_ref.collection_digest",
+    )
+    require_timestamp(proposal["generated_at"], "proposal.generated_at")
+    if (
+        proposal["proposal_only"] is not True
+        or proposal["novelty_claimed"] is not False
+    ):
+        raise ValueError("proposal must remain proposal-only and non-novelty")
+    if proposal["review_gate"] != "pending_research_knowledge_network_acceptance":
+        raise ValueError("proposal.review_gate must remain pending acceptance")
+
+    actions = proposal["actions"]
+    if not isinstance(actions, list) or not actions:
+        raise ValueError("proposal.actions must be non-empty")
+    action_ids: list[str] = []
+    action_digests: list[str] = []
+    hypothesis_ids: list[str] = []
+    subject_ids: list[str] = []
+    evidence_ids: list[str] = []
+    origin_gap_ids: list[str] = []
+    target_claim_ids: list[str] = []
+    for index, raw_action in enumerate(actions):
+        label = f"proposal.actions[{index}]"
+        action = require_object(raw_action, label)
+        action_type = action.get("action_type")
+        action_fields = {
+            "action_id",
+            "action_digest",
+            "action_type",
+            "action_status",
+            "hypothesis_id",
+            "target_signature",
+            "hypothesis",
+            "subject_ref",
+            "origin_gap_refs",
+            "reading_group_refs",
+            "reviewed_evidence",
+        }
+        if action_type == "propose_relation":
+            action_fields.add("target_claim")
+        elif (
+            allow_existing_claim_extension
+            and action_type == "propose_evidence_extension"
+        ):
+            action_fields.add("existing_claim_ref")
+        require_keys(
+            action,
+            action_fields,
+            label,
+        )
+        allowed_action_types = {"propose_relation"}
+        if allow_existing_claim_extension:
+            allowed_action_types.add("propose_evidence_extension")
+        if action_type not in allowed_action_types:
+            raise ValueError(
+                f"{label}.action_type must select an allowed multi-reading route"
+            )
+        if action["action_status"] != "proposed":
+            raise ValueError(f"{label}.action_status must be proposed")
+        require_string(action["hypothesis_id"], f"{label}.hypothesis_id")
+        require_string(action["hypothesis"], f"{label}.hypothesis")
+        signature = require_object(
+            action["target_signature"], f"{label}.target_signature"
+        )
+        require_keys(
+            signature, {"target_kind", "signature"}, f"{label}.target_signature"
+        )
+        if signature["target_kind"] != "relation":
+            raise ValueError(f"{label}.target_signature.target_kind must be relation")
+        require_string(signature["signature"], f"{label}.target_signature.signature")
+        action["subject_ref"] = validate_subject_ref(
+            action["subject_ref"], f"{label}.subject_ref"
+        )
+        action["origin_gap_refs"] = validate_origin_gap_refs(
+            action["origin_gap_refs"], f"{label}.origin_gap_refs", live_network
+        )
+        route = "new"
+        routed_claim_id: str | None = None
+        if allow_existing_claim_extension:
+            assert live_network is not None
+            route, routed_claim_id = _origin_claim_route(
+                action["origin_gap_refs"], live_network, label
+            )
+            expected_action_type = {
+                "new": "propose_relation",
+                "extension": "propose_evidence_extension",
+            }[route]
+            if action_type != expected_action_type:
+                raise ValueError(
+                    f"{label}.action_type does not match its origin-gap claim route"
+                )
+        action["reading_group_refs"] = validate_reading_group_refs(
+            action["reading_group_refs"], f"{label}.reading_group_refs"
+        )
+
+        reviewed = action["reviewed_evidence"]
+        if not isinstance(reviewed, list) or len(reviewed) < 2:
+            raise ValueError(f"{label}.reviewed_evidence must contain multiple bases")
+        bases: list[dict[str, Any]] = []
+        for basis_index, raw_basis in enumerate(reviewed):
+            bases.append(
+                validate_basis(raw_basis, f"{label}.reviewed_evidence[{basis_index}]")
+            )
+        require_unique([basis["basis_id"] for basis in bases], f"{label} basis IDs")
+        require_unique(
+            [basis["basis_digest"] for basis in bases], f"{label} basis digests"
+        )
+        require_unique(
+            [basis["evidence_id"] for basis in bases], f"{label} evidence IDs"
+        )
+        require_unique(
+            [f"{basis['claim_id']}:{basis['evidence_id']}" for basis in bases],
+            f"{label} claim/evidence identities",
+        )
+        group_projection: list[dict[str, str]] = []
+        for basis in bases:
+            identity = {
+                "source_id": basis["source_id"],
+                "report_set_id": basis["report_set_id"],
+                "report_set_digest": basis["report_set_digest"],
+            }
+            candidates = [
+                group
+                for group in action["reading_group_refs"]
+                if all(group[key] == identity[key] for key in identity)
+            ]
+            if len(candidates) != 1:
+                raise ValueError(f"{label} basis does not map to one reading group")
+            if not group_projection or group_projection[-1] != candidates[0]:
+                group_projection.append(candidates[0])
+        if group_projection != action["reading_group_refs"]:
+            raise ValueError(
+                f"{label}.reviewed_evidence must preserve reading-group order"
+            )
+        if len({basis["source_id"] for basis in bases}) < 2:
+            raise ValueError(f"{label} requires at least two distinct source IDs")
+        if not any(basis["access_level"] == "full_text" for basis in bases):
+            raise ValueError(f"{label} requires at least one full-text basis")
+        target: dict[str, Any] | None = None
+        existing: dict[str, Any] | None = None
+        if route == "new":
+            target = validate_target_claim_v2(
+                action, bases, action["reading_group_refs"], label
+            )
+        else:
+            assert live_network is not None
+            existing = validate_existing_claim_ref(
+                action["existing_claim_ref"],
+                live_network,
+                f"{label}.existing_claim_ref",
+            )
+            if existing["claim_id"] != routed_claim_id:
+                raise ValueError(
+                    f"{label}.existing_claim_ref does not match its origin gaps"
+                )
+            _validate_existing_claim_subject(action, existing, label)
+        if live_network is not None and target is not None:
+            requirements = require_object(
+                live_network.get("requirements"), "live network requirements"
+            )
+            require_keys(
+                requirements,
+                {"required_dimensions", "required_benchmark_profiles"},
+                "live network requirements",
+            )
+            required_dimensions = require_string_list(
+                requirements["required_dimensions"],
+                "live network requirements.required_dimensions",
+            )
+            required_profiles = require_string_list(
+                requirements["required_benchmark_profiles"],
+                "live network requirements.required_benchmark_profiles",
+            )
+            unknown_dimensions = sorted(
+                set(target["coverage_dimensions"]) - set(required_dimensions)
+            )
+            unknown_profiles = sorted(
+                set(target["benchmark_profiles"]) - set(required_profiles)
+            )
+            if unknown_dimensions or unknown_profiles:
+                raise ValueError(
+                    f"{label}.target_claim injects unrequired coverage/profile values: "
+                    f"dimensions={unknown_dimensions}, profiles={unknown_profiles}"
+                )
+        action_impact = (
+            target["impact"]
+            if target is not None
+            else existing["claim_semantics"]["impact"]
+        )
+        if action_impact == "high" and len({basis["source_id"] for basis in bases}) < 2:
+            raise ValueError(f"{label} high-impact target lacks independent sources")
+        expected = digest_json(without(action, "action_id", "action_digest"))
+        if action["action_digest"] != expected:
+            raise ValueError(f"{label}.action_digest mismatch")
+        if action["action_id"] != f"network-patch-action-{expected[:16]}":
+            raise ValueError(f"{label}.action_id mismatch")
+        action_ids.append(action["action_id"])
+        action_digests.append(action["action_digest"])
+        hypothesis_ids.append(action["hypothesis_id"])
+        subject_ids.append(action["subject_ref"]["subject_id"])
+        evidence_ids.extend(basis["evidence_id"] for basis in bases)
+        origin_gap_ids.extend(ref["gap_id"] for ref in action["origin_gap_refs"])
+        target_claim_ids.append(target_claim_id(action))
+    require_unique(action_ids, "proposal action IDs")
+    require_unique(action_digests, "proposal action digests")
+    require_unique(hypothesis_ids, "proposal hypothesis IDs")
+    require_unique(subject_ids, "proposal subject IDs")
+    require_unique(evidence_ids, "proposal evidence IDs")
+    require_unique(origin_gap_ids, "proposal origin gap IDs")
+    require_unique(target_claim_ids, "proposal target claim IDs")
+    expected = digest_json(without(proposal, "proposal_id", "proposal_digest"))
+    if proposal["proposal_digest"] != expected:
+        raise ValueError("proposal.proposal_digest mismatch")
+    if proposal["proposal_id"] != f"network-patch-proposal-{expected[:16]}":
+        raise ValueError("proposal.proposal_id mismatch")
+    return proposal
+
+
+def validate_proposal_v3(
+    value: Any,
+    network_ref: dict[str, str],
+    live_network: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Validate an atomic new-claim multi-reading proposal without weakening v2."""
+
+    return _validate_multi_reading_proposal(
+        value,
+        network_ref,
+        live_network,
+        expected_schema=PATCH_V3_SCHEMA,
+        expected_version="3.0",
+        allow_existing_claim_extension=False,
+    )
+
+
+def validate_proposal_v4(
+    value: Any,
+    network_ref: dict[str, str],
+    live_network: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate the v4 new-claim or existing-claim multi-reading route."""
+
+    return _validate_multi_reading_proposal(
+        value,
+        network_ref,
+        live_network,
+        expected_schema=PATCH_V4_SCHEMA,
+        expected_version="4.0",
+        allow_existing_claim_extension=True,
+    )
+
+
+def validate_proposal(
+    value: Any,
+    network_ref: dict[str, str],
+    live_network: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    schema = value.get("schema") if isinstance(value, dict) else None
+    if schema == PATCH_V2_SCHEMA:
+        return validate_proposal_v2(value, network_ref)
+    if schema == PATCH_V3_SCHEMA:
+        return validate_proposal_v3(value, network_ref, live_network)
+    if schema == PATCH_V4_SCHEMA:
+        if live_network is None:
+            raise ValueError("NetworkPatchProposal/v4 requires the live network export")
+        return validate_proposal_v4(value, network_ref, live_network)
+    raise ValueError("proposal must use NetworkPatchProposal/v2, v3, or v4")
+
+
 def _canonical_absolute_path(raw: Any, label: str) -> Path:
     text = require_string(raw, label)
     path = Path(text)
@@ -968,7 +1862,7 @@ def _bundle_artifact_snapshot(
     return artifacts
 
 
-def validate_evidence_pack(
+def validate_evidence_pack_v1(
     value: Any,
     proposal: dict[str, Any],
     network_ref: dict[str, str],
@@ -1114,6 +2008,259 @@ def validate_evidence_pack(
     return pack
 
 
+def load_reading_collection_module():
+    path = (
+        Path(__file__).resolve().parents[2]
+        / "learn-from-papers"
+        / "scripts"
+        / "paper_reading_evidence_collection.py"
+    )
+    name = "rkn_paper_reading_evidence_collection_owner"
+    existing = sys.modules.get(name)
+    if existing is not None:
+        return existing
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ValueError("PaperReadingEvidenceCollection/v1 owner is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    if not callable(getattr(module, "validate_collection", None)):
+        raise ValueError("PaperReadingEvidenceCollection/v1 validator is unavailable")
+    return module
+
+
+def validate_evidence_pack_v2(
+    value: Any,
+    proposal: dict[str, Any],
+    network_ref: dict[str, str],
+    *,
+    live_network: dict[str, Any],
+    expected_authority_file_sha256: str,
+    regenerate: bool = True,
+) -> dict[str, Any]:
+    pack = require_object(value, "evidence_pack")
+    require_keys(
+        pack,
+        {
+            "schema",
+            "schema_version",
+            "pack_id",
+            "pack_digest",
+            "proposal_ref",
+            "network_ref",
+            "artifacts",
+        },
+        "evidence_pack",
+    )
+    if pack["schema"] != EVIDENCE_PACK_V2_SCHEMA or pack["schema_version"] != "2.0":
+        raise ValueError("evidence_pack must use NetworkPatchEvidencePack/v2")
+    if not regenerate:
+        raise ValueError(
+            "NetworkPatchEvidencePack/v2 authorized regeneration cannot be disabled"
+        )
+    if proposal.get("schema") not in {PATCH_V3_SCHEMA, PATCH_V4_SCHEMA}:
+        raise ValueError("NetworkPatchEvidencePack/v2 requires proposal v3 or v4")
+    validate_network_ref(pack["network_ref"], network_ref, "evidence_pack.network_ref")
+    proposal_ref = require_object(pack["proposal_ref"], "evidence_pack.proposal_ref")
+    require_keys(
+        proposal_ref, {"proposal_id", "proposal_digest"}, "evidence_pack.proposal_ref"
+    )
+    if proposal_ref != {
+        "proposal_id": proposal["proposal_id"],
+        "proposal_digest": proposal["proposal_digest"],
+    }:
+        raise ValueError("evidence_pack proposal binding mismatch")
+    artifacts = require_object(pack["artifacts"], "evidence_pack.artifacts")
+    require_keys(artifacts, EVIDENCE_PACK_V2_FILE_ROLES, "evidence_pack.artifacts")
+    loaded: dict[str, dict[str, Any]] = {}
+    raw_files: dict[str, bytes] = {}
+    paths: dict[str, Path] = {}
+    for role in sorted(EVIDENCE_PACK_V2_FILE_ROLES):
+        label = f"evidence_pack.artifacts.{role}"
+        reference = require_object(artifacts[role], label)
+        require_keys(reference, {"path", "sha256"}, label)
+        path = _canonical_absolute_path(reference["path"], f"{label}.path")
+        declared = require_digest(reference["sha256"], f"{label}.sha256")
+        raw, observed = _stable_file_bytes(path, label)
+        if declared != observed:
+            raise ValueError(f"{label}.sha256 mismatch")
+        try:
+            loaded[role] = require_object(json.loads(raw.decode("utf-8")), label)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"{label} must be UTF-8 JSON") from exc
+        raw_files[role] = raw
+        paths[role] = path
+
+    expected_authority_sha = require_digest(
+        expected_authority_file_sha256,
+        "expected_authority_file_sha256",
+    )
+    authority_artifact_sha = artifacts["consumption_authority"]["sha256"]
+    if authority_artifact_sha != expected_authority_sha:
+        raise ValueError(
+            "consumption authority artifact does not match the caller-held raw SHA-256"
+        )
+
+    module = load_gap_module()
+    authority_validator = getattr(
+        module, "validate_reviewed_collection_consumption_authority", None
+    )
+    if not callable(authority_validator):
+        raise ValueError(
+            "network-gap producer lacks the reviewed collection authority validator"
+        )
+    try:
+        authority = authority_validator(loaded["consumption_authority"])
+    except Exception as exc:
+        raise ValueError(
+            f"ReviewedEvidenceCollectionConsumptionAuthority/v1 replay failed: {exc}"
+        ) from exc
+    expected_consumption_ref = {
+        "schema": COLLECTION_CONSUMPTION_REF_SCHEMA,
+        "route": DIRECT_REVIEWED_SELECTION_ROUTE,
+        "authority_id": authority["authority_id"],
+        "authority_digest": authority["authority_digest"],
+        "authority_file_sha256": expected_authority_sha,
+        "consumed_hypotheses_sha256": authority["expected_consumed_hypotheses_sha256"],
+    }
+    if (
+        validate_collection_consumption_ref(proposal.get("consumption_ref"))
+        != expected_consumption_ref
+    ):
+        raise ValueError(
+            "proposal consumption_ref does not match the detached authority and raw pin"
+        )
+
+    owner = load_reading_collection_module()
+    try:
+        collection = owner.validate_collection(loaded["reading_collection"])
+    except owner.ContractError as exc:
+        raise ValueError(
+            f"PaperReadingEvidenceCollection/v1 owner replay failed: {exc}"
+        ) from exc
+    if collection["network_ref"] != network_ref:
+        raise ValueError("reading collection network_ref mismatch")
+    if proposal["reading_collection_ref"] != {
+        "collection_id": collection["collection_id"],
+        "collection_digest": collection["collection_digest"],
+    }:
+        raise ValueError("proposal reading_collection_ref mismatch")
+    if collection["review_request_set_ref"] != {
+        "review_request_set_id": proposal["request_ref"]["review_request_set_id"],
+        "review_request_set_digest": proposal["request_ref"][
+            "review_request_set_digest"
+        ],
+    }:
+        raise ValueError("reading collection review-request binding mismatch")
+    expected_groups = [
+        {
+            "reading_group_id": group["reading_group_id"],
+            "reading_group_digest": group["reading_group_digest"],
+            "source_id": group["source_ref"]["source_id"],
+            "report_set_id": group["report_set_ref"]["report_set_id"],
+            "report_set_digest": group["report_set_ref"]["report_set_digest"],
+        }
+        for group in collection["reading_groups"]
+    ]
+    for index, action in enumerate(proposal["actions"]):
+        if action["reading_group_refs"] != expected_groups:
+            raise ValueError(
+                f"proposal.actions[{index}] does not bind every collection group in order"
+            )
+
+    expected_pack_digest = digest_json(without(pack, "pack_id", "pack_digest"))
+    if pack["pack_digest"] != expected_pack_digest:
+        raise ValueError("evidence_pack.pack_digest mismatch")
+    if pack["pack_id"] != f"network-patch-evidence-pack-{expected_pack_digest[:16]}":
+        raise ValueError("evidence_pack.pack_id mismatch")
+
+    if regenerate:
+        producer_name = (
+            "propose_patch_v4"
+            if proposal.get("schema") == PATCH_V4_SCHEMA
+            else "propose_patch_v3"
+        )
+        producer = getattr(module, producer_name, None)
+        if not callable(producer):
+            raise ValueError(f"network-gap producer lacks {producer_name}")
+        with tempfile.TemporaryDirectory(
+            prefix="rkn-authorized-collection-snapshot-"
+        ) as raw_stage:
+            stage = Path(raw_stage)
+            staged_paths: dict[str, Path] = {}
+            for role in sorted(EVIDENCE_PACK_V2_FILE_ROLES):
+                staged_path = stage / f"{role}.json"
+                _write_private_snapshot(staged_path, raw_files[role])
+                staged_paths[role] = staged_path
+            try:
+                regenerated = producer(
+                    staged_paths["preconsumption_hypotheses"],
+                    live_network,
+                    staged_paths["review_requests"],
+                    staged_paths["reading_collection"],
+                    staged_paths["consumption_authority"],
+                    expected_authority_file_sha256=expected_authority_sha,
+                )
+            except Exception as exc:
+                raise ValueError(
+                    f"strict authorized multi-reading regeneration failed: {exc}"
+                ) from exc
+        for role, path in paths.items():
+            current_raw, _ = _stable_file_bytes(
+                path, f"evidence_pack.artifacts.{role} postcheck"
+            )
+            if current_raw != raw_files[role]:
+                raise ValueError(
+                    f"evidence_pack artifact drifted during regeneration: {role}"
+                )
+        if regenerated != proposal:
+            raise ValueError(
+                "strict multi-reading regeneration does not match proposal payload"
+            )
+    return pack
+
+
+def validate_evidence_pack(
+    value: Any,
+    proposal: dict[str, Any],
+    network_ref: dict[str, str],
+    *,
+    live_network: dict[str, Any],
+    expected_authority_file_sha256: str | None = None,
+    regenerate: bool = True,
+) -> dict[str, Any]:
+    schema = value.get("schema") if isinstance(value, dict) else None
+    if schema == EVIDENCE_PACK_SCHEMA:
+        if (
+            proposal.get("schema") != PATCH_V2_SCHEMA
+            and proposal.get("schema") != PATCH_V1_SCHEMA
+        ):
+            raise ValueError("NetworkPatchEvidencePack/v1 requires proposal v1 or v2")
+        return validate_evidence_pack_v1(
+            value,
+            proposal,
+            network_ref,
+            live_network=live_network,
+            regenerate=regenerate,
+        )
+    if schema == EVIDENCE_PACK_V2_SCHEMA:
+        if expected_authority_file_sha256 is None:
+            raise ValueError(
+                "NetworkPatchEvidencePack/v2 requires a caller-held "
+                "expected authority file SHA-256"
+            )
+        return validate_evidence_pack_v2(
+            value,
+            proposal,
+            network_ref,
+            live_network=live_network,
+            expected_authority_file_sha256=expected_authority_file_sha256,
+            regenerate=regenerate,
+        )
+    raise ValueError("evidence_pack must use NetworkPatchEvidencePack/v1 or v2")
+
+
 def load_gap_module():
     path = (
         Path(__file__).resolve().parents[2]
@@ -1159,18 +2306,25 @@ def create_plan(
                     if action["action_status"] == "proposed"
                     else "blocked"
                 ),
-                "allowed_operation_types": []
-                if action["action_status"] == "blocked"
-                else {
-                    "propose_node": [],
-                    "propose_relation": [
-                        "add-claim",
-                        "add-evidence",
-                        "add-relation",
-                        "transition-gap",
-                    ],
-                    "propose_evidence": ["add-evidence", "transition-gap"],
-                }[action["action_type"]],
+                "allowed_operation_types": (
+                    []
+                    if action["action_status"] == "blocked"
+                    else {
+                        "propose_node": [],
+                        "propose_relation": [
+                            "add-claim",
+                            "add-evidence",
+                            "add-relation",
+                            "transition-gap",
+                        ],
+                        "propose_evidence_extension": [
+                            "add-evidence",
+                            "add-relation",
+                            "transition-gap",
+                        ],
+                        "propose_evidence": ["add-evidence", "transition-gap"],
+                    }[action["action_type"]]
+                ),
             }
             for action in proposal["actions"]
         ],
@@ -1213,6 +2367,56 @@ def require_onboarded_sources(
             f"{version_mismatches}. Onboard the exact reviewed source version, "
             "export a new snapshot, and regenerate the gap audit and proposal."
         )
+
+
+def proposal_independence_errors(proposal: dict[str, Any]) -> list[str]:
+    """Return source-independence blockers for newly applicable science."""
+
+    errors: list[str] = []
+    for index, action in enumerate(proposal.get("actions", [])):
+        if action.get("action_type") not in {
+            "propose_relation",
+            "propose_evidence_extension",
+        }:
+            continue
+        target = action.get("target_claim")
+        existing = action.get("existing_claim_ref")
+        impact = (
+            target.get("impact")
+            if isinstance(target, dict)
+            else (
+                existing.get("claim_semantics", {}).get("impact")
+                if isinstance(existing, dict)
+                and isinstance(existing.get("claim_semantics"), dict)
+                else None
+            )
+        )
+        if impact != "high":
+            continue
+        bases = action.get("reviewed_evidence", [])
+        source_ids = {
+            basis.get("source_id") for basis in bases if isinstance(basis, dict)
+        }
+        has_full_text = any(
+            isinstance(basis, dict) and basis.get("access_level") == "full_text"
+            for basis in bases
+        )
+        if len(source_ids) < 2:
+            errors.append(
+                f"proposal.actions[{index}] high-impact target requires at least "
+                "two distinct source IDs"
+            )
+        if not has_full_text:
+            errors.append(
+                f"proposal.actions[{index}] high-impact target requires full text"
+            )
+    return errors
+
+
+def require_applicable_source_independence(proposal: dict[str, Any]) -> None:
+    errors = proposal_independence_errors(proposal)
+    if errors:
+        raise ValueError("; ".join(errors))
 
 
 def validate_plan(
@@ -1506,7 +2710,8 @@ def validate_acceptance(
                     "evidence_id": basis["evidence_id"],
                     "claim_id": (
                         target_claim_id(action)
-                        if action["action_type"] == "propose_relation"
+                        if action["action_type"]
+                        in {"propose_relation", "propose_evidence_extension"}
                         else basis["claim_id"]
                     ),
                     "source_id": basis["source_id"],
@@ -1514,7 +2719,7 @@ def validate_acceptance(
                     "exact_locator": basis["evidence_locator"],
                     "independence_group": independence_group,
                     "summary": action["hypothesis"],
-                    "notes": "accepted from NetworkPatchProposal/v2",
+                    "notes": f"accepted from {proposal['schema']}",
                     "supersedes": None,
                 }
                 if payload != expected_evidence:
@@ -1572,9 +2777,16 @@ def validate_acceptance(
                         f"{label} propose_node acceptance requires a closed target_node"
                     )
             elif operation["operation_type"] == "transition-gap":
-                if payload["gap_id"] != action["hypothesis_id"]:
+                if proposal["schema"] == PATCH_V2_SCHEMA:
+                    if payload["gap_id"] != action["hypothesis_id"]:
+                        raise ValueError(
+                            f"{label} gap transition targets another hypothesis"
+                        )
+                elif payload["gap_id"] not in {
+                    ref["gap_id"] for ref in action["origin_gap_refs"]
+                }:
                     raise ValueError(
-                        f"{label} gap transition targets another hypothesis"
+                        f"{label} gap transition targets a foreign origin gap"
                     )
                 if {
                     (ref["basis_id"], ref["basis_digest"])
@@ -1589,26 +2801,58 @@ def validate_acceptance(
                     raise ValueError(f"{label} gap transition evidence refs mismatch")
                 transition_operations.append(operation)
         if decision["decision"] == "accept":
-            if len(transition_operations) > 1 or (
-                transition_operations
-                and operations[-1]["operation_type"] != "transition-gap"
-            ):
-                raise ValueError(f"{label} allows at most one final gap transition")
+            if proposal["schema"] == PATCH_V2_SCHEMA:
+                if len(transition_operations) > 1 or (
+                    transition_operations
+                    and operations[-1]["operation_type"] != "transition-gap"
+                ):
+                    raise ValueError(f"{label} allows at most one final gap transition")
+            else:
+                origins = action["origin_gap_refs"]
+                if len(transition_operations) != len(origins):
+                    raise ValueError(
+                        f"{label} must transition every origin gap atomically"
+                    )
+                if operations[-len(origins) :] != transition_operations:
+                    raise ValueError(
+                        f"{label} origin gap transitions must be the final operations"
+                    )
+                for transition, origin in zip(transition_operations, origins):
+                    payload = transition["payload"]
+                    if (
+                        payload["gap_id"] != origin["gap_id"]
+                        or payload["from_record_id"] != origin["record_id"]
+                        or payload["status"] != "resolved"
+                    ):
+                        raise ValueError(
+                            f"{label} origin gap transition is not the exact current record"
+                        )
+                    if action[
+                        "action_type"
+                    ] == "propose_evidence_extension" and payload[
+                        "resolution_source"
+                    ] != target_claim_id(action):
+                        raise ValueError(
+                            f"{label} extension resolution_source must be the existing claim"
+                        )
             signature = action["target_signature"]["signature"]
-            if action["action_type"] == "propose_relation":
-                expected_types = (
-                    ["add-claim"]
-                    + ["add-evidence"] * len(action_basis)
-                    + ["add-relation"] * len(action_basis)
-                )
-                if transition_operations:
-                    expected_types.append("transition-gap")
+            if action["action_type"] in {
+                "propose_relation",
+                "propose_evidence_extension",
+            }:
+                expected_types = []
+                if action["action_type"] == "propose_relation":
+                    expected_types.append("add-claim")
+                expected_types.extend(["add-evidence"] * len(action_basis))
+                expected_types.extend(["add-relation"] * len(action_basis))
+                expected_types.extend(["transition-gap"] * len(transition_operations))
                 if operation_types != expected_types:
                     raise ValueError(
                         f"{label} relation operation sequence is not canonical"
                     )
                 if (
-                    len(node_operations) != 1
+                    len(node_operations)
+                    != (1 if action["action_type"] == "propose_relation" else 0)
                     or len(evidence_operations) != len(action_basis)
                     or len(relation_operations) != len(action_basis)
                 ):
@@ -1656,8 +2900,7 @@ def validate_acceptance(
                         )
             elif action["action_type"] == "propose_evidence":
                 expected_types = ["add-evidence"]
-                if transition_operations:
-                    expected_types.append("transition-gap")
+                expected_types.extend(["transition-gap"] * len(transition_operations))
                 if operation_types != expected_types or len(action_basis) != 1:
                     raise ValueError(
                         f"{label} evidence action requires one exact basis"
@@ -1710,6 +2953,9 @@ def command_validate(args: argparse.Namespace) -> int:
                 proposal,
                 network_ref,
                 live_network=live_network,
+                expected_authority_file_sha256=getattr(
+                    args, "expected_authority_file_sha256", None
+                ),
                 regenerate=False,
             )
             output = {
@@ -1723,34 +2969,41 @@ def command_validate(args: argparse.Namespace) -> int:
                 "reason": "v1_is_audit_only_and_lacks_decisive_evidence_bindings",
             }
         else:
-            proposal = validate_proposal_v2(proposal, network_ref)
+            proposal = validate_proposal(proposal, network_ref, live_network)
             require_onboarded_sources(proposal, live_network)
             validate_evidence_pack(
                 evidence_pack,
                 proposal,
                 network_ref,
                 live_network=live_network,
+                expected_authority_file_sha256=args.expected_authority_file_sha256,
             )
             appraisal_gate, _ = _load_optional_appraisal_gate(
                 args, proposal, network_ref, paths, records
             )
+            independence_errors = proposal_independence_errors(proposal)
             output = {
                 "schema": VALIDATION_SCHEMA,
-                "proposal_schema": PATCH_V2_SCHEMA,
+                "proposal_schema": proposal["schema"],
                 "proposal_id": proposal["proposal_id"],
                 "proposal_digest": proposal["proposal_digest"],
                 "network_ref": network_ref,
                 "valid": True,
-                "apply_eligible": appraisal_gate is not None,
+                "apply_eligible": appraisal_gate is not None
+                and not independence_errors,
                 "appraisal_status": (
                     "reviewed_appraisal"
                     if appraisal_gate is not None
                     else "not_appraised_legacy"
                 ),
                 "reason": (
-                    "explicit_acceptance_still_required"
-                    if appraisal_gate is not None
-                    else "finalized_appraisal_binding_and_reviewed_projection_required"
+                    "; ".join(independence_errors)
+                    if independence_errors
+                    else (
+                        "explicit_acceptance_still_required"
+                        if appraisal_gate is not None
+                        else "finalized_appraisal_binding_and_reviewed_projection_required"
+                    )
                 ),
             }
     print(json.dumps(output, ensure_ascii=False, sort_keys=True, indent=2))
@@ -1834,16 +3087,18 @@ def command_bind_appraisal(args: argparse.Namespace) -> int:
     with kn._exclusive_lock(paths):
         state, records, network_ref = validate_live_network(paths)
         live_network = kn._knowledge_network_export(paths, state, records)
-        proposal = validate_proposal_v2(
-            read_contract(args.proposal, "proposal"), network_ref
+        proposal = validate_proposal(
+            read_contract(args.proposal, "proposal"), network_ref, live_network
         )
         require_onboarded_sources(proposal, live_network)
+        require_applicable_source_independence(proposal)
         evidence_pack = read_contract(args.evidence_pack, "evidence_pack")
         validate_evidence_pack(
             evidence_pack,
             proposal,
             network_ref,
             live_network=live_network,
+            expected_authority_file_sha256=args.expected_authority_file_sha256,
         )
         package = read_contract(args.appraisal_package, "appraisal package")
         approval = read_contract(args.appraisal_approval, "appraisal approval")
@@ -1886,10 +3141,13 @@ def command_bind_appraisal(args: argparse.Namespace) -> int:
 def command_review_appraisal(args: argparse.Namespace) -> int:
     paths = kn._safe_paths(args.root, args.network_id)
     with kn._exclusive_lock(paths):
-        _, records, network_ref = validate_live_network(paths)
-        proposal = validate_proposal_v2(
-            read_contract(args.proposal, "proposal"), network_ref
+        state, records, network_ref = validate_live_network(paths)
+        live_network = kn._knowledge_network_export(paths, state, records)
+        proposal = validate_proposal(
+            read_contract(args.proposal, "proposal"), network_ref, live_network
         )
+        require_onboarded_sources(proposal, live_network)
+        require_applicable_source_independence(proposal)
         package = read_contract(args.appraisal_package, "appraisal package")
         approval = read_contract(args.appraisal_approval, "appraisal approval")
         prepared = read_contract(args.appraisal_prepared, "appraisal preparation")
@@ -1948,15 +3206,21 @@ def command_prepare(args: argparse.Namespace) -> int:
         live_network = kn._knowledge_network_export(paths, state, records)
         proposal = read_contract(args.proposal, "proposal")
         evidence_pack = read_contract(args.evidence_pack, "evidence_pack")
-        if proposal.get("schema") != PATCH_V2_SCHEMA:
-            raise ValueError("prepare accepts only NetworkPatchProposal/v2")
-        proposal = validate_proposal_v2(proposal, network_ref)
+        if proposal.get("schema") not in {
+            PATCH_V2_SCHEMA,
+            PATCH_V3_SCHEMA,
+            PATCH_V4_SCHEMA,
+        }:
+            raise ValueError("prepare accepts only NetworkPatchProposal/v2, v3, or v4")
+        proposal = validate_proposal(proposal, network_ref, live_network)
         require_onboarded_sources(proposal, live_network)
+        require_applicable_source_independence(proposal)
         validate_evidence_pack(
             evidence_pack,
             proposal,
             network_ref,
             live_network=live_network,
+            expected_authority_file_sha256=args.expected_authority_file_sha256,
         )
         _load_optional_appraisal_gate(args, proposal, network_ref, paths, records)
         plan = create_plan(proposal, network_ref)
@@ -2011,7 +3275,11 @@ def execute_staged_operation(
         *operation_arguments(operation),
         *appraisal_cli_args,
     ]
-    with redirect_stdout(stdout), redirect_stderr(stderr):
+    with (
+        kn._network_patch_atomic_context(),
+        redirect_stdout(stdout),
+        redirect_stderr(stderr),
+    ):
         result = kn.main(argv)
     if result != 0:
         reason = (
@@ -2102,6 +3370,50 @@ def decision_event(
     return payload
 
 
+def validate_resolved_derived_gap_postconditions(
+    staged_state: dict[str, Any],
+    staged_records: dict[str, list[dict[str, Any]]],
+    acceptance: dict[str, Any],
+) -> None:
+    """Reject a staged resolution when deterministic derivation still emits it."""
+
+    gaps_by_record = {
+        row.get("record_id"): row
+        for row in staged_records["gaps"]
+        if isinstance(row.get("record_id"), str)
+    }
+    resolved_derived: set[str] = set()
+    for decision in acceptance["decisions"]:
+        if decision["decision"] != "accept":
+            continue
+        for operation in decision["operations"]:
+            if operation["operation_type"] != "transition-gap":
+                continue
+            payload = operation["payload"]
+            if payload["status"] != "resolved":
+                continue
+            prior = gaps_by_record.get(payload["from_record_id"])
+            if not isinstance(prior, dict):
+                continue
+            if (
+                prior.get("derivation_source") == "derive-gaps"
+                or prior.get("source") == "derive-gaps"
+            ):
+                resolved_derived.add(payload["gap_id"])
+    if not resolved_derived:
+        return
+    still_derived = {
+        str(payload["gap_id"])
+        for payload in kn._build_derived_gap_payloads(staged_state, staged_records)
+    }
+    violations = sorted(resolved_derived & still_derived)
+    if violations:
+        raise ValueError(
+            "derived gap postcondition failed; resolved predicates still hold: "
+            f"{violations}"
+        )
+
+
 def command_apply(args: argparse.Namespace) -> int:  # noqa: C901
     paths = kn._safe_paths(args.root, args.network_id)
     proposal_value = read_contract(args.proposal, "proposal")
@@ -2111,15 +3423,21 @@ def command_apply(args: argparse.Namespace) -> int:  # noqa: C901
     with kn._exclusive_lock(paths):
         state, records, network_ref = validate_live_network(paths)
         live_network = kn._knowledge_network_export(paths, state, records)
-        if proposal_value.get("schema") != PATCH_V2_SCHEMA:
-            raise ValueError("apply accepts only NetworkPatchProposal/v2")
-        proposal = validate_proposal_v2(proposal_value, network_ref)
+        if proposal_value.get("schema") not in {
+            PATCH_V2_SCHEMA,
+            PATCH_V3_SCHEMA,
+            PATCH_V4_SCHEMA,
+        }:
+            raise ValueError("apply accepts only NetworkPatchProposal/v2, v3, or v4")
+        proposal = validate_proposal(proposal_value, network_ref, live_network)
         require_onboarded_sources(proposal, live_network)
+        require_applicable_source_independence(proposal)
         validate_evidence_pack(
             evidence_pack_value,
             proposal,
             network_ref,
             live_network=live_network,
+            expected_authority_file_sha256=args.expected_authority_file_sha256,
         )
         appraisal_gate, appraisal_cli_args = _load_optional_appraisal_gate(
             args, proposal, network_ref, paths, records
@@ -2168,6 +3486,9 @@ def command_apply(args: argparse.Namespace) -> int:  # noqa: C901
             staging_paths = kn._safe_paths(str(staging_root), paths.network_id)
             with kn._exclusive_lock(staging_paths):
                 staged_state, staged_records = kn._load_state(staging_paths)
+                validate_resolved_derived_gap_postconditions(
+                    staged_state, staged_records, acceptance
+                )
                 event_payload = decision_event(
                     proposal, plan, acceptance, appraisal_gate
                 )
@@ -2248,15 +3569,26 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--appraisal-binding")
         command.add_argument("--appraisal-projection")
 
+    def add_collection_authority_pin(command: argparse.ArgumentParser) -> None:
+        command.add_argument(
+            "--expected-authority-file-sha256",
+            help=(
+                "caller-held SHA-256 of the exact detached collection-consumption "
+                "authority file; required at runtime for proposal v3/v4"
+            ),
+        )
+
     validate = commands.add_parser("validate-patch")
     validate.add_argument("--proposal", required=True)
     validate.add_argument("--evidence-pack", required=True)
+    add_collection_authority_pin(validate)
     add_appraisal_gate(validate)
     validate.set_defaults(func=command_validate)
     prepare = commands.add_parser("prepare-patch")
     prepare.add_argument("--proposal", required=True)
     prepare.add_argument("--evidence-pack", required=True)
     prepare.add_argument("--output", required=True)
+    add_collection_authority_pin(prepare)
     add_appraisal_gate(prepare)
     prepare.set_defaults(func=command_prepare)
     apply = commands.add_parser("apply-patch")
@@ -2265,6 +3597,7 @@ def build_parser() -> argparse.ArgumentParser:
     apply.add_argument("--plan", required=True)
     apply.add_argument("--acceptance", required=True)
     apply.add_argument("--dry-run", action="store_true")
+    add_collection_authority_pin(apply)
     add_appraisal_gate(apply)
     apply.set_defaults(func=command_apply)
     bind = commands.add_parser("bind-appraisal")
@@ -2277,6 +3610,7 @@ def build_parser() -> argparse.ArgumentParser:
     bind.add_argument("--appraisal-owner-bundle", required=True)
     bind.add_argument("--appraisal-lineage", action="append", default=[])
     bind.add_argument("--expected-authority-sha256", required=True)
+    add_collection_authority_pin(bind)
     bind.add_argument("--as-of", required=True)
     bind.add_argument("--output", required=True)
     bind.set_defaults(func=command_bind_appraisal)

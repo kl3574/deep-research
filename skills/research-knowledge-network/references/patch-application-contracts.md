@@ -12,14 +12,33 @@ content-derived IDs and digests, checks the current exported network snapshot,
 and enforces decisive independently verified full-text evidence. Scientific
 meaning is authorized only by a separate `NetworkPatchAcceptance/v1`.
 
+`NetworkPatchProposal/v3` is the original applicable multi-reading route for a
+new high-impact claim. It preserves the one-paper boundary of
+`PaperReadingReportSet/v2` and
+binds two or more such lineages through a replayed
+`PaperReadingEvidenceCollection/v1`. The proposal is emitted only after NGD
+replays a detached
+`ReviewedEvidenceCollectionConsumptionAuthority/v1` against the exact
+preconsumption `ReviewedGapSelection/v2` hypotheses, LFR request set, and
+reading collection. A v2 high-impact, single-source proposal remains readable
+for audit, but preparation, appraisal binding, and apply reject it.
+
+`NetworkPatchProposal/v4` preserves v3's authorized multi-reading envelope and
+adds a closed existing-claim evidence-extension route. V4 route selection is
+determined only from the exact current origin-gap rows: all claimless origins
+use the unchanged new-claim route; origins that all carry one identical,
+nonempty `claim_id` use the extension route. Mixed claimless/claim-bound origins
+or multiple claim IDs are invalid. V4 never converts to v3 for hashing or
+validation; its proposal/action IDs bind the native v4 object.
+
 The acceptance is a governance authorization, not scientific verification.
 Without a configured cryptographic trust store, its operator and authority
 identities are auditable assertions. The CLI therefore always requires a
 separate explicit acceptance file and never manufactures or self-authorizes one.
 
-Every accepted scientific operation additionally requires an
-`EvidenceAppraisalBinding/v1` and reviewed
-`EvidenceAppraisalNetworkProjection/v1`. `bind-appraisal` accepts only a package
+Every accepted scientific operation additionally requires a schema-matched
+`EvidenceAppraisalBinding/v1|v2` and reviewed
+`EvidenceAppraisalNetworkProjection/v1|v2`. `bind-appraisal` accepts only a package
 that the evidence-appraisal owner can replay from the detached approval,
 prepared request, independent review, actual `EvidenceAppraisalOwnerBundle/v1`
 files and verification receipts, complete predecessor lineage, and an externally
@@ -45,6 +64,37 @@ export. That call reopens the source bundle/source, dossier/report projection,
 and independent verification artifacts. Its regenerated v2 proposal must equal
 the submitted proposal exactly. Runtime absolute paths never enter the proposal,
 network ledger, or published examples.
+
+## `NetworkPatchEvidencePack/v2`
+
+Proposal v3/v4 uses the closed runtime inventory
+`preconsumption_hypotheses`, `review_requests`, `reading_collection`, and
+`consumption_authority`, each as a canonical absolute path plus raw SHA-256.
+The first artifact must be the directly reviewed, still-`selected`
+`KnowledgeGapHypotheses/v1`; caller-authored `results` or `content_found` state
+is not a substitute. `review_requests` is the exact
+`LearnFromPapersRequestSet/v1`, and `consumption_authority` is the detached
+`ReviewedEvidenceCollectionConsumptionAuthority/v1`.
+
+RKN stable-reads all four files, validates the authority through NGD's public
+owner API, and copies their exact bytes into a private snapshot. It then calls
+the schema-matched path-based
+`network_gap_discovery.propose_patch_v3|propose_patch_v4`, which replays the
+authorized consume before proposing. The regenerated proposal must equal the
+submitted proposal exactly, including `consumption_ref`; all four original
+files are postchecked for drift. The collection owner separately reopens every
+reading group with the official LFP validators and retains ownership of its
+report, dossier, source, and verification-tree paths.
+
+For every v3/v4 `validate-patch`, `prepare-patch`, `bind-appraisal`, and
+`apply-patch` call, the caller must also pass
+`--expected-authority-file-sha256`. This is the SHA-256 of the exact authority
+file bytes and is independent of the pack, proposal, and authority's canonical
+content digest. It is never inferred from those self-resealable artifacts.
+Missing or wrong external pins, missing or tampered authorities, raw/canonical
+binding drift, and handcrafted postconsumption hypotheses fail closed. Proposal
+v1/v2 plus EvidencePack/v1 retain their existing behavior and require no such
+pin.
 
 ## Digest convention
 
@@ -153,14 +203,112 @@ requires `relation=supports`, `access_level=full_text`,
 `projection_status=decisive`, and
 `verification.mode=independent_source_check|expert_review`. A URL cannot be an
 evidence locator, and `source_ref` must be a local artifact filename.
+`evidence_id` must already satisfy the materializable RKN evidence-ID grammar:
+2–255 characters from `[A-Za-z0-9._-]`, starting alphanumerically. Proposal
+validation rejects an out-of-grammar ID before appraisal, planning, or staging.
 RKN `independence_group` is always the evidence `source_id` lineage. Reviewer or
 verifier identity remains audit provenance and must never stand in for source
 independence: two verifiers of one source are one source stream, while one
 verifier checking two sources leaves two source streams.
 
+## `NetworkPatchProposal/v3`
+
+V3 adds top-level `reading_collection_ref {collection_id, collection_digest}`
+and the exact authorized-consumption receipt:
+
+```text
+consumption_ref = {
+  schema = ReviewedEvidenceCollectionConsumption/v1,
+  route = direct_reviewed_selection,
+  authority_id, authority_digest, authority_file_sha256,
+  consumed_hypotheses_sha256
+}
+```
+
+The authority ID is derived from the canonical authority digest, while
+`authority_file_sha256` binds the detached file's exact bytes. The consumed hash
+binds the deterministic consumed hypotheses with `cycle_state.consumption_ref`
+omitted to avoid self-reference. NGD copies the cycle receipt byte-for-byte into
+the proposal; the RKN proposal validators revalidate it, and EvidencePack/v2
+must reconstruct the identical receipt from the authority plus caller-held raw
+pin.
+
+V3 admits only materializable `propose_relation` actions. Each action adds exact
+`subject_ref`, ordered `origin_gap_refs`, and ordered `reading_group_refs`:
+
+```text
+subject_ref = {subject_id, subject_digest}
+origin_gap_ref = {gap_id, record_id, sequence, status, sha256}
+reading_group_ref = {
+  reading_group_id, reading_group_digest, source_id,
+  report_set_id, report_set_digest
+}
+```
+
+Every origin ref must be a real current exported gap record, never a `KGH-*`
+hypothesis ID. Every group ref equals the collection projection in the same
+order. Reviewed bases preserve that order, cover every group, use at least two
+distinct source IDs, and contain full-text decisive support.
+
+`NetworkPatchTargetClaim/v2` binds the reviewed claim subject instead of
+inferring target semantics from a query. It contains the exact claim text,
+impact, typed scope, coverage/profile lists, target signature, `subject_ref`,
+`origin_gap_refs`, and one ordered `report_claim_ref` per basis. Each report ref
+binds its basis, reading group, report claim, and reading report IDs/digests.
+Coverage dimensions and benchmark profiles may be empty, but every supplied
+value must already be declared by the bound network requirements; injection or
+defaulting fails closed.
+
+## `NetworkPatchProposal/v4`
+
+V4 has the same closed top-level fields as v3, with schema/version
+`NetworkPatchProposal/v4` / `4.0`. It retains the exact consumption and reading-
+collection references and uses the same EvidencePack/v2 replay. Each action has
+the v3 common fields, but is a closed union with exactly one route payload:
+
+- new claim: `action_type=propose_relation` and
+  `target_claim=NetworkPatchTargetClaim/v2`, with no `existing_claim_ref`;
+- existing claim: `action_type=propose_evidence_extension` and
+  `existing_claim_ref=NetworkPatchExistingClaimRef/v1`, with no `target_claim`.
+
+The new-claim route is valid only when every bound current origin gap is
+claimless. The extension route is valid only when every origin gap carries the
+same nonempty `claim_id`. Mixed claimless/claim-bound origins, multiple claim
+IDs, a route/action mismatch, or either union member carrying both/neither
+payload fails closed.
+
+`NetworkPatchExistingClaimRef/v1` is closed:
+
+```text
+schema = NetworkPatchExistingClaimRef/v1
+schema_version = 1.0
+claim_id
+claim_record_ref = {record_id, sequence, sha256}
+claim_semantics = {
+  claim_text, entity_id, impact, is_factual,
+  scope_statement, assumptions, conditions, units, exclusions, defeaters,
+  coverage_dimensions, benchmark_profiles, supersedes
+}
+scope_digest
+claim_semantic_digest
+```
+
+`claim_record_ref.sha256` is the canonical SHA-256 of the complete current claim
+ledger row as projected in `KnowledgeNetwork/v1.claims`, including its audit
+envelope. `scope_digest` hashes exactly `scope_statement` plus the seven typed
+lists. `claim_semantic_digest` hashes all thirteen `claim_semantics` fields. The
+consumer requires exactly one matching live claim row and rejects a missing,
+duplicate, stale, semantically rewritten, or superseded claim.
+
+The reviewed `subject_ref` is reconstructed from the action hypothesis ID and
+target signature, the existing claim's exact text, impact, and full typed scope,
+plus the ordered origin-gap refs. The action hypothesis must equal the live claim
+text. Thus a producer cannot use a newly worded subject to append evidence to an
+older claim merely because the claim ID matches.
+
 ## Plan and acceptance
 
-`prepare-patch` projects every v2 action into a content-addressed
+`prepare-patch` projects every applicable v2/v3/v4 action into a content-addressed
 `NetworkPatchPlan/v1` with status `pending_acceptance`. It cannot execute.
 
 Validation and preparation may retain reject/defer governance without an
@@ -182,7 +330,17 @@ Allowed typed operations are `add-claim`, `add-evidence`, `add-relation`, and
 existing CLI command arguments exactly, and every operation carries exact
 `basis_id`/`basis_digest` references from its own action. `propose_relation`
 allows one basis-matched evidence append per basis followed by exactly one
-basis-matched relation and an optional final transition. `propose_evidence`
+basis-matched relation and an optional final transition in v2. V3 instead
+requires one final transition for every ordered `origin_gap_ref`; each binds all
+action bases and admitted evidence, targets the exact current record, and
+resolves the real gap. Omitting, duplicating, or reordering any transition
+rejects the whole acceptance before staging. V4's new-claim route keeps the v3
+sequence. Its extension route is exactly `N add-evidence`, then
+`N add-relation`, then one `transition-gap` for each of the `M` ordered origins;
+it permits zero `add-claim` operations. Both v4 routes reuse
+`EvidenceAppraisalBinding/v2` and
+`EvidenceAppraisalNetworkProjection/v2`. Each resolved extension transition sets
+`resolution_source` to the bound existing `claim_id`. `propose_evidence`
 allows one exact evidence append and optional transition. Until the upstream
 action carries a closed, hashed target-node payload, `propose_node` may be
 rejected or deferred but can never be accepted. It cannot inject source metadata
@@ -226,6 +384,14 @@ decisions fail closed. Governance events advance the network audit snapshot
 even when every decision is reject or defer. Therefore a deferred action
 requires a newly regenerated, rebased proposal/plan/acceptance bound to the next
 snapshot; the original proposal cannot be reused.
+
+After all accepted operations run in staging and before the decision event or
+any live replacement, RKN recomputes the complete deterministic derived-gap set.
+For each accepted `resolved` transition whose prior row was emitted by
+`derive-gaps`, the same gap ID must no longer be derivable. If its predicate
+still holds (for example, qualified-only evidence still leaves an unsupported-
+high-impact gap), the staged transaction fails and the live bytes remain
+unchanged.
 
 `prepare-patch` writes only a previously nonexistent direct child of
 `<root>/patch-plans`. Existing targets, symlinks or symlink parents, aliases of

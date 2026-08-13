@@ -62,6 +62,51 @@ class NetworkCliContractTests(unittest.TestCase):
             loaded = load_exported_knowledge_network(path)
             self.assertEqual(loaded["schema"], "KnowledgeNetwork/v1")
 
+    def test_collection_commands_require_detached_authority_and_external_raw_pin(self):
+        consume = parser().parse_args(
+            [
+                "consume-reading-collection",
+                "--hypotheses",
+                "/tmp/selected.json",
+                "--network",
+                "/tmp/network.json",
+                "--review-requests",
+                "/tmp/lfp.json",
+                "--reading-collection",
+                "/tmp/collection.json",
+                "--consumption-authority",
+                "/tmp/authority.json",
+                "--expected-authority-file-sha256",
+                "a" * 64,
+                "--output",
+                "/tmp/consumed.json",
+            ]
+        )
+        self.assertEqual(consume.consumption_authority, "/tmp/authority.json")
+        self.assertEqual(consume.expected_authority_file_sha256, "a" * 64)
+
+        propose = parser().parse_args(
+            [
+                "propose-patch-v3",
+                "--input",
+                "/tmp/selected.json",
+                "--network",
+                "/tmp/network.json",
+                "--review-requests",
+                "/tmp/lfp.json",
+                "--reading-collection",
+                "/tmp/collection.json",
+                "--consumption-authority",
+                "/tmp/authority.json",
+                "--expected-authority-file-sha256",
+                "b" * 64,
+                "--output",
+                "/tmp/proposal.json",
+            ]
+        )
+        self.assertEqual(propose.input, "/tmp/selected.json")
+        self.assertEqual(propose.expected_authority_file_sha256, "b" * 64)
+
 
 if __name__ == "__main__":
     unittest.main()

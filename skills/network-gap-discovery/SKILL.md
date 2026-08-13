@@ -21,9 +21,12 @@ hypotheses without mutating research state.
    paper needs, criteria, or query text.
 4. When review narrows the deterministic priority set, run `select` with the
    untouched `prioritize` output and a digest-bound `ReviewedGapSelection/v1`
-   allowlist. The command preserves every unselected candidate as `proposed`,
-   rejects direct scheduling-status edits, and records the reviewed selection
-   reference without interpreting evidence.
+   allowlist. Use `ReviewedGapSelection/v2` when the review must also authorize
+   exact claim subjects, coverage dimensions, benchmark profiles, and current
+   origin-gap record references for a multi-reading patch. The command preserves
+   every unselected candidate as `proposed`, rejects direct scheduling-status
+   edits, and records the reviewed selection reference without interpreting
+   evidence.
 5. Emit search requests only from a completed `select` output. The emitter
    reconstructs the untouched `prioritize` output and the exact
    `ReviewedGapSelection/v1`, then rechecks both digests in
@@ -32,8 +35,24 @@ hypotheses without mutating research state.
    hypotheses are emitted. Proposed, structural, or semantically unenriched
    hypotheses never become requests. Search, reading, and evidence review
    happen in their owning skills.
-6. Consume reviewed results and emit a proposal-only network patch. A separate
-   `$research-knowledge-network` step validates and applies any accepted change.
+6. Consume reviewed results and emit a proposal-only network patch. The legacy
+   single-paper route remains separate. Multi-reading collection consumption
+   admits only an exact `ReviewedGapSelection/v2` preconsumption file behind a
+   detached, independently reviewed, raw-file-pinned
+   `ReviewedEvidenceCollectionConsumptionAuthority/v1`; a handwritten
+   `results` status is not authority. The path-owned consumer stable-reads and
+   replays the exact LFR set plus `PaperReadingEvidenceCollection/v1`, and
+   `NetworkPatchProposal/v3` reruns that deterministic consumption internally.
+   Use additive `NetworkPatchProposal/v4` when those exact origin gaps either
+   all remain claimless or all bind the same current claim: the former preserves
+   the v3 new-claim action, while the latter emits only an evidence-extension
+   action bound to the full current claim ledger row and exact typed claim
+   semantics. Mixed, multi-claim, stale, superseded, or subject-mismatched
+   origins fail closed. Both versions preserve collection order, every current
+   origin-gap record reference, and one byte-identical `consumption_ref` in
+   cycle and proposal. A separate
+   `$research-knowledge-network` step appraises, validates, and atomically
+   applies any accepted change.
 
 Use `scripts/network_gap_discovery.py --help` for commands and schemas.
 
@@ -44,7 +63,11 @@ Use `scripts/network_gap_discovery.py --help` for commands and schemas.
 - Keep candidate signals and generated hypotheses within the documented total
   budget; preserve suppression counts and full inventories for audit.
 - Dedupe semantically equivalent signals across gap, claim, isolate, and
-  structural families.
+  structural families. When multiple current open gaps share one semantic
+  claim subject, coalesce every ordered gap reference into the retained signal
+  and hypothesis grounds; deduplication must never discard a gap that a later
+  atomic patch must transition. Cross-family duplicates remain suppressed audit
+  signals and never inject node or relation refs into open-gap grounds.
 - Missing, malformed, stale, or mismatched inputs fail closed. Never promote an
   unreviewed search result into evidence or a graph mutation.
 

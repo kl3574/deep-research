@@ -61,6 +61,15 @@ class NetworkPatchTest(unittest.TestCase):
         self.gap_stub.propose_patch.side_effect = lambda *args, **kwargs: (
             self._active_proposal
         )
+        self.gap_stub.propose_patch_v3.side_effect = lambda *args, **kwargs: (
+            self._active_proposal
+        )
+        self.gap_stub.propose_patch_v4.side_effect = lambda *args, **kwargs: (
+            self._active_proposal
+        )
+        self.gap_stub.validate_reviewed_collection_consumption_authority.side_effect = (
+            lambda value: value
+        )
         self.gap_patcher = mock.patch.object(
             PATCH, "load_gap_module", return_value=self.gap_stub
         )
@@ -92,9 +101,11 @@ class NetworkPatchTest(unittest.TestCase):
                 },
             }
         }
-        legacy_append = lambda paths, records, ledger, record_id, payload, **_: (  # noqa: E731
-            KN._append_candidate(paths, records, ledger, record_id, payload)
-        )
+        self.fake_gate = fake_gate
+
+        def legacy_append(paths, records, ledger, record_id, payload, **_):
+            return KN._append_candidate(paths, records, ledger, record_id, payload)
+
         self.science_append_patcher = mock.patch.object(
             KN,
             "_append_scientific_candidate",
@@ -269,7 +280,7 @@ class NetworkPatchTest(unittest.TestCase):
                 "schema_version": "1.0",
                 "claim_text": f"Reviewed scientific relation {suffix}",
                 "entity_id": None,
-                "impact": "high",
+                "impact": "low",
                 "coverage_dimensions": scope["coverage_dimensions"],
                 "benchmark_profiles": scope["benchmark_profiles"],
                 "supersedes": None,
@@ -320,6 +331,426 @@ class NetworkPatchTest(unittest.TestCase):
             "proposal_digest",
             "network-patch-proposal-",
         )
+
+    def proposal_v3(self) -> tuple[dict, dict]:
+        code, _, error = self.kn(
+            [
+                "add-source",
+                "--source-id",
+                "source-02",
+                "--canonical-identity",
+                "doi:10.1000/example-2",
+                "--canonical-version",
+                "v1",
+                "--read-version",
+                "reviewed-v1",
+                "--read-depth",
+                "full",
+                "--version-hash",
+                "sha256:" + "e" * 64,
+                "--role",
+                "source",
+            ]
+        )
+        self.assertEqual(code, 0, error)
+        code, _, error = self.kn(
+            [
+                "record-gap",
+                "--gap-id",
+                "gap-v3-explicit",
+                "--gap-type",
+                "explicit",
+                "--impact",
+                "high",
+                "--priority",
+                "P0",
+                "--decision-impact",
+                "high",
+                "--status",
+                "open",
+                "--source",
+                "manual-test",
+                "--description",
+                "A second real origin gap requires the same atomic evidence.",
+            ]
+        )
+        self.assertEqual(code, 0, error)
+        code, _, error = self.kn(["derive-gaps"])
+        self.assertEqual(code, 0, error)
+        paths = KN._safe_paths(str(self.root), self.network_id)
+        state, records = KN._load_state(paths)
+        live_network = KN._knowledge_network_export(paths, state, records)
+        open_gaps = [item for item in live_network["gaps"] if item["status"] == "open"]
+        self.assertGreaterEqual(len(open_gaps), 2)
+        origin_refs = [
+            {"gap_id": gap["gap_id"], **gap["record_ref"]} for gap in open_gaps[:2]
+        ]
+
+        first = self.basis("v3-a")
+        first.update(
+            {
+                "report_set_id": "report-set-v3-a",
+                "report_set_digest": "2" * 64,
+                "claim_id": "report-claim-v3-a",
+                "claim_digest": "7" * 64,
+            }
+        )
+        first = attach(
+            PATCH.without(first, "basis_id", "basis_digest"),
+            "basis_id",
+            "basis_digest",
+            "network-patch-basis-",
+        )
+        second = self.basis("v3-b")
+        second.update(
+            {
+                "source_id": "source-02",
+                "source_digest": "e" * 64,
+                "source_artifact_sha256": "e" * 64,
+                "report_set_id": "report-set-v3-b",
+                "report_set_digest": "f" * 64,
+                "claim_id": "report-claim-v3-b",
+                "claim_digest": "0" * 64,
+            }
+        )
+        second = attach(
+            PATCH.without(second, "basis_id", "basis_digest"),
+            "basis_id",
+            "basis_digest",
+            "network-patch-basis-",
+        )
+        bases = [first, second]
+        groups = [
+            {
+                "reading_group_id": "paper-reading-evidence-group-" + prefix * 16,
+                "reading_group_digest": prefix * 64,
+                "source_id": basis["source_id"],
+                "report_set_id": basis["report_set_id"],
+                "report_set_digest": basis["report_set_digest"],
+            }
+            for prefix, basis in zip(("1", "2"), bases)
+        ]
+        target_signature = {
+            "target_kind": "relation",
+            "signature": "two independent readings support a bounded relation",
+        }
+        subject_ref = {
+            "subject_id": "reviewed-gap-claim-subject-" + "c" * 16,
+            "subject_digest": "c" * 64,
+        }
+        scope = {
+            "scope_statement": "Bounded two-source claim scope.",
+            "assumptions": ["fixed reviewed estimand"],
+            "conditions": ["two independent source lineages"],
+            "units": ["dimensionless"],
+            "exclusions": ["single-source extrapolation"],
+            "defeaters": ["source identity collapse"],
+            "coverage_dimensions": [],
+            "benchmark_profiles": [],
+        }
+        target = {
+            "schema": "NetworkPatchTargetClaim/v2",
+            "schema_version": "2.0",
+            "claim_text": "Two independent readings support this bounded relation.",
+            "entity_id": None,
+            "impact": "high",
+            "coverage_dimensions": scope["coverage_dimensions"],
+            "benchmark_profiles": scope["benchmark_profiles"],
+            "supersedes": None,
+            "target_signature": target_signature,
+            "subject_ref": subject_ref,
+            "origin_gap_refs": origin_refs,
+            "report_claim_refs": [
+                {
+                    "basis_id": basis["basis_id"],
+                    "basis_digest": basis["basis_digest"],
+                    "reading_group_id": group["reading_group_id"],
+                    "claim_id": basis["claim_id"],
+                    "claim_digest": basis["claim_digest"],
+                    "reading_report_id": basis["reading_report_id"],
+                    "reading_report_digest": basis["reading_report_digest"],
+                }
+                for basis, group in zip(bases, groups)
+            ],
+            "scope": scope,
+            "scope_digest": PATCH.digest_json(scope),
+        }
+        target["target_claim_digest"] = PATCH.digest_json(target)
+        target["claim_id"] = "claim-target-" + target["target_claim_digest"][:16]
+        action = attach(
+            {
+                "action_type": "propose_relation",
+                "action_status": "proposed",
+                "hypothesis_id": "KGH-v3-multi-source",
+                "target_signature": target_signature,
+                "hypothesis": "Two sources support a bounded high-impact claim.",
+                "subject_ref": subject_ref,
+                "origin_gap_refs": origin_refs,
+                "reading_group_refs": groups,
+                "reviewed_evidence": bases,
+                "target_claim": target,
+            },
+            "action_id",
+            "action_digest",
+            "network-patch-action-",
+        )
+        proposal = attach(
+            {
+                "schema": "NetworkPatchProposal/v3",
+                "schema_version": "3.0",
+                "network_ref": self.current_ref(),
+                "request_ref": {
+                    "request_set_id": "request-set-v3",
+                    "request_set_digest": "a" * 64,
+                    "review_request_set_id": "review-request-set-v3",
+                    "review_request_set_digest": "b" * 64,
+                },
+                "consumption_ref": {
+                    "schema": "ReviewedEvidenceCollectionConsumption/v1",
+                    "route": "direct_reviewed_selection",
+                    "authority_id": (
+                        "reviewed-collection-consumption-authority-" + "9" * 16
+                    ),
+                    "authority_digest": "9" * 64,
+                    "authority_file_sha256": "8" * 64,
+                    "consumed_hypotheses_sha256": "7" * 64,
+                },
+                "reading_collection_ref": {
+                    "collection_id": "paper-reading-evidence-collection-" + "d" * 16,
+                    "collection_digest": "d" * 64,
+                },
+                "generated_at": "2026-08-11T00:00:00Z",
+                "proposal_only": True,
+                "novelty_claimed": False,
+                "review_gate": "pending_research_knowledge_network_acceptance",
+                "actions": [action],
+            },
+            "proposal_id",
+            "proposal_digest",
+            "network-patch-proposal-",
+        )
+        return proposal, live_network
+
+    def proposal_v4_extension(self) -> tuple[dict, dict]:
+        code, _, error = self.kn(
+            [
+                "add-source",
+                "--source-id",
+                "source-02",
+                "--canonical-identity",
+                "doi:10.1000/example-2",
+                "--canonical-version",
+                "v1",
+                "--read-version",
+                "reviewed-v1",
+                "--read-depth",
+                "full",
+                "--version-hash",
+                "sha256:" + "e" * 64,
+                "--role",
+                "source",
+            ]
+        )
+        self.assertEqual(code, 0, error)
+        claim_text = "Two independent readings extend this bounded existing claim."
+        code, _, error = self.kn(
+            [
+                "add-claim",
+                "--claim-id",
+                "claim-existing-v4",
+                "--claim-text",
+                claim_text,
+                "--impact",
+                "high",
+                "--scope-statement",
+                "Bounded existing-claim extension scope.",
+                "--assumption",
+                "fixed reviewed estimand",
+                "--condition",
+                "two independent source lineages",
+                "--unit",
+                "dimensionless",
+                "--exclusion",
+                "single-source extrapolation",
+                "--defeater",
+                "source identity collapse",
+            ]
+        )
+        self.assertEqual(code, 0, error)
+        code, _, error = self.kn(["derive-gaps"])
+        self.assertEqual(code, 0, error)
+        paths = KN._safe_paths(str(self.root), self.network_id)
+        state, records = KN._load_state(paths)
+        live_network = KN._knowledge_network_export(paths, state, records)
+        origin_refs = [
+            {"gap_id": gap["gap_id"], **gap["record_ref"]}
+            for gap in live_network["gaps"]
+            if gap.get("claim_id") == "claim-existing-v4" and gap["status"] == "open"
+        ]
+        self.assertEqual(len(origin_refs), 2)
+
+        first = self.basis("v4-a")
+        first.update(
+            {
+                "report_set_id": "report-set-v4-a",
+                "report_set_digest": "2" * 64,
+                "claim_id": "report-claim-v4-a",
+                "claim_digest": "7" * 64,
+            }
+        )
+        first = attach(
+            PATCH.without(first, "basis_id", "basis_digest"),
+            "basis_id",
+            "basis_digest",
+            "network-patch-basis-",
+        )
+        second = self.basis("v4-b")
+        second.update(
+            {
+                "source_id": "source-02",
+                "source_digest": "e" * 64,
+                "source_artifact_sha256": "e" * 64,
+                "report_set_id": "report-set-v4-b",
+                "report_set_digest": "f" * 64,
+                "claim_id": "report-claim-v4-b",
+                "claim_digest": "0" * 64,
+            }
+        )
+        second = attach(
+            PATCH.without(second, "basis_id", "basis_digest"),
+            "basis_id",
+            "basis_digest",
+            "network-patch-basis-",
+        )
+        bases = [first, second]
+        groups = [
+            {
+                "reading_group_id": "paper-reading-evidence-group-" + prefix * 16,
+                "reading_group_digest": prefix * 64,
+                "source_id": basis["source_id"],
+                "report_set_id": basis["report_set_id"],
+                "report_set_digest": basis["report_set_digest"],
+            }
+            for prefix, basis in zip(("3", "4"), bases)
+        ]
+        claim_row = next(
+            row
+            for row in live_network["claims"]
+            if row["claim_id"] == "claim-existing-v4"
+        )
+        semantic_fields = (
+            "claim_text",
+            "entity_id",
+            "impact",
+            "is_factual",
+            "scope_statement",
+            "assumptions",
+            "conditions",
+            "units",
+            "exclusions",
+            "defeaters",
+            "coverage_dimensions",
+            "benchmark_profiles",
+            "supersedes",
+        )
+        claim_semantics = {field: claim_row[field] for field in semantic_fields}
+        scope = {
+            field: claim_semantics[field]
+            for field in (
+                "scope_statement",
+                "assumptions",
+                "conditions",
+                "units",
+                "exclusions",
+                "defeaters",
+                "coverage_dimensions",
+                "benchmark_profiles",
+            )
+        }
+        existing_claim_ref = {
+            "schema": "NetworkPatchExistingClaimRef/v1",
+            "schema_version": "1.0",
+            "claim_id": claim_row["claim_id"],
+            "claim_record_ref": {
+                "record_id": claim_row["record_id"],
+                "sequence": claim_row["sequence"],
+                "sha256": PATCH.digest_json(claim_row),
+            },
+            "claim_semantics": claim_semantics,
+            "scope_digest": PATCH.digest_json(scope),
+            "claim_semantic_digest": PATCH.digest_json(claim_semantics),
+        }
+        hypothesis_id = "KGH-v4-existing-claim-extension"
+        target_signature = {
+            "target_kind": "relation",
+            "signature": "two independent readings extend a bounded existing claim",
+        }
+        subject = {
+            "hypothesis_id": hypothesis_id,
+            "claim_text": claim_text,
+            "impact": claim_row["impact"],
+            "target_signature": target_signature["signature"],
+            **scope,
+            "origin_gap_refs": origin_refs,
+        }
+        subject_digest = PATCH.digest_json(subject)
+        subject_ref = {
+            "subject_id": "reviewed-gap-claim-subject-" + subject_digest[:16],
+            "subject_digest": subject_digest,
+        }
+        action = attach(
+            {
+                "action_type": "propose_evidence_extension",
+                "action_status": "proposed",
+                "hypothesis_id": hypothesis_id,
+                "target_signature": target_signature,
+                "hypothesis": claim_text,
+                "subject_ref": subject_ref,
+                "origin_gap_refs": origin_refs,
+                "reading_group_refs": groups,
+                "reviewed_evidence": bases,
+                "existing_claim_ref": existing_claim_ref,
+            },
+            "action_id",
+            "action_digest",
+            "network-patch-action-",
+        )
+        proposal = attach(
+            {
+                "schema": "NetworkPatchProposal/v4",
+                "schema_version": "4.0",
+                "network_ref": self.current_ref(),
+                "request_ref": {
+                    "request_set_id": "request-set-v4",
+                    "request_set_digest": "a" * 64,
+                    "review_request_set_id": "review-request-set-v4",
+                    "review_request_set_digest": "b" * 64,
+                },
+                "consumption_ref": {
+                    "schema": "ReviewedEvidenceCollectionConsumption/v1",
+                    "route": "direct_reviewed_selection",
+                    "authority_id": (
+                        "reviewed-collection-consumption-authority-" + "9" * 16
+                    ),
+                    "authority_digest": "9" * 64,
+                    "authority_file_sha256": "8" * 64,
+                    "consumed_hypotheses_sha256": "7" * 64,
+                },
+                "reading_collection_ref": {
+                    "collection_id": "paper-reading-evidence-collection-" + "d" * 16,
+                    "collection_digest": "d" * 64,
+                },
+                "generated_at": "2026-08-12T00:00:00Z",
+                "proposal_only": True,
+                "novelty_claimed": False,
+                "review_gate": "pending_research_knowledge_network_acceptance",
+                "actions": [action],
+            },
+            "proposal_id",
+            "proposal_digest",
+            "network-patch-proposal-",
+        )
+        return proposal, live_network
 
     def operation(
         self, operation_type: str, payload: dict, basis_rows: list[dict]
@@ -463,6 +894,94 @@ class NetworkPatchTest(unittest.TestCase):
                 "authority_basis": [authority],
             },
             "decisions": decisions,
+        }
+        return attach(
+            value,
+            "acceptance_id",
+            "acceptance_digest",
+            "network-patch-acceptance-",
+        )
+
+    def extension_acceptance(self, proposal: dict, plan: dict) -> dict:
+        authority = self.authority()
+        action = proposal["actions"][0]
+        bases = action["reviewed_evidence"]
+        operations = [
+            self.operation(
+                "add-evidence",
+                {
+                    "evidence_id": basis["evidence_id"],
+                    "claim_id": action["existing_claim_ref"]["claim_id"],
+                    "source_id": basis["source_id"],
+                    "polarity": "supports",
+                    "exact_locator": basis["evidence_locator"],
+                    "independence_group": basis["source_id"],
+                    "summary": action["hypothesis"],
+                    "notes": "accepted from NetworkPatchProposal/v4",
+                    "supersedes": None,
+                },
+                [basis],
+            )
+            for basis in bases
+        ]
+        operations.extend(
+            self.operation(
+                "add-relation",
+                {
+                    "relation_id": PATCH.relation_operation_id(action, basis),
+                    "relation_type": "supports",
+                    "from_ref": "claim:" + action["existing_claim_ref"]["claim_id"],
+                    "to_ref": "evidence:" + basis["evidence_id"],
+                    "notes": "network-patch-action:" + action["action_digest"],
+                    "supersedes": None,
+                },
+                [basis],
+            )
+            for basis in bases
+        )
+        operations.extend(
+            self.operation(
+                "transition-gap",
+                {
+                    "gap_id": origin["gap_id"],
+                    "from_record_id": origin["record_id"],
+                    "status": "resolved",
+                    "reason": "The existing claim now has decisive multi-source evidence.",
+                    "evidence_refs": [basis["evidence_id"] for basis in bases],
+                    "resolution_source": action["existing_claim_ref"]["claim_id"],
+                },
+                bases,
+            )
+            for origin in action["origin_gap_refs"]
+        )
+        value = {
+            "schema": "NetworkPatchAcceptance/v1",
+            "schema_version": "1.0",
+            "network_ref": proposal["network_ref"],
+            "proposal_ref": {
+                "proposal_id": proposal["proposal_id"],
+                "proposal_digest": proposal["proposal_digest"],
+            },
+            "plan_ref": {
+                "plan_id": plan["plan_id"],
+                "plan_digest": plan["plan_digest"],
+            },
+            "decided_at": "2026-08-12T00:20:00Z",
+            "operator": {
+                "operator_id": "review-board-v4",
+                "operator_role": "scientific-curator",
+                "authority_basis": [authority],
+            },
+            "decisions": [
+                {
+                    "action_id": action["action_id"],
+                    "action_digest": action["action_digest"],
+                    "decision": "accept",
+                    "rationale": "Every new source and origin gap passed review.",
+                    "authority_basis_ids": [authority["basis_id"]],
+                    "operations": operations,
+                }
+            ],
         }
         return attach(
             value,
@@ -1254,7 +1773,7 @@ class NetworkPatchTest(unittest.TestCase):
     def test_relation_requires_lossless_target_claim_and_never_defaults_impact(self):
         proposal = self.proposal()
         relation = proposal["actions"][0]
-        self.assertEqual(relation["target_claim"]["impact"], "high")
+        self.assertEqual(relation["target_claim"]["impact"], "low")
         self.assertNotEqual(
             relation["target_claim"]["claim_text"],
             relation["target_signature"]["signature"],
@@ -1272,6 +1791,1270 @@ class NetworkPatchTest(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "target_claim"):
             PATCH.validate_proposal_v2(proposal, self.current_ref())
+
+    def test_v3_requires_two_source_collection_and_current_origin_gap(self):
+        proposal, live_network = self.proposal_v3()
+        validated = PATCH.validate_proposal_v3(
+            copy.deepcopy(proposal), self.current_ref(), live_network
+        )
+        self.assertEqual(validated, proposal)
+        self.assertEqual(
+            [row["source_id"] for row in validated["actions"][0]["reading_group_refs"]],
+            ["source-01", "source-02"],
+        )
+
+        missing_consumption = copy.deepcopy(proposal)
+        missing_consumption.pop("consumption_ref")
+        missing_consumption = attach(
+            PATCH.without(missing_consumption, "proposal_id", "proposal_digest"),
+            "proposal_id",
+            "proposal_digest",
+            "network-patch-proposal-",
+        )
+        with self.assertRaisesRegex(ValueError, "consumption_ref"):
+            PATCH.validate_proposal_v3(
+                missing_consumption, self.current_ref(), live_network
+            )
+
+        wrong_authority_identity = copy.deepcopy(proposal)
+        wrong_authority_identity["consumption_ref"]["authority_id"] = (
+            "reviewed-collection-consumption-authority-" + "0" * 16
+        )
+        wrong_authority_identity = attach(
+            PATCH.without(wrong_authority_identity, "proposal_id", "proposal_digest"),
+            "proposal_id",
+            "proposal_digest",
+            "network-patch-proposal-",
+        )
+        with self.assertRaisesRegex(ValueError, "authority_id"):
+            PATCH.validate_proposal_v3(
+                wrong_authority_identity, self.current_ref(), live_network
+            )
+
+        malformed_raw_pin = copy.deepcopy(proposal)
+        malformed_raw_pin["consumption_ref"]["authority_file_sha256"] = "A" * 64
+        malformed_raw_pin = attach(
+            PATCH.without(malformed_raw_pin, "proposal_id", "proposal_digest"),
+            "proposal_id",
+            "proposal_digest",
+            "network-patch-proposal-",
+        )
+        with self.assertRaisesRegex(ValueError, "authority_file_sha256"):
+            PATCH.validate_proposal_v3(
+                malformed_raw_pin, self.current_ref(), live_network
+            )
+
+        repeated_across_actions = copy.deepcopy(proposal)
+        second_action = PATCH.without(
+            copy.deepcopy(proposal["actions"][0]), "action_id", "action_digest"
+        )
+        second_action["hypothesis_id"] = "KGH-v3-second-subject"
+        second_action["subject_ref"] = {
+            "subject_id": "reviewed-gap-claim-subject-" + "e" * 16,
+            "subject_digest": "e" * 64,
+        }
+        second_target = PATCH.without(
+            second_action["target_claim"], "claim_id", "target_claim_digest"
+        )
+        second_target["subject_ref"] = second_action["subject_ref"]
+        second_action["target_claim"] = attach(
+            second_target,
+            "claim_id",
+            "target_claim_digest",
+            "claim-target-",
+        )
+        repeated_across_actions["actions"].append(
+            attach(
+                second_action,
+                "action_id",
+                "action_digest",
+                "network-patch-action-",
+            )
+        )
+        repeated_across_actions = attach(
+            PATCH.without(repeated_across_actions, "proposal_id", "proposal_digest"),
+            "proposal_id",
+            "proposal_digest",
+            "network-patch-proposal-",
+        )
+        with self.assertRaisesRegex(ValueError, "proposal evidence IDs"):
+            PATCH.validate_proposal_v3(
+                repeated_across_actions, self.current_ref(), live_network
+            )
+
+        stale = copy.deepcopy(proposal)
+        stale["actions"][0]["origin_gap_refs"][0]["sha256"] = "0" * 64
+        stale["actions"][0]["target_claim"]["origin_gap_refs"] = copy.deepcopy(
+            stale["actions"][0]["origin_gap_refs"]
+        )
+        stale["actions"][0]["target_claim"] = attach(
+            PATCH.without(
+                stale["actions"][0]["target_claim"],
+                "claim_id",
+                "target_claim_digest",
+            ),
+            "claim_id",
+            "target_claim_digest",
+            "claim-target-",
+        )
+        stale["actions"][0] = attach(
+            PATCH.without(stale["actions"][0], "action_id", "action_digest"),
+            "action_id",
+            "action_digest",
+            "network-patch-action-",
+        )
+        stale = attach(
+            PATCH.without(stale, "proposal_id", "proposal_digest"),
+            "proposal_id",
+            "proposal_digest",
+            "network-patch-proposal-",
+        )
+        with self.assertRaisesRegex(ValueError, "current gap record"):
+            PATCH.validate_proposal_v3(stale, self.current_ref(), live_network)
+
+        collapsed = copy.deepcopy(proposal)
+        second = collapsed["actions"][0]["reviewed_evidence"][1]
+        second["source_id"] = "source-01"
+        second = attach(
+            PATCH.without(second, "basis_id", "basis_digest"),
+            "basis_id",
+            "basis_digest",
+            "network-patch-basis-",
+        )
+        collapsed["actions"][0]["reviewed_evidence"][1] = second
+        collapsed["actions"][0]["reading_group_refs"][1]["source_id"] = "source-01"
+        with self.assertRaisesRegex(ValueError, "source_id"):
+            PATCH.validate_proposal_v3(collapsed, self.current_ref(), live_network)
+
+        colliding_evidence = copy.deepcopy(proposal)
+        second = colliding_evidence["actions"][0]["reviewed_evidence"][1]
+        second["evidence_id"] = colliding_evidence["actions"][0]["reviewed_evidence"][
+            0
+        ]["evidence_id"]
+        colliding_evidence["actions"][0]["reviewed_evidence"][1] = attach(
+            PATCH.without(second, "basis_id", "basis_digest"),
+            "basis_id",
+            "basis_digest",
+            "network-patch-basis-",
+        )
+        with self.assertRaisesRegex(ValueError, "evidence IDs"):
+            PATCH.validate_proposal_v3(
+                colliding_evidence, self.current_ref(), live_network
+            )
+
+        injected = copy.deepcopy(proposal)
+        target = PATCH.without(
+            injected["actions"][0]["target_claim"],
+            "claim_id",
+            "target_claim_digest",
+        )
+        target["coverage_dimensions"] = ["unbound-injected-dimension"]
+        target["scope"]["coverage_dimensions"] = ["unbound-injected-dimension"]
+        target["scope_digest"] = PATCH.digest_json(target["scope"])
+        injected["actions"][0]["target_claim"] = attach(
+            target,
+            "claim_id",
+            "target_claim_digest",
+            "claim-target-",
+        )
+        injected["actions"][0] = attach(
+            PATCH.without(injected["actions"][0], "action_id", "action_digest"),
+            "action_id",
+            "action_digest",
+            "network-patch-action-",
+        )
+        injected = attach(
+            PATCH.without(injected, "proposal_id", "proposal_digest"),
+            "proposal_id",
+            "proposal_digest",
+            "network-patch-proposal-",
+        )
+        with self.assertRaisesRegex(ValueError, "injects unrequired"):
+            PATCH.validate_proposal_v3(injected, self.current_ref(), live_network)
+
+    def test_v4_existing_claim_extension_has_no_add_claim_operation(self):
+        proposal, live_network = self.proposal_v4_extension()
+        self.assertEqual(
+            PATCH.validate_proposal_v4(
+                copy.deepcopy(proposal), self.current_ref(), live_network
+            ),
+            proposal,
+        )
+        plan = PATCH.create_plan(
+            proposal,
+            self.current_ref(),
+            prepared_at="2026-08-12T00:10:00Z",
+        )
+        self.assertEqual(
+            plan["actions"][0]["allowed_operation_types"],
+            ["add-evidence", "add-relation", "transition-gap"],
+        )
+        acceptance = self.extension_acceptance(proposal, plan)
+        action = proposal["actions"][0]
+        validated = self._real_validate_acceptance(
+            acceptance, proposal, plan, self.current_ref()
+        )
+        operation_types = [
+            operation["operation_type"]
+            for operation in validated["decisions"][0]["operations"]
+        ]
+        basis_count = len(proposal["actions"][0]["reviewed_evidence"])
+        origin_count = len(proposal["actions"][0]["origin_gap_refs"])
+        self.assertEqual(
+            operation_types,
+            ["add-evidence"] * basis_count
+            + ["add-relation"] * basis_count
+            + ["transition-gap"] * origin_count,
+        )
+        self.assertNotIn("add-claim", operation_types)
+
+        semantics = action["existing_claim_ref"]["claim_semantics"]
+        injected = copy.deepcopy(acceptance)
+        injected["decisions"][0]["operations"].insert(
+            0,
+            self.operation(
+                "add-claim",
+                {
+                    "claim_id": action["existing_claim_ref"]["claim_id"],
+                    "claim_text": semantics["claim_text"],
+                    "entity_id": semantics["entity_id"],
+                    "impact": semantics["impact"],
+                    "scope_statement": semantics["scope_statement"],
+                    "assumptions": semantics["assumptions"],
+                    "conditions": semantics["conditions"],
+                    "units": semantics["units"],
+                    "exclusions": semantics["exclusions"],
+                    "defeaters": semantics["defeaters"],
+                    "coverage_dimensions": semantics["coverage_dimensions"],
+                    "benchmark_profiles": semantics["benchmark_profiles"],
+                    "supersedes": semantics["supersedes"],
+                },
+                action["reviewed_evidence"],
+            ),
+        )
+        injected = attach(
+            PATCH.without(injected, "acceptance_id", "acceptance_digest"),
+            "acceptance_id",
+            "acceptance_digest",
+            "network-patch-acceptance-",
+        )
+        with self.assertRaisesRegex(ValueError, "requires a closed target_node"):
+            self._real_validate_acceptance(injected, proposal, plan, self.current_ref())
+
+        wrong_resolution_source = copy.deepcopy(acceptance)
+        transition_index = next(
+            index
+            for index, operation in enumerate(
+                wrong_resolution_source["decisions"][0]["operations"]
+            )
+            if operation["operation_type"] == "transition-gap"
+        )
+        transition = PATCH.without(
+            wrong_resolution_source["decisions"][0]["operations"][transition_index],
+            "operation_id",
+            "operation_digest",
+        )
+        transition["payload"]["resolution_source"] = proposal["proposal_id"]
+        wrong_resolution_source["decisions"][0]["operations"][transition_index] = (
+            attach(
+                transition,
+                "operation_id",
+                "operation_digest",
+                "network-operation-",
+            )
+        )
+        wrong_resolution_source = attach(
+            PATCH.without(
+                wrong_resolution_source, "acceptance_id", "acceptance_digest"
+            ),
+            "acceptance_id",
+            "acceptance_digest",
+            "network-patch-acceptance-",
+        )
+        with self.assertRaisesRegex(ValueError, "resolution_source"):
+            self._real_validate_acceptance(
+                wrong_resolution_source, proposal, plan, self.current_ref()
+            )
+
+    def test_v4_existing_claim_ref_rejects_stale_or_rewritten_claim_state(self):
+        proposal, live_network = self.proposal_v4_extension()
+        stale = copy.deepcopy(proposal)
+        stale["actions"][0]["existing_claim_ref"]["claim_record_ref"]["sha256"] = (
+            "0" * 64
+        )
+        stale["actions"][0] = attach(
+            PATCH.without(stale["actions"][0], "action_id", "action_digest"),
+            "action_id",
+            "action_digest",
+            "network-patch-action-",
+        )
+        stale = attach(
+            PATCH.without(stale, "proposal_id", "proposal_digest"),
+            "proposal_id",
+            "proposal_digest",
+            "network-patch-proposal-",
+        )
+        with self.assertRaisesRegex(ValueError, "claim_record_ref"):
+            PATCH.validate_proposal_v4(stale, self.current_ref(), live_network)
+
+        rewritten = copy.deepcopy(proposal)
+        semantics = rewritten["actions"][0]["existing_claim_ref"]["claim_semantics"]
+        semantics["claim_text"] = "Caller-authored replacement semantics."
+        rewritten["actions"][0]["existing_claim_ref"]["claim_semantic_digest"] = (
+            PATCH.digest_json(semantics)
+        )
+        rewritten["actions"][0] = attach(
+            PATCH.without(rewritten["actions"][0], "action_id", "action_digest"),
+            "action_id",
+            "action_digest",
+            "network-patch-action-",
+        )
+        rewritten = attach(
+            PATCH.without(rewritten, "proposal_id", "proposal_digest"),
+            "proposal_id",
+            "proposal_digest",
+            "network-patch-proposal-",
+        )
+        with self.assertRaisesRegex(ValueError, "claim_semantics"):
+            PATCH.validate_proposal_v4(rewritten, self.current_ref(), live_network)
+
+        wrong_subject = copy.deepcopy(proposal)
+        wrong_subject["actions"][0]["subject_ref"]["subject_digest"] = "0" * 64
+        wrong_subject["actions"][0] = attach(
+            PATCH.without(wrong_subject["actions"][0], "action_id", "action_digest"),
+            "action_id",
+            "action_digest",
+            "network-patch-action-",
+        )
+        wrong_subject = attach(
+            PATCH.without(wrong_subject, "proposal_id", "proposal_digest"),
+            "proposal_id",
+            "proposal_digest",
+            "network-patch-proposal-",
+        )
+        with self.assertRaisesRegex(ValueError, "subject_ref"):
+            PATCH.validate_proposal_v4(wrong_subject, self.current_ref(), live_network)
+
+    def test_v4_existing_claim_ref_requires_one_live_active_row(self):
+        proposal, live_network = self.proposal_v4_extension()
+        duplicate = copy.deepcopy(live_network)
+        duplicate["claims"].append(
+            copy.deepcopy(
+                next(
+                    row
+                    for row in duplicate["claims"]
+                    if row["claim_id"] == "claim-existing-v4"
+                )
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "exactly one live claim row"):
+            PATCH.validate_proposal_v4(proposal, self.current_ref(), duplicate)
+
+        missing = copy.deepcopy(live_network)
+        missing["claims"] = [
+            row for row in missing["claims"] if row["claim_id"] != "claim-existing-v4"
+        ]
+        with self.assertRaisesRegex(ValueError, "exactly one live claim row"):
+            PATCH.validate_proposal_v4(proposal, self.current_ref(), missing)
+
+    def test_v4_action_union_and_origin_claim_route_fail_closed(self):
+        proposal, live_network = self.proposal_v4_extension()
+        union = copy.deepcopy(proposal)
+        union["actions"][0]["target_claim"] = {}
+        union["actions"][0] = attach(
+            PATCH.without(union["actions"][0], "action_id", "action_digest"),
+            "action_id",
+            "action_digest",
+            "network-patch-action-",
+        )
+        union = attach(
+            PATCH.without(union, "proposal_id", "proposal_digest"),
+            "proposal_id",
+            "proposal_digest",
+            "network-patch-proposal-",
+        )
+        with self.assertRaisesRegex(ValueError, "fields invalid"):
+            PATCH.validate_proposal_v4(union, self.current_ref(), live_network)
+
+        another_claim_gap = next(
+            gap
+            for gap in live_network["gaps"]
+            if gap.get("claim_id") == "claim-01" and gap["status"] == "open"
+        )
+        multiple = copy.deepcopy(proposal)
+        multiple["actions"][0]["origin_gap_refs"][1] = {
+            "gap_id": another_claim_gap["gap_id"],
+            **another_claim_gap["record_ref"],
+        }
+        multiple["actions"][0] = attach(
+            PATCH.without(multiple["actions"][0], "action_id", "action_digest"),
+            "action_id",
+            "action_digest",
+            "network-patch-action-",
+        )
+        multiple = attach(
+            PATCH.without(multiple, "proposal_id", "proposal_digest"),
+            "proposal_id",
+            "proposal_digest",
+            "network-patch-proposal-",
+        )
+        with self.assertRaisesRegex(ValueError, "multiple existing-claim routes"):
+            PATCH.validate_proposal_v4(multiple, self.current_ref(), live_network)
+
+        code, _, error = self.kn(
+            [
+                "record-gap",
+                "--gap-id",
+                "gap-v4-claimless",
+                "--gap-type",
+                "explicit",
+                "--impact",
+                "low",
+                "--status",
+                "open",
+                "--source",
+                "manual-test",
+                "--description",
+                "A claimless gap cannot share an existing-claim action.",
+            ]
+        )
+        self.assertEqual(code, 0, error)
+        paths = KN._safe_paths(str(self.root), self.network_id)
+        state, records = KN._load_state(paths)
+        current_network = KN._knowledge_network_export(paths, state, records)
+        claimless = next(
+            gap
+            for gap in current_network["gaps"]
+            if gap["gap_id"] == "gap-v4-claimless"
+        )
+        mixed = copy.deepcopy(proposal)
+        mixed["network_ref"] = self.current_ref()
+        mixed["actions"][0]["origin_gap_refs"][1] = {
+            "gap_id": claimless["gap_id"],
+            **claimless["record_ref"],
+        }
+        mixed["actions"][0] = attach(
+            PATCH.without(mixed["actions"][0], "action_id", "action_digest"),
+            "action_id",
+            "action_digest",
+            "network-patch-action-",
+        )
+        mixed = attach(
+            PATCH.without(mixed, "proposal_id", "proposal_digest"),
+            "proposal_id",
+            "proposal_digest",
+            "network-patch-proposal-",
+        )
+        with self.assertRaisesRegex(ValueError, "mix claimless"):
+            PATCH.validate_proposal_v4(mixed, self.current_ref(), current_network)
+
+    def test_v4_rejects_a_claim_superseded_after_proposal_generation(self):
+        proposal, _ = self.proposal_v4_extension()
+        code, _, error = self.kn(
+            [
+                "add-claim",
+                "--claim-id",
+                "claim-existing-v4-successor",
+                "--claim-text",
+                "A successor claim with separately reviewed semantics.",
+                "--impact",
+                "high",
+                "--scope-statement",
+                "Successor scope.",
+                "--defeater",
+                "scope mismatch",
+                "--supersedes",
+                "claim-existing-v4",
+            ]
+        )
+        self.assertEqual(code, 0, error)
+        paths = KN._safe_paths(str(self.root), self.network_id)
+        state, records = KN._load_state(paths)
+        live_network = KN._knowledge_network_export(paths, state, records)
+        proposal["network_ref"] = self.current_ref()
+        proposal = attach(
+            PATCH.without(proposal, "proposal_id", "proposal_digest"),
+            "proposal_id",
+            "proposal_digest",
+            "network-patch-proposal-",
+        )
+        with self.assertRaisesRegex(ValueError, "superseded claim"):
+            PATCH.validate_proposal_v4(proposal, self.current_ref(), live_network)
+
+    def test_v4_preserves_the_new_claim_route_for_claimless_origin_gaps(self):
+        proposal, _ = self.proposal_v3()
+        code, _, error = self.kn(
+            [
+                "record-gap",
+                "--gap-id",
+                "gap-v4-second-claimless",
+                "--gap-type",
+                "explicit",
+                "--impact",
+                "low",
+                "--status",
+                "open",
+                "--source",
+                "manual-test",
+                "--description",
+                "A second claimless origin for the new-claim route.",
+            ]
+        )
+        self.assertEqual(code, 0, error)
+        paths = KN._safe_paths(str(self.root), self.network_id)
+        state, records = KN._load_state(paths)
+        live_network = KN._knowledge_network_export(paths, state, records)
+        claimless = [
+            gap
+            for gap in live_network["gaps"]
+            if gap.get("claim_id") is None and gap["status"] == "open"
+        ]
+        self.assertGreaterEqual(len(claimless), 2)
+        origin_refs = [
+            {"gap_id": gap["gap_id"], **gap["record_ref"]} for gap in claimless[:2]
+        ]
+        proposal["schema"] = "NetworkPatchProposal/v4"
+        proposal["schema_version"] = "4.0"
+        proposal["network_ref"] = self.current_ref()
+        action = proposal["actions"][0]
+        action["origin_gap_refs"] = origin_refs
+        target = PATCH.without(
+            action["target_claim"], "claim_id", "target_claim_digest"
+        )
+        target["origin_gap_refs"] = copy.deepcopy(origin_refs)
+        action["target_claim"] = attach(
+            target,
+            "claim_id",
+            "target_claim_digest",
+            "claim-target-",
+        )
+        proposal["actions"][0] = attach(
+            PATCH.without(action, "action_id", "action_digest"),
+            "action_id",
+            "action_digest",
+            "network-patch-action-",
+        )
+        proposal = attach(
+            PATCH.without(proposal, "proposal_id", "proposal_digest"),
+            "proposal_id",
+            "proposal_digest",
+            "network-patch-proposal-",
+        )
+        self.assertEqual(
+            PATCH.validate_proposal_v4(
+                copy.deepcopy(proposal), self.current_ref(), live_network
+            ),
+            proposal,
+        )
+
+    def test_v4_apply_rolls_back_when_a_resolved_derived_predicate_still_holds(self):
+        proposal, _ = self.proposal_v4_extension()
+        plan = PATCH.create_plan(
+            proposal,
+            self.current_ref(),
+            prepared_at="2026-08-12T00:10:00Z",
+        )
+        acceptance = self.extension_acceptance(proposal, plan)
+        action = proposal["actions"][0]
+        basis_by_id = {
+            basis["basis_id"]: basis for basis in action["reviewed_evidence"]
+        }
+        operations = acceptance["decisions"][0]["operations"]
+        for index, operation in enumerate(operations):
+            operation = PATCH.without(operation, "operation_id", "operation_digest")
+            if operation["operation_type"] == "add-evidence":
+                operation["payload"]["polarity"] = "qualifies"
+            elif operation["operation_type"] == "add-relation":
+                basis = basis_by_id[operation["basis_refs"][0]["basis_id"]]
+                operation["payload"]["relation_type"] = "qualifies"
+                operation["payload"]["relation_id"] = PATCH.relation_operation_id(
+                    action, basis, "qualifies"
+                )
+            operations[index] = attach(
+                operation,
+                "operation_id",
+                "operation_digest",
+                "network-operation-",
+            )
+        acceptance = attach(
+            PATCH.without(acceptance, "acceptance_id", "acceptance_digest"),
+            "acceptance_id",
+            "acceptance_digest",
+            "network-patch-acceptance-",
+        )
+        gate = copy.deepcopy(self.fake_gate)
+        gate["binding"] = {
+            "relation_bindings": [
+                {
+                    "action_id": action["action_id"],
+                    "basis_id": basis["basis_id"],
+                    "allowed_relation": "qualifies",
+                    "independence_group": basis["source_id"],
+                }
+                for basis in action["reviewed_evidence"]
+            ]
+        }
+        proposal_path = self.write("proposal-v4-derived.json", proposal)
+        plan_path = self.write("plan-v4-derived.json", plan)
+        acceptance_path = self.write("acceptance-v4-derived.json", acceptance)
+        pack_path = self.write("pack-v4-derived.json", {})
+        before = self.current_ref()
+
+        def validate_with_qualified_gate(value, bound_proposal, bound_plan, ref, **_):
+            return self._real_validate_acceptance(
+                value,
+                bound_proposal,
+                bound_plan,
+                ref,
+                appraisal_gate=gate,
+            )
+
+        with (
+            mock.patch.object(PATCH, "validate_evidence_pack", return_value={}),
+            mock.patch.object(
+                PATCH, "_load_optional_appraisal_gate", return_value=(gate, [])
+            ),
+            mock.patch.object(
+                PATCH, "validate_acceptance", side_effect=validate_with_qualified_gate
+            ),
+        ):
+            applied = self.patch(
+                [
+                    "apply-patch",
+                    "--proposal",
+                    str(proposal_path),
+                    "--evidence-pack",
+                    str(pack_path),
+                    "--plan",
+                    str(plan_path),
+                    "--acceptance",
+                    str(acceptance_path),
+                ]
+            )
+        self.assertEqual(applied[0], 1, applied[1])
+        self.assertRegex(applied[2], "derived gap postcondition")
+        self.assertEqual(self.current_ref(), before)
+
+    def test_v4_existing_claim_extension_applies_atomically_without_a_new_claim(self):
+        proposal, _ = self.proposal_v4_extension()
+        plan = PATCH.create_plan(
+            proposal,
+            self.current_ref(),
+            prepared_at="2026-08-12T00:10:00Z",
+        )
+        acceptance = self.extension_acceptance(proposal, plan)
+        proposal_path = self.write("proposal-v4-apply.json", proposal)
+        plan_path = self.write("plan-v4-apply.json", plan)
+        acceptance_path = self.write("acceptance-v4-apply.json", acceptance)
+        pack_path = self.write("pack-v4-apply.json", {})
+        paths = KN._safe_paths(str(self.root), self.network_id)
+        _, before_records = KN._load_state(paths)
+        before_claim_count = len(before_records["claims"])
+        with mock.patch.object(PATCH, "validate_evidence_pack", return_value={}):
+            applied = self.patch(
+                [
+                    "apply-patch",
+                    "--proposal",
+                    str(proposal_path),
+                    "--evidence-pack",
+                    str(pack_path),
+                    "--plan",
+                    str(plan_path),
+                    "--acceptance",
+                    str(acceptance_path),
+                ]
+            )
+        self.assertEqual(applied[0], 0, applied[2])
+        _, after_records = KN._load_state(paths)
+        self.assertEqual(len(after_records["claims"]), before_claim_count)
+        action = proposal["actions"][0]
+        self.assertEqual(
+            [row["evidence_id"] for row in after_records["evidence"]],
+            [basis["evidence_id"] for basis in action["reviewed_evidence"]],
+        )
+        latest = KN._latest_gaps_by_id(after_records["gaps"])
+        self.assertTrue(
+            all(
+                latest[ref["gap_id"]]["status"] == "resolved"
+                for ref in action["origin_gap_refs"]
+            )
+        )
+
+    def test_v2_high_impact_single_source_is_audit_only(self):
+        proposal = self.proposal()
+        injected_ref = copy.deepcopy(proposal)
+        injected_ref["consumption_ref"] = {
+            "schema": "ReviewedEvidenceCollectionConsumption/v1"
+        }
+        with self.assertRaisesRegex(ValueError, "consumption_ref"):
+            PATCH.validate_proposal_v2(injected_ref, self.current_ref())
+        action = proposal["actions"][0]
+        target = PATCH.without(
+            action["target_claim"], "claim_id", "target_claim_digest"
+        )
+        target["impact"] = "high"
+        target = attach(
+            target,
+            "claim_id",
+            "target_claim_digest",
+            "claim-target-",
+        )
+        action = PATCH.without(action, "action_id", "action_digest")
+        action["target_claim"] = target
+        proposal["actions"][0] = attach(
+            action, "action_id", "action_digest", "network-patch-action-"
+        )
+        proposal = attach(
+            PATCH.without(proposal, "proposal_id", "proposal_digest"),
+            "proposal_id",
+            "proposal_digest",
+            "network-patch-proposal-",
+        )
+        PATCH.validate_proposal_v2(proposal, self.current_ref())
+        with self.assertRaisesRegex(ValueError, "two distinct source IDs"):
+            PATCH.require_applicable_source_independence(proposal)
+
+    def test_v3_acceptance_requires_all_origin_gap_transitions_atomically(self):
+        proposal, _ = self.proposal_v3()
+        plan = PATCH.create_plan(
+            proposal,
+            self.current_ref(),
+            prepared_at="2026-08-11T00:10:00Z",
+        )
+        action = proposal["actions"][0]
+        bases = action["reviewed_evidence"]
+        operations = [
+            self.operation(
+                "add-claim",
+                {
+                    "claim_id": action["target_claim"]["claim_id"],
+                    "claim_text": action["target_claim"]["claim_text"],
+                    "entity_id": action["target_claim"]["entity_id"],
+                    "impact": action["target_claim"]["impact"],
+                    "scope_statement": action["target_claim"]["scope"][
+                        "scope_statement"
+                    ],
+                    "assumptions": action["target_claim"]["scope"]["assumptions"],
+                    "conditions": action["target_claim"]["scope"]["conditions"],
+                    "units": action["target_claim"]["scope"]["units"],
+                    "exclusions": action["target_claim"]["scope"]["exclusions"],
+                    "defeaters": action["target_claim"]["scope"]["defeaters"],
+                    "coverage_dimensions": action["target_claim"][
+                        "coverage_dimensions"
+                    ],
+                    "benchmark_profiles": action["target_claim"]["benchmark_profiles"],
+                    "supersedes": None,
+                },
+                bases,
+            )
+        ]
+        for basis in bases:
+            operations.append(
+                self.operation(
+                    "add-evidence",
+                    {
+                        "evidence_id": basis["evidence_id"],
+                        "claim_id": action["target_claim"]["claim_id"],
+                        "source_id": basis["source_id"],
+                        "polarity": "supports",
+                        "exact_locator": basis["evidence_locator"],
+                        "independence_group": basis["source_id"],
+                        "summary": action["hypothesis"],
+                        "notes": "accepted from NetworkPatchProposal/v3",
+                        "supersedes": None,
+                    },
+                    [basis],
+                )
+            )
+        for basis in bases:
+            operations.append(
+                self.operation(
+                    "add-relation",
+                    {
+                        "relation_id": PATCH.relation_operation_id(action, basis),
+                        "relation_type": "supports",
+                        "from_ref": "claim:" + action["target_claim"]["claim_id"],
+                        "to_ref": "evidence:" + basis["evidence_id"],
+                        "notes": "network-patch-action:" + action["action_digest"],
+                        "supersedes": None,
+                    },
+                    [basis],
+                )
+            )
+        for origin in action["origin_gap_refs"]:
+            operations.append(
+                self.operation(
+                    "transition-gap",
+                    {
+                        "gap_id": origin["gap_id"],
+                        "from_record_id": origin["record_id"],
+                        "status": "resolved",
+                        "reason": "All reviewed multi-source evidence is admitted.",
+                        "evidence_refs": [basis["evidence_id"] for basis in bases],
+                        "resolution_source": proposal["proposal_id"],
+                    },
+                    bases,
+                )
+            )
+        authority = self.authority()
+        acceptance = attach(
+            {
+                "schema": "NetworkPatchAcceptance/v1",
+                "schema_version": "1.0",
+                "network_ref": proposal["network_ref"],
+                "proposal_ref": {
+                    "proposal_id": proposal["proposal_id"],
+                    "proposal_digest": proposal["proposal_digest"],
+                },
+                "plan_ref": {
+                    "plan_id": plan["plan_id"],
+                    "plan_digest": plan["plan_digest"],
+                },
+                "decided_at": "2026-08-11T00:20:00Z",
+                "operator": {
+                    "operator_id": "review-board-v3",
+                    "operator_role": "scientific-curator",
+                    "authority_basis": [authority],
+                },
+                "decisions": [
+                    {
+                        "action_id": action["action_id"],
+                        "action_digest": action["action_digest"],
+                        "decision": "accept",
+                        "rationale": "Every source and origin gap passed review.",
+                        "authority_basis_ids": [authority["basis_id"]],
+                        "operations": operations,
+                    }
+                ],
+            },
+            "acceptance_id",
+            "acceptance_digest",
+            "network-patch-acceptance-",
+        )
+        self._real_validate_acceptance(acceptance, proposal, plan, self.current_ref())
+        missing = copy.deepcopy(acceptance)
+        missing["decisions"][0]["operations"].pop()
+        missing = attach(
+            PATCH.without(missing, "acceptance_id", "acceptance_digest"),
+            "acceptance_id",
+            "acceptance_digest",
+            "network-patch-acceptance-",
+        )
+        with self.assertRaisesRegex(ValueError, "every origin gap atomically"):
+            self._real_validate_acceptance(missing, proposal, plan, self.current_ref())
+
+    def test_v3_basis_rejects_unmaterializable_evidence_id_before_appraisal(self):
+        proposal, _ = self.proposal_v3()
+        basis = copy.deepcopy(proposal["actions"][0]["reviewed_evidence"][0])
+        basis["evidence_id"] = "e" + "x" * 254
+        basis = attach(
+            PATCH.without(basis, "basis_id", "basis_digest"),
+            "basis_id",
+            "basis_digest",
+            "network-patch-basis-",
+        )
+        self.assertEqual(
+            PATCH.validate_basis(basis, "proposal.actions[0].reviewed_evidence[0]")[
+                "evidence_id"
+            ],
+            "e" + "x" * 254,
+        )
+
+        basis["evidence_id"] = "e-zeger2000-" + "x" * 244
+        basis = attach(
+            PATCH.without(basis, "basis_id", "basis_digest"),
+            "basis_id",
+            "basis_digest",
+            "network-patch-basis-",
+        )
+        with self.assertRaisesRegex(ValueError, "materializable evidence ID"):
+            PATCH.validate_basis(basis, "proposal.actions[0].reviewed_evidence[0]")
+
+    def test_evidence_pack_v2_binds_collection_groups_and_regenerates_v3(self):
+        proposal, live_network = self.proposal_v3()
+        artifact_root = self.root / "v3-pack-artifacts"
+        artifact_root.mkdir()
+        action = proposal["actions"][0]
+        collection = {
+            "schema": "PaperReadingEvidenceCollection/v1",
+            "schema_version": "v1",
+            "collection_id": proposal["reading_collection_ref"]["collection_id"],
+            "collection_digest": proposal["reading_collection_ref"][
+                "collection_digest"
+            ],
+            "network_ref": proposal["network_ref"],
+            "review_request_set_ref": {
+                "review_request_set_id": proposal["request_ref"][
+                    "review_request_set_id"
+                ],
+                "review_request_set_digest": proposal["request_ref"][
+                    "review_request_set_digest"
+                ],
+            },
+            "reading_groups": [
+                {
+                    "reading_group_id": ref["reading_group_id"],
+                    "reading_group_digest": ref["reading_group_digest"],
+                    "source_ref": {
+                        "source_id": ref["source_id"],
+                        "source_digest": "6" * 64,
+                    },
+                    "report_set_ref": {
+                        "report_set_id": ref["report_set_id"],
+                        "report_set_digest": ref["report_set_digest"],
+                    },
+                }
+                for ref in action["reading_group_refs"]
+            ],
+        }
+        values = {
+            "preconsumption_hypotheses": {"fixture": "selected hypotheses"},
+            "review_requests": {"fixture": "requests"},
+            "reading_collection": collection,
+            "consumption_authority": {
+                "authority_id": proposal["consumption_ref"]["authority_id"],
+                "authority_digest": proposal["consumption_ref"]["authority_digest"],
+                "expected_consumed_hypotheses_sha256": proposal["consumption_ref"][
+                    "consumed_hypotheses_sha256"
+                ],
+            },
+        }
+        artifacts = {}
+        for role, value in values.items():
+            path = artifact_root / f"{role}.json"
+            path.write_text(json.dumps(value, sort_keys=True), encoding="utf-8")
+            artifacts[role] = {
+                "path": str(path),
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }
+        authority_raw_sha = artifacts["consumption_authority"]["sha256"]
+        proposal["consumption_ref"]["authority_file_sha256"] = authority_raw_sha
+        proposal = attach(
+            PATCH.without(proposal, "proposal_id", "proposal_digest"),
+            "proposal_id",
+            "proposal_digest",
+            "network-patch-proposal-",
+        )
+        self._active_proposal = proposal
+        pack = attach(
+            {
+                "schema": "NetworkPatchEvidencePack/v2",
+                "schema_version": "2.0",
+                "proposal_ref": {
+                    "proposal_id": proposal["proposal_id"],
+                    "proposal_digest": proposal["proposal_digest"],
+                },
+                "network_ref": proposal["network_ref"],
+                "artifacts": artifacts,
+            },
+            "pack_id",
+            "pack_digest",
+            "network-patch-evidence-pack-",
+        )
+        collection_owner = mock.Mock()
+        collection_owner.ContractError = ValueError
+        collection_owner.validate_collection.side_effect = lambda value: value
+        with mock.patch.object(
+            PATCH, "load_reading_collection_module", return_value=collection_owner
+        ):
+            validated = PATCH.validate_evidence_pack_v2(
+                pack,
+                proposal,
+                self.current_ref(),
+                live_network=live_network,
+                expected_authority_file_sha256=authority_raw_sha,
+            )
+            self.assertEqual(validated, pack)
+            producer_call = self.gap_stub.propose_patch_v3.call_args
+            self.assertEqual(len(producer_call.args), 5)
+            self.assertTrue(
+                all(
+                    isinstance(producer_call.args[index], Path)
+                    for index in (0, 2, 3, 4)
+                )
+            )
+            self.assertEqual(
+                producer_call.kwargs["expected_authority_file_sha256"],
+                authority_raw_sha,
+            )
+            reversed_collection = copy.deepcopy(collection)
+            reversed_collection["reading_groups"].reverse()
+            collection_owner.validate_collection.side_effect = lambda value: (
+                reversed_collection
+            )
+            with self.assertRaisesRegex(ValueError, "every collection group in order"):
+                PATCH.validate_evidence_pack_v2(
+                    pack,
+                    proposal,
+                    self.current_ref(),
+                    live_network=live_network,
+                    expected_authority_file_sha256=authority_raw_sha,
+                )
+
+    def test_evidence_pack_v2_regenerates_v4_through_the_v4_owner_seam(self):
+        proposal, live_network = self.proposal_v4_extension()
+        artifact_root = self.root / "v4-pack-artifacts"
+        artifact_root.mkdir()
+        action = proposal["actions"][0]
+        basis_by_source = {
+            basis["source_id"]: basis for basis in action["reviewed_evidence"]
+        }
+        collection = {
+            "schema": "PaperReadingEvidenceCollection/v1",
+            "schema_version": "v1",
+            "collection_id": proposal["reading_collection_ref"]["collection_id"],
+            "collection_digest": proposal["reading_collection_ref"][
+                "collection_digest"
+            ],
+            "network_ref": proposal["network_ref"],
+            "review_request_set_ref": {
+                "review_request_set_id": proposal["request_ref"][
+                    "review_request_set_id"
+                ],
+                "review_request_set_digest": proposal["request_ref"][
+                    "review_request_set_digest"
+                ],
+            },
+            "reading_groups": [
+                {
+                    "reading_group_id": ref["reading_group_id"],
+                    "reading_group_digest": ref["reading_group_digest"],
+                    "source_ref": {
+                        "source_id": ref["source_id"],
+                        "source_digest": basis_by_source[ref["source_id"]][
+                            "source_digest"
+                        ],
+                    },
+                    "report_set_ref": {
+                        "report_set_id": ref["report_set_id"],
+                        "report_set_digest": ref["report_set_digest"],
+                    },
+                }
+                for ref in action["reading_group_refs"]
+            ],
+        }
+        values = {
+            "preconsumption_hypotheses": {"fixture": "selected hypotheses"},
+            "review_requests": {"fixture": "requests"},
+            "reading_collection": collection,
+            "consumption_authority": {
+                "authority_id": proposal["consumption_ref"]["authority_id"],
+                "authority_digest": proposal["consumption_ref"]["authority_digest"],
+                "expected_consumed_hypotheses_sha256": proposal["consumption_ref"][
+                    "consumed_hypotheses_sha256"
+                ],
+            },
+        }
+        artifacts = {}
+        for role, value in values.items():
+            path = artifact_root / f"{role}.json"
+            path.write_text(json.dumps(value, sort_keys=True), encoding="utf-8")
+            artifacts[role] = {
+                "path": str(path),
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }
+        authority_raw_sha = artifacts["consumption_authority"]["sha256"]
+        proposal["consumption_ref"]["authority_file_sha256"] = authority_raw_sha
+        proposal = attach(
+            PATCH.without(proposal, "proposal_id", "proposal_digest"),
+            "proposal_id",
+            "proposal_digest",
+            "network-patch-proposal-",
+        )
+        self._active_proposal = proposal
+        pack = attach(
+            {
+                "schema": "NetworkPatchEvidencePack/v2",
+                "schema_version": "2.0",
+                "proposal_ref": {
+                    "proposal_id": proposal["proposal_id"],
+                    "proposal_digest": proposal["proposal_digest"],
+                },
+                "network_ref": proposal["network_ref"],
+                "artifacts": artifacts,
+            },
+            "pack_id",
+            "pack_digest",
+            "network-patch-evidence-pack-",
+        )
+        collection_owner = mock.Mock()
+        collection_owner.ContractError = ValueError
+        collection_owner.validate_collection.side_effect = lambda value: value
+        with mock.patch.object(
+            PATCH, "load_reading_collection_module", return_value=collection_owner
+        ):
+            self.assertEqual(
+                PATCH.validate_evidence_pack_v2(
+                    pack,
+                    proposal,
+                    self.current_ref(),
+                    live_network=live_network,
+                    expected_authority_file_sha256=authority_raw_sha,
+                ),
+                pack,
+            )
+        self.assertIsNotNone(self.gap_stub.propose_patch_v4.call_args)
+        self.assertIsNone(self.gap_stub.propose_patch_v3.call_args)
+
+    def test_evidence_pack_v2_replays_detached_authority_and_rejects_forgery(self):
+        self.gap_patcher.stop()
+        real_gap = PATCH.load_gap_module()
+        gap_test_path = (
+            SCRIPT_DIR.parent.parent
+            / "network-gap-discovery"
+            / "scripts"
+            / "test_network_gap_discovery.py"
+        )
+        sys.path.insert(0, str(gap_test_path.parent))
+        spec = importlib.util.spec_from_file_location(
+            "rkn_authority_gap_test_support", gap_test_path
+        )
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        gap_support = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = gap_support
+        spec.loader.exec_module(gap_support)
+
+        artifact_root = self.root / "real-v3-authority-pack"
+        artifact_root.mkdir()
+        fixture = gap_support.multi_reading_collection_fixture(
+            artifact_root, direct_selected=True
+        )
+        upstream = gap_support.reviewed_collection_consumption_artifacts(
+            artifact_root, fixture
+        )
+        proposal = real_gap.propose_patch_v3(
+            upstream["hypotheses_path"],
+            fixture["network"],
+            upstream["review_requests_path"],
+            upstream["collection_path"],
+            upstream["authority_path"],
+            expected_authority_file_sha256=upstream["authority_raw_sha"],
+        )
+        PATCH.validate_proposal_v3(
+            proposal, proposal["network_ref"], fixture["network"]
+        )
+        artifact_paths = {
+            "preconsumption_hypotheses": upstream["hypotheses_path"],
+            "review_requests": upstream["review_requests_path"],
+            "reading_collection": upstream["collection_path"],
+            "consumption_authority": upstream["authority_path"],
+        }
+
+        def make_pack(paths: dict[str, Path]) -> dict:
+            return attach(
+                {
+                    "schema": "NetworkPatchEvidencePack/v2",
+                    "schema_version": "2.0",
+                    "proposal_ref": {
+                        "proposal_id": proposal["proposal_id"],
+                        "proposal_digest": proposal["proposal_digest"],
+                    },
+                    "network_ref": proposal["network_ref"],
+                    "artifacts": {
+                        role: {
+                            "path": str(path),
+                            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                        }
+                        for role, path in sorted(paths.items())
+                    },
+                },
+                "pack_id",
+                "pack_digest",
+                "network-patch-evidence-pack-",
+            )
+
+        pack = make_pack(artifact_paths)
+        validated = PATCH.validate_evidence_pack_v2(
+            pack,
+            proposal,
+            proposal["network_ref"],
+            live_network=fixture["network"],
+            expected_authority_file_sha256=upstream["authority_raw_sha"],
+        )
+        self.assertEqual(validated, pack)
+
+        with self.assertRaisesRegex(ValueError, "caller-held raw SHA-256"):
+            PATCH.validate_evidence_pack_v2(
+                pack,
+                proposal,
+                proposal["network_ref"],
+                live_network=fixture["network"],
+                expected_authority_file_sha256="0" * 64,
+            )
+        with self.assertRaisesRegex(ValueError, "caller-held expected authority"):
+            PATCH.validate_evidence_pack(
+                pack,
+                proposal,
+                proposal["network_ref"],
+                live_network=fixture["network"],
+            )
+
+        missing_authority = copy.deepcopy(pack)
+        missing_authority["artifacts"].pop("consumption_authority")
+        missing_authority = attach(
+            PATCH.without(missing_authority, "pack_id", "pack_digest"),
+            "pack_id",
+            "pack_digest",
+            "network-patch-evidence-pack-",
+        )
+        with self.assertRaisesRegex(ValueError, "consumption_authority"):
+            PATCH.validate_evidence_pack_v2(
+                missing_authority,
+                proposal,
+                proposal["network_ref"],
+                live_network=fixture["network"],
+                expected_authority_file_sha256=upstream["authority_raw_sha"],
+            )
+
+        tampered_authority = copy.deepcopy(upstream["authority"])
+        tampered_authority["complete_scope"] = False
+        tampered_authority_path = artifact_root / "tampered-authority.json"
+        tampered_authority_path.write_text(
+            json.dumps(tampered_authority, sort_keys=True), encoding="utf-8"
+        )
+        tampered_paths = {
+            **artifact_paths,
+            "consumption_authority": tampered_authority_path,
+        }
+        tampered_pack = make_pack(tampered_paths)
+        tampered_sha = hashlib.sha256(tampered_authority_path.read_bytes()).hexdigest()
+        with self.assertRaisesRegex(
+            ValueError,
+            "ReviewedEvidenceCollectionConsumptionAuthority/v1 replay failed",
+        ):
+            PATCH.validate_evidence_pack_v2(
+                tampered_pack,
+                proposal,
+                proposal["network_ref"],
+                live_network=fixture["network"],
+                expected_authority_file_sha256=tampered_sha,
+            )
+
+        for status in ("results", "content_found"):
+            handcrafted = copy.deepcopy(upstream["preconsumption"])
+            handcrafted["hypotheses"][0]["status"] = status
+            handcrafted_path = artifact_root / f"handcrafted-{status}.json"
+            handcrafted_path.write_text(
+                json.dumps(handcrafted, sort_keys=True), encoding="utf-8"
+            )
+            forged_pack = make_pack(
+                {
+                    **artifact_paths,
+                    "preconsumption_hypotheses": handcrafted_path,
+                }
+            )
+            with self.subTest(handcrafted_status=status):
+                with self.assertRaisesRegex(
+                    ValueError, "strict authorized multi-reading regeneration failed"
+                ):
+                    PATCH.validate_evidence_pack_v2(
+                        forged_pack,
+                        proposal,
+                        proposal["network_ref"],
+                        live_network=fixture["network"],
+                        expected_authority_file_sha256=upstream["authority_raw_sha"],
+                    )
 
     def test_unmocked_real_producer_to_atomic_rkn_apply(self):
         self.gap_patcher.stop()

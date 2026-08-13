@@ -109,6 +109,9 @@ SAFE_FRAGMENT_SPAN = r"[A-Za-z0-9][A-Za-z0-9._:-]*(?:-[A-Za-z0-9][A-Za-z0-9._:-]
 PATH_FRAGMENT_LOCATOR_RE = re.compile(
     rf"^{SAFE_PATH_SEGMENT}(?:/{SAFE_PATH_SEGMENT})*#(?:char|line|page|eq|fig|table|section)={SAFE_FRAGMENT_SPAN}$"
 )
+LFP_PAGE_SPAN_LOCATOR_RE = re.compile(
+    r"^p\.([1-9][0-9]*) \[([0-9]+):([0-9]+)\]$"
+)
 PLAIN_LOCATOR_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .:_-]*$")
 PLAIN_NUMERIC_RANGE_RE = re.compile(r"\b[A-Za-z][A-Za-z .:_-]*\s+\d+\s*[-–]\s*\d+\b")
 
@@ -773,6 +776,12 @@ def _validate_locator_atom(value: Any, name: str) -> tuple[str, str]:
             _bad(
                 f"{name}.locator with path/fragment must be a safe relative path plus one exact marker span"
             )
+        return source, locator
+    lfp_page_span = LFP_PAGE_SPAN_LOCATOR_RE.fullmatch(locator)
+    if lfp_page_span is not None:
+        _, start_char, end_char = (int(part) for part in lfp_page_span.groups())
+        if end_char <= start_char:
+            _bad(f"{name}.locator LFP character span must have end greater than start")
         return source, locator
     if (
         COMPOUND_LOCATOR_RE.search(locator)

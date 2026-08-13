@@ -18,6 +18,21 @@ or improve a decision-critical claim. Compare only aligned routes. Use
 [research-decomposition.md](references/research-decomposition.md) for mapping and
 [execution-loop.md](references/execution-loop.md) for controller, parallelism,
 failure, budget, and untrusted-content rules.
+Use [report-citation-audit.md](references/report-citation-audit.md) and its
+`scripts/report_citation_audit.py` helper for bounded final
+statement-to-source closure. A substantial governed report must initialize its
+run ledger with `research_run.py init --require-citation-audit`; its completion
+gate then requires a typed, replay-validated `ReportCitationAudit/v1`. Simple,
+bounded, non-governed outputs may remain opt-out, but must not claim this audit.
+
+Before retrieval, use
+[research-runtime-controls.md](references/research-runtime-controls.md) when the
+run is ambiguous, high-risk, long-running, multi-agent, expensive, resumable, or
+mixes private and public sources. Expose the plan, source domains, effort
+envelope, and execution shape. Require user approval only for a material
+ambiguity, private/cross-domain access, high-stakes decision, mutation, material
+budget, or scope expansion; bounded low-risk work should proceed without
+confirmation theater.
 
 Maintain source identity/version/status, exact locators, atomic claim/evidence
 relations, conflicts, search provenance, and limits. Orient with reviews; support
@@ -166,6 +181,11 @@ check. `$curate-research-to-zotero` alone owns approved acquisition, writes, and
 readback. `$research-knowledge-network` alone validates and applies accepted
 patches. Preserve private Zotero identifiers, paths, notes, PDFs, and handoff
 manifests from public output.
+
+When the user asks to improve this skill group from a completed or failed run,
+route the hash-pinned incident evidence to `$research-workflow-retrospective`.
+That skill diagnoses preventable seams and test-ready improvements; it does not
+redo the research, authorize a mutation, or implement its own recommendations.
 
 [knowledge-network.md](references/knowledge-network.md) defines snapshot
 semantics; [research-basis.md](references/research-basis.md) is maintenance-only.

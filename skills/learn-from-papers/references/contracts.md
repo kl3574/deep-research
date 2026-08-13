@@ -9,6 +9,7 @@ The human-readable paper card and atom ledger remain the scientific record. Thes
 | Source | `PaperSourceBundle/v1` | Original bytes, extracted page artifacts, optional renders, tools, hashes, canonical spans |
 | Reading | `PaperReadingDossier/v1` | Question plan, document coverage, scoped claims, evidence relations, cards, conflicts, reconstruction tasks, terminal unknowns |
 | Handoff | `PaperReadingReportSet/v2` | Minimal content-addressed projection for a bound review request and knowledge-network controller |
+| Multi-reading aggregate | `PaperReadingEvidenceCollection/v1` | Ordered replay of two or more immutable one-paper report lineages; never a merged report or independence inference |
 | Deep-read handoff | `PaperUnderstanding/v1` | Detailed machine-consumable understanding for a specific route and later `PaperUnderstandingNoteInput/v1` projection |
 | Deep-read validation | `PaperUnderstandingValidation/v1` | Content-addressed validator result bound to one exact understanding; source verification is explicit |
 | Legacy | `PaperReadingReportSet/v1` | Historical audit only; never new decisive network evidence |
@@ -149,6 +150,23 @@ The projection preserves the dossier ID/digest, network and review-request bindi
 - source-rooted evidence bindings with evidence ID, canonical locator, page/offsets, span ID, and span hash.
 
 Only a decisive, eligible `supports` report can support a patch proposal. `refutes` maps to contrary evidence; `qualifies` and `not_tested` remain non-supporting. A discovery DOI/URL is an acquisition locator and must never replace the source passage locator in network provenance.
+
+## `PaperReadingEvidenceCollection/v1`
+
+The collection keeps every `PaperReadingReportSet/v2` in its original one-paper
+owner boundary. Each ordered group binds canonical absolute, non-symlink paths
+and hashes for the finalized report set, dossier, source bundle, source artifact,
+and verification tree, plus their content-addressed report/dossier/bundle/source
+identities. Validation reopens every artifact with the official bundle, dossier,
+and finalized-report validators.
+
+A valid collection has at least two groups, unique source IDs and source bytes,
+unique report sets, a common `network_ref` and review-request-set ref, canonical
+group order, and at least one full-text group. Two verifiers or two reports for
+one source cannot manufacture a second group. The collection does not merge
+claims, infer scientific independence, or authorize a network mutation; it is a
+lossless aggregate consumed by downstream reviewed subject, appraisal, and RKN
+contracts.
 
 ## Trust boundary
 

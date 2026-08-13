@@ -5,6 +5,8 @@ on:
     branches:
       - main
       - "agent/**"
+    tags:
+      - "v*"
   pull_request:
   workflow_dispatch:
 
@@ -55,6 +57,12 @@ jobs:
         run: >-
           python -m unittest discover
           -s skills/deep-research/scripts
+          -p 'test_*.py'
+
+      - name: Run research workflow retrospective tests
+        run: >-
+          python -m unittest discover
+          -s skills/research-workflow-retrospective/scripts
           -p 'test_*.py'
 
       - name: Run knowledge-network tests
@@ -156,6 +164,7 @@ jobs:
             skills/learn-from-papers \
             skills/evidence-appraisal \
             skills/research-knowledge-network \
+            skills/research-workflow-retrospective \
             skills/scholar-discovery \
             skills/network-gap-discovery \
             skills/curate-research-to-zotero \

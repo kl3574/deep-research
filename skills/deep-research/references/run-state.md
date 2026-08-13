@@ -367,7 +367,12 @@ Validation checks the contract, global envelope and sequence, lifecycle,
 round completeness, source/claim gates, cross-references, conflict discipline,
 coverage, and final outcome. It cannot verify that a paraphrase is faithful or a
 locator truly entails the claim; the agent must still reopen the source and apply
-the citation audit.
+the citation audit. For a run initialized with `--require-citation-audit`, complete
+finalization additionally requires a completed `citation_audit` action whose sole
+artifact is a typed `citation_audit_validated` event. That event replays the bound
+`ReportCitationAudit/v1` and requires `overall_status=complete`; a generic action,
+self-reported digest, moved file, partial audit, or later byte drift cannot satisfy
+the gate. Legacy run contracts without the field replay as not requiring it.
 
 Keep run directories outside this public skill repository. Before sharing any
 ledger, redact secrets and private identifiers and apply the research corpus's
