@@ -212,6 +212,72 @@ class RenderNetworkHtmlTests(unittest.TestCase):
         with self.assertRaisesRegex(renderer.ContractError, "credential-shaped key"):
             renderer.build_projection(network, None, renderer.PRIVATE_MODE)
 
+    def test_public_projection_redacts_network_references_embedded_in_labels(self) -> None:
+        network = network_fixture()
+        network["nodes"][2]["label"] = (
+            f"Corpus bound to {network['network_id']} at {network['snapshot_id']}"
+        )
+        network = seal(network)
+
+        public_document = renderer.render_document(
+            renderer.build_projection(network, map_fixture(), renderer.PUBLIC_MODE)
+        )
+        private_document = renderer.render_document(
+            renderer.build_projection(network, map_fixture(), renderer.PRIVATE_MODE)
+        )
+
+        self.assertNotIn(network["network_id"], public_document)
+        self.assertNotIn(network["snapshot_id"], public_document)
+        self.assertIn(network["network_id"], private_document)
+        self.assertIn(network["snapshot_id"], private_document)
+
+    def test_validate_cli_accepts_governed_authorization_digest_in_both_modes(self) -> None:
+        network = network_fixture()
+        network["events"] = [
+            {
+                "event_type": "appraised_mutation",
+                "authorization_digest": "b" * 64,
+            }
+        ]
+        network = seal(network)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            network_path = Path(temp_dir) / "network.json"
+            network_path.write_text(
+                json.dumps(network, ensure_ascii=False), encoding="utf-8"
+            )
+            for mode in (renderer.PRIVATE_MODE, renderer.PUBLIC_MODE):
+                with self.subTest(mode=mode):
+                    self.assertEqual(
+                        renderer.main(
+                            [
+                                "validate",
+                                "--network",
+                                str(network_path),
+                                "--mode",
+                                mode,
+                            ]
+                        ),
+                        0,
+                    )
+
+    def test_governed_authorization_digest_does_not_allow_credentials(self) -> None:
+        network = network_fixture()
+        network["events"] = [
+            {
+                "event_type": "appraised_mutation",
+                "authorization_digest": "Bearer not-a-governance-digest",
+            }
+        ]
+        network = seal(network)
+
+        for mode in (renderer.PRIVATE_MODE, renderer.PUBLIC_MODE):
+            with self.subTest(mode=mode):
+                with self.assertRaisesRegex(
+                    renderer.ContractError, "credential-shaped key"
+                ):
+                    renderer.build_projection(network, None, mode)
+
     def test_current_bibliography_excludes_historical_source_cards(self) -> None:
         network = network_fixture()
         network["sources"].append(

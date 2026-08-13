@@ -69,12 +69,7 @@ def load_snapshot_producer():
 def load_deep_research_run():
     validator = load_deep_validator()
     sys.modules["validate_research_handoff"] = validator
-    run_path = (
-        SCRIPT_PATH.parents[2]
-        / "deep-research"
-        / "scripts"
-        / "research_run.py"
-    )
+    run_path = SCRIPT_PATH.parents[2] / "deep-research" / "scripts" / "research_run.py"
     spec = importlib.util.spec_from_file_location("deep_research_run", run_path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -99,9 +94,10 @@ def invoke(
         "add-relation",
         "transition-gap",
     }
-    legacy_append = lambda paths, records, ledger, record_id, payload, **_: (  # noqa: E731
-        MODULE._append_candidate(paths, records, ledger, record_id, payload)
-    )
+
+    def legacy_append(paths, records, ledger, record_id, payload, **_):
+        return MODULE._append_candidate(paths, records, ledger, record_id, payload)
+
     gate_context = (
         contextlib.nullcontext()
         if enforce_appraisal_gate or not scientific
@@ -158,10 +154,14 @@ class KnowledgeNetworkTest(unittest.TestCase):
         digest = sha256(snapshot)
         args = [
             "init",
-            "--question", "How to build the local knowledge network?",
-            "--scope", "local-reviewed-only",
-            "--snapshot-path", str(snapshot),
-            "--snapshot-digest", digest,
+            "--question",
+            "How to build the local knowledge network?",
+            "--scope",
+            "local-reviewed-only",
+            "--snapshot-path",
+            str(snapshot),
+            "--snapshot-digest",
+            digest,
         ]
         for item in required_dimension or []:
             args.extend(["--required-dimension", item])
@@ -242,9 +242,7 @@ class KnowledgeNetworkTest(unittest.TestCase):
             for note in notes:
                 raw_html = note_html_by_parent[parent_key]
                 semantic_payload = {
-                    "root_contract": {
-                        "schema_version": note.get("schema_version")
-                    },
+                    "root_contract": {"schema_version": note.get("schema_version")},
                     "heading_tree": [],
                     "normalized_blocks": [],
                 }
@@ -255,9 +253,9 @@ class KnowledgeNetworkTest(unittest.TestCase):
                         "content_sha256": MODULE._sha256_text(raw_html),
                         "semantic_status": "structured",
                         "semantic_payload": semantic_payload,
-                        "semantic_sha256": (
-                            semantic_digest_by_parent or {}
-                        ).get(parent_key, MODULE._sha256_json(semantic_payload)),
+                        "semantic_sha256": (semantic_digest_by_parent or {}).get(
+                            parent_key, MODULE._sha256_json(semantic_payload)
+                        ),
                     }
                 )
             parents.append(
@@ -291,10 +289,14 @@ class KnowledgeNetworkTest(unittest.TestCase):
             digest = str(snapshot["state_sha256"])
         args = [
             "init",
-            "--question", "How to build the local knowledge network?",
-            "--scope", "local-reviewed-only",
-            "--snapshot-path", str(snapshot_path),
-            "--snapshot-digest", digest,
+            "--question",
+            "How to build the local knowledge network?",
+            "--scope",
+            "local-reviewed-only",
+            "--snapshot-path",
+            str(snapshot_path),
+            "--snapshot-digest",
+            digest,
         ]
         code, _, error = invoke(self.root, network_id, args)
         self.assertEqual(code, 0, error)
@@ -305,6 +307,7 @@ class KnowledgeNetworkTest(unittest.TestCase):
         network_id: str,
         source_id: str = "source-01",
         version_hash: str | None = None,
+        read_depth: str = "full",
     ):
         digest = version_hash or (f"sha256:{'f' * 64}")
         code, _, error = invoke(
@@ -312,13 +315,20 @@ class KnowledgeNetworkTest(unittest.TestCase):
             network_id,
             [
                 "add-source",
-                "--source-id", source_id,
-                "--canonical-identity", f"Canonical {source_id}",
-                "--canonical-version", "v1",
-                "--read-version", "read-v1",
-                "--read-depth", "full",
-                "--version-hash", digest,
-                "--role", "source",
+                "--source-id",
+                source_id,
+                "--canonical-identity",
+                f"Canonical {source_id}",
+                "--canonical-version",
+                "v1",
+                "--read-version",
+                "read-v1",
+                "--read-depth",
+                read_depth,
+                "--version-hash",
+                digest,
+                "--role",
+                "source",
             ],
         )
         self.assertEqual(code, 0, error)
@@ -330,10 +340,14 @@ class KnowledgeNetworkTest(unittest.TestCase):
             network_id,
             [
                 "add-entity",
-                "--entity-id", entity_id,
-                "--entity-type", "method",
-                "--name", f"{entity_id} name",
-                "--description", f"{entity_id} desc",
+                "--entity-id",
+                entity_id,
+                "--entity-type",
+                "method",
+                "--name",
+                f"{entity_id} name",
+                "--description",
+                f"{entity_id} desc",
             ],
         )
         self.assertEqual(code, 0, error)
@@ -349,9 +363,12 @@ class KnowledgeNetworkTest(unittest.TestCase):
     ):
         args = [
             "add-claim",
-            "--claim-id", claim_id,
-            "--claim-text", f"Claim body for {claim_id}",
-            "--impact", impact,
+            "--claim-id",
+            claim_id,
+            "--claim-text",
+            f"Claim body for {claim_id}",
+            "--impact",
+            impact,
         ]
         if entity_id is not None:
             args.extend(["--entity-id", entity_id])
@@ -370,19 +387,27 @@ class KnowledgeNetworkTest(unittest.TestCase):
         polarity: str = "supports",
         evidence_id: str = "evidence-01",
         locator: str = "Figure 2",
+        independence_group: str = "group-a",
     ):
         return invoke(
             self.root,
             network_id,
             [
                 "add-evidence",
-                "--evidence-id", evidence_id,
-                "--claim-id", claim_id,
-                "--source-id", source_id,
-                "--polarity", polarity,
-                "--exact-locator", locator,
-                "--independence-group", "group-a",
-                "--summary", f"{claim_id} via {source_id}",
+                "--evidence-id",
+                evidence_id,
+                "--claim-id",
+                claim_id,
+                "--source-id",
+                source_id,
+                "--polarity",
+                polarity,
+                "--exact-locator",
+                locator,
+                "--independence-group",
+                independence_group,
+                "--summary",
+                f"{claim_id} via {source_id}",
             ],
         )
 
@@ -490,18 +515,22 @@ class KnowledgeNetworkTest(unittest.TestCase):
             external_snapshot = Path(external_directory) / "corpus.json"
             local_snapshot.replace(external_snapshot)
             file_digest = sha256(external_snapshot)
-            digest = json.loads(
-                external_snapshot.read_text(encoding="utf-8")
-            )["state_sha256"]
+            digest = json.loads(external_snapshot.read_text(encoding="utf-8"))[
+                "state_sha256"
+            ]
             initialized = invoke(
                 self.root,
                 self.network_id,
                 [
                     "init",
-                    "--question", "Can an external snapshot remain external?",
-                    "--scope", "external-private-snapshot",
-                    "--snapshot-path", str(external_snapshot),
-                    "--snapshot-digest", digest,
+                    "--question",
+                    "Can an external snapshot remain external?",
+                    "--scope",
+                    "external-private-snapshot",
+                    "--snapshot-path",
+                    str(external_snapshot),
+                    "--snapshot-digest",
+                    digest,
                 ],
             )
             self.assertEqual(initialized[0], 0, initialized[2])
@@ -652,10 +681,14 @@ class KnowledgeNetworkTest(unittest.TestCase):
                 ):
                     producer_code = producer.main(
                         [
-                            "--base-url", f"http://127.0.0.1:{server.server_port}",
-                            "--group-id", str(group_id),
-                            "--collection-key", collection_key,
-                            "--output", str(producer_output),
+                            "--base-url",
+                            f"http://127.0.0.1:{server.server_port}",
+                            "--group-id",
+                            str(group_id),
+                            "--collection-key",
+                            collection_key,
+                            "--output",
+                            str(producer_output),
                         ]
                     )
                 self.assertEqual(producer_code, 0, stderr.getvalue())
@@ -672,10 +705,14 @@ class KnowledgeNetworkTest(unittest.TestCase):
                     network_id,
                     [
                         "init",
-                        "--question", "Can producer output be consumed directly?",
-                        "--scope", "producer-consumer-contract",
-                        "--snapshot-path", str(producer_output),
-                        "--snapshot-digest", producer_state,
+                        "--question",
+                        "Can producer output be consumed directly?",
+                        "--scope",
+                        "producer-consumer-contract",
+                        "--snapshot-path",
+                        str(producer_output),
+                        "--snapshot-digest",
+                        producer_state,
                     ],
                 )
                 self.assertEqual(initialized[0], 0, initialized[2])
@@ -684,7 +721,8 @@ class KnowledgeNetworkTest(unittest.TestCase):
                     network_id,
                     [
                         "ingest-zotero-snapshot",
-                        "--snapshot", str(producer_output),
+                        "--snapshot",
+                        str(producer_output),
                     ],
                 )
                 self.assertEqual(ingested[0], 0, ingested[2])
@@ -695,9 +733,7 @@ class KnowledgeNetworkTest(unittest.TestCase):
                     )
                 )
                 self.assertEqual(state["corpus_snapshot_digest"], producer_state)
-                self.assertEqual(
-                    state["corpus_snapshot_state_sha256"], producer_state
-                )
+                self.assertEqual(state["corpus_snapshot_state_sha256"], producer_state)
                 self.assertEqual(
                     state["corpus_snapshot_identity_sha256"],
                     producer_payload["identity_sha256"],
@@ -706,12 +742,12 @@ class KnowledgeNetworkTest(unittest.TestCase):
                     state["corpus_snapshot_file_sha256"], sha256(producer_output)
                 )
 
-                responses[
-                    f"/api/groups/{group_id}/collections/{collection_key}"
+                responses[f"/api/groups/{group_id}/collections/{collection_key}"][
+                    "version"
+                ] = 10
+                responses[f"/api/groups/{group_id}/collections/{collection_key}"][
+                    "data"
                 ]["version"] = 10
-                responses[
-                    f"/api/groups/{group_id}/collections/{collection_key}"
-                ]["data"]["version"] = 10
                 responses[
                     f"/api/groups/{group_id}/collections/{collection_key}/items/top"
                 ][0]["version"] = 3
@@ -721,28 +757,31 @@ class KnowledgeNetworkTest(unittest.TestCase):
                 producer_output_v2 = Path(external_directory) / "producer-v2.json"
                 v2_stdout = io.StringIO()
                 v2_stderr = io.StringIO()
-                with contextlib.redirect_stdout(
-                    v2_stdout
-                ), contextlib.redirect_stderr(v2_stderr):
+                with contextlib.redirect_stdout(v2_stdout), contextlib.redirect_stderr(
+                    v2_stderr
+                ):
                     producer_v2_code = producer.main(
                         [
-                            "--base-url", f"http://127.0.0.1:{server.server_port}",
-                            "--group-id", str(group_id),
-                            "--collection-key", collection_key,
-                            "--output", str(producer_output_v2),
+                            "--base-url",
+                            f"http://127.0.0.1:{server.server_port}",
+                            "--group-id",
+                            str(group_id),
+                            "--collection-key",
+                            collection_key,
+                            "--output",
+                            str(producer_output_v2),
                         ]
                     )
                 self.assertEqual(producer_v2_code, 0, v2_stderr.getvalue())
                 producer_v2_result = json.loads(v2_stdout.getvalue())
-                self.assertNotEqual(
-                    producer_v2_result["state_sha256"], producer_state
-                )
+                self.assertNotEqual(producer_v2_result["state_sha256"], producer_state)
                 refreshed = invoke(
                     self.root,
                     network_id,
                     [
                         "ingest-zotero-snapshot",
-                        "--snapshot", str(producer_output_v2),
+                        "--snapshot",
+                        str(producer_output_v2),
                         "--allow-refresh",
                     ],
                 )
@@ -794,10 +833,14 @@ class KnowledgeNetworkTest(unittest.TestCase):
                     file_network,
                     [
                         "init",
-                        "--question", "file tamper",
-                        "--scope", "tamper",
-                        "--snapshot-path", str(file_tamper),
-                        "--snapshot-digest", producer_state,
+                        "--question",
+                        "file tamper",
+                        "--scope",
+                        "tamper",
+                        "--snapshot-path",
+                        str(file_tamper),
+                        "--snapshot-digest",
+                        producer_state,
                     ],
                 )
                 self.assertEqual(file_init[0], 0, file_init[2])
@@ -823,10 +866,14 @@ class KnowledgeNetworkTest(unittest.TestCase):
                     "network-producer-state-tamper",
                     [
                         "init",
-                        "--question", "state tamper",
-                        "--scope", "tamper",
-                        "--snapshot-path", str(state_tamper),
-                        "--snapshot-digest", bad_state["state_sha256"],
+                        "--question",
+                        "state tamper",
+                        "--scope",
+                        "tamper",
+                        "--snapshot-path",
+                        str(state_tamper),
+                        "--snapshot-digest",
+                        bad_state["state_sha256"],
                     ],
                 )
                 self.assertEqual(state_init[0], 1, state_init[2])
@@ -852,10 +899,14 @@ class KnowledgeNetworkTest(unittest.TestCase):
                     "network-producer-identity-tamper",
                     [
                         "init",
-                        "--question", "identity tamper",
-                        "--scope", "tamper",
-                        "--snapshot-path", str(identity_tamper),
-                        "--snapshot-digest", bad_identity["state_sha256"],
+                        "--question",
+                        "identity tamper",
+                        "--scope",
+                        "tamper",
+                        "--snapshot-path",
+                        str(identity_tamper),
+                        "--snapshot-digest",
+                        bad_identity["state_sha256"],
                     ],
                 )
                 self.assertEqual(identity_init[0], 1, identity_init[2])
@@ -873,10 +924,14 @@ class KnowledgeNetworkTest(unittest.TestCase):
             "network-relative-input",
             [
                 "init",
-                "--question", "relative",
-                "--scope", "local",
-                "--snapshot-path", target.name,
-                "--snapshot-digest", sha256(target),
+                "--question",
+                "relative",
+                "--scope",
+                "local",
+                "--snapshot-path",
+                target.name,
+                "--snapshot-digest",
+                sha256(target),
             ],
         )
         self.assertEqual(relative[0], 1, relative[2])
@@ -889,10 +944,14 @@ class KnowledgeNetworkTest(unittest.TestCase):
             "network-symlink-input",
             [
                 "init",
-                "--question", "symlink",
-                "--scope", "local",
-                "--snapshot-path", str(symlink),
-                "--snapshot-digest", sha256(target),
+                "--question",
+                "symlink",
+                "--scope",
+                "local",
+                "--snapshot-path",
+                str(symlink),
+                "--snapshot-digest",
+                sha256(target),
             ],
         )
         self.assertEqual(symlink_result[0], 1, symlink_result[2])
@@ -905,10 +964,14 @@ class KnowledgeNetworkTest(unittest.TestCase):
             "network-fifo-input",
             [
                 "init",
-                "--question", "fifo",
-                "--scope", "local",
-                "--snapshot-path", str(fifo),
-                "--snapshot-digest", f"sha256:{'0' * 64}",
+                "--question",
+                "fifo",
+                "--scope",
+                "local",
+                "--snapshot-path",
+                str(fifo),
+                "--snapshot-digest",
+                f"sha256:{'0' * 64}",
             ],
         )
         self.assertEqual(fifo_result[0], 1, fifo_result[2])
@@ -935,19 +998,21 @@ class KnowledgeNetworkTest(unittest.TestCase):
                 "network-drifting-input",
                 [
                     "init",
-                    "--question", "drift",
-                    "--scope", "local",
-                    "--snapshot-path", str(snapshot),
-                    "--snapshot-digest", sha256(snapshot),
+                    "--question",
+                    "drift",
+                    "--scope",
+                    "local",
+                    "--snapshot-path",
+                    str(snapshot),
+                    "--snapshot-digest",
+                    sha256(snapshot),
                 ],
             )
         finally:
             MODULE._snapshot_file_fingerprint = original_fingerprint
         self.assertEqual(result[0], 1, result[2])
         self.assertIn("changed during read", result[2])
-        self.assertFalse(
-            (self.root / "networks" / "network-drifting-input").exists()
-        )
+        self.assertFalse((self.root / "networks" / "network-drifting-input").exists())
 
     def test_ingest_zotero_snapshot_idempotent(self):
         parents = [
@@ -1021,6 +1086,7 @@ class KnowledgeNetworkTest(unittest.TestCase):
             },
             before,
         )
+
     def test_note_aware_legacy_refresh_changes_exact_raw_html_delta_append_only(self):
         parents = []
         prior_html = {}
@@ -1135,15 +1201,11 @@ class KnowledgeNetworkTest(unittest.TestCase):
         self.assertNotIn("<div", serialized)
         self.assertNotIn("new 0", serialized)
         self.assertTrue(all("zotero_source_revision" in row for row in appended))
-        state = json.loads(
-            (network_dir / "network.json").read_text(encoding="utf-8")
-        )
+        state = json.loads((network_dir / "network.json").read_text(encoding="utf-8"))
         guards = state["corpus_snapshot_current_source_revision_guards"]
         self.assertEqual(len(guards), 67)
         self.assertEqual(
-            self.load_ledger(self.network_id, "events")[-1][
-                "source_revision_guards"
-            ],
+            self.load_ledger(self.network_id, "events")[-1]["source_revision_guards"],
             guards,
         )
         validation = invoke(self.root, self.network_id, ["validate"])
@@ -1289,9 +1351,7 @@ class KnowledgeNetworkTest(unittest.TestCase):
         semantic_a = self.make_zotero_semantic_snapshot(
             inventory, {"REVERT01": "<div>A</div>"}, suffix="revert-a"
         )
-        self.init_network_with_snapshot(
-            self.network_id, inventory, sha256(inventory)
-        )
+        self.init_network_with_snapshot(self.network_id, inventory, sha256(inventory))
         first = invoke(
             self.root,
             self.network_id,
@@ -1379,17 +1439,15 @@ class KnowledgeNetworkTest(unittest.TestCase):
             inventory, {"FORGE001": "<div>original</div>"}, suffix="forged"
         )
         forged = json.loads(semantic.read_text(encoding="utf-8"))
-        forged["parents"][0]["notes"][0]["semantic_payload"][
-            "normalized_blocks"
-        ] = [{"kind": "p", "location": "p[1]", "text": "FORGED DIFFERENT"}]
+        forged["parents"][0]["notes"][0]["semantic_payload"]["normalized_blocks"] = [
+            {"kind": "p", "location": "p[1]", "text": "FORGED DIFFERENT"}
+        ]
         forged["state_sha256"] = MODULE._semantic_snapshot_state_digest(forged)
         semantic.write_text(
             json.dumps(forged, ensure_ascii=False, sort_keys=True, indent=2),
             encoding="utf-8",
         )
-        self.init_network_with_snapshot(
-            self.network_id, inventory, sha256(inventory)
-        )
+        self.init_network_with_snapshot(self.network_id, inventory, sha256(inventory))
         result = invoke(
             self.root,
             self.network_id,
@@ -1447,11 +1505,9 @@ class KnowledgeNetworkTest(unittest.TestCase):
             if target == "parent":
                 semantic_payload["parents"][0]["version"] = invalid_version
             else:
-                semantic_payload["parents"][0]["notes"][0][
-                    "version"
-                ] = invalid_version
-            semantic_payload["state_sha256"] = (
-                MODULE._semantic_snapshot_state_digest(semantic_payload)
+                semantic_payload["parents"][0]["notes"][0]["version"] = invalid_version
+            semantic_payload["state_sha256"] = MODULE._semantic_snapshot_state_digest(
+                semantic_payload
             )
             semantic.write_text(
                 json.dumps(
@@ -1459,9 +1515,7 @@ class KnowledgeNetworkTest(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            self.init_network_with_snapshot(
-                network_id, inventory, sha256(inventory)
-            )
+            self.init_network_with_snapshot(network_id, inventory, sha256(inventory))
             result = invoke(
                 self.root,
                 network_id,
@@ -1623,9 +1677,7 @@ class KnowledgeNetworkTest(unittest.TestCase):
                 {str(parent["key"]): "<div>safe</div>"},
                 suffix=f"guard-privacy-{index}",
             )
-            self.init_network_with_snapshot(
-                network_id, inventory, sha256(inventory)
-            )
+            self.init_network_with_snapshot(network_id, inventory, sha256(inventory))
             result = invoke(
                 self.root,
                 network_id,
@@ -1814,9 +1866,7 @@ class KnowledgeNetworkTest(unittest.TestCase):
             ],
         )
         self.assertEqual(first[0], 0, first[2])
-        old_source_id = self.load_ledger(self.network_id, "sources")[0][
-            "source_id"
-        ]
+        old_source_id = self.load_ledger(self.network_id, "sources")[0]["source_id"]
 
         empty_inventory, _ = self.make_zotero_snapshot(
             self.network_id, [], collection_version=2
@@ -1924,9 +1974,7 @@ class KnowledgeNetworkTest(unittest.TestCase):
             ],
         )
         self.assertEqual(first[0], 0, first[2])
-        old_source_id = self.load_ledger(self.network_id, "sources")[0][
-            "source_id"
-        ]
+        old_source_id = self.load_ledger(self.network_id, "sources")[0]["source_id"]
 
         new_parent = dict(old_parent)
         new_parent["key"] = "NEWPAR01"
@@ -2110,9 +2158,7 @@ class KnowledgeNetworkTest(unittest.TestCase):
         key_match["DOI"] = "10.1000/different-lineage"
         identity_match = dict(old_parent)
         identity_match["key"] = "SPLIT002"
-        identity_match["children"] = [
-            {**old_parent["children"][0], "key": "SPLNOTE2"}
-        ]
+        identity_match["children"] = [{**old_parent["children"][0], "key": "SPLNOTE2"}]
         second_inventory, _ = self.make_zotero_snapshot(
             self.network_id,
             [key_match, identity_match],
@@ -2177,9 +2223,7 @@ class KnowledgeNetworkTest(unittest.TestCase):
             ["ingest-zotero-snapshot", "--snapshot", str(first_inventory)],
         )
         self.assertEqual(first[0], 0, first[2])
-        old_source_id = self.load_ledger(self.network_id, "sources")[0][
-            "source_id"
-        ]
+        old_source_id = self.load_ledger(self.network_id, "sources")[0]["source_id"]
 
         empty_inventory, _ = self.make_zotero_snapshot(
             self.network_id, [], collection_version=2
@@ -2388,9 +2432,7 @@ class KnowledgeNetworkTest(unittest.TestCase):
                 {"NOTECARD": "<div>note</div>"},
                 suffix=f"cardinality-{count}",
             )
-            self.init_network_with_snapshot(
-                network_id, inventory, sha256(inventory)
-            )
+            self.init_network_with_snapshot(network_id, inventory, sha256(inventory))
             result = invoke(
                 self.root,
                 network_id,
@@ -2431,9 +2473,7 @@ class KnowledgeNetworkTest(unittest.TestCase):
         semantic = self.make_zotero_semantic_snapshot(
             inventory, {"NOOP0001": "<div>same</div>"}, suffix="noop"
         )
-        self.init_network_with_snapshot(
-            self.network_id, inventory, sha256(inventory)
-        )
+        self.init_network_with_snapshot(self.network_id, inventory, sha256(inventory))
         command = [
             "ingest-zotero-snapshot",
             "--snapshot",
@@ -2540,13 +2580,20 @@ class KnowledgeNetworkTest(unittest.TestCase):
             self.network_id,
             [
                 "add-source",
-                "--source-id", method_source_id,
-                "--canonical-identity", "doi:10.1000/shared",
-                "--canonical-version", "version-of-record",
-                "--read-version", "verified-full-text",
-                "--read-depth", "full",
-                "--version-hash", f"sha256:{'a' * 64}",
-                "--role", "method",
+                "--source-id",
+                method_source_id,
+                "--canonical-identity",
+                "doi:10.1000/shared",
+                "--canonical-version",
+                "version-of-record",
+                "--read-version",
+                "verified-full-text",
+                "--read-depth",
+                "full",
+                "--version-hash",
+                f"sha256:{'a' * 64}",
+                "--role",
+                "method",
             ],
         )
         self.assertEqual(method_added[0], 0, method_added[2])
@@ -2555,10 +2602,14 @@ class KnowledgeNetworkTest(unittest.TestCase):
             self.network_id,
             [
                 "add-entity",
-                "--entity-id", "method-entity",
-                "--entity-type", "method",
-                "--name", "Reviewed method",
-                "--description", "Synthetic public regression fixture.",
+                "--entity-id",
+                "method-entity",
+                "--entity-type",
+                "method",
+                "--name",
+                "Reviewed method",
+                "--description",
+                "Synthetic public regression fixture.",
             ],
         )
         self.assertEqual(entity_added[0], 0, entity_added[2])
@@ -2567,10 +2618,14 @@ class KnowledgeNetworkTest(unittest.TestCase):
             self.network_id,
             [
                 "add-claim",
-                "--claim-id", "method-claim",
-                "--claim-text", "The reviewed method has bounded evidence.",
-                "--entity-id", "method-entity",
-                "--impact", "medium",
+                "--claim-id",
+                "method-claim",
+                "--claim-text",
+                "The reviewed method has bounded evidence.",
+                "--entity-id",
+                "method-entity",
+                "--impact",
+                "medium",
             ],
         )
         self.assertEqual(claim_added[0], 0, claim_added[2])
@@ -2579,13 +2634,20 @@ class KnowledgeNetworkTest(unittest.TestCase):
             self.network_id,
             [
                 "add-evidence",
-                "--evidence-id", "method-evidence",
-                "--claim-id", "method-claim",
-                "--source-id", method_source_id,
-                "--polarity", "supports",
-                "--exact-locator", "PDF p. 3 | Eq. (1)",
-                "--independence-group", "reviewed-method-paper",
-                "--summary", "Synthetic evidence remains bound to full text.",
+                "--evidence-id",
+                "method-evidence",
+                "--claim-id",
+                "method-claim",
+                "--source-id",
+                method_source_id,
+                "--polarity",
+                "supports",
+                "--exact-locator",
+                "PDF p. 3 | Eq. (1)",
+                "--independence-group",
+                "reviewed-method-paper",
+                "--summary",
+                "Synthetic evidence remains bound to full text.",
             ],
         )
         self.assertEqual(evidence_added[0], 0, evidence_added[2])
@@ -2601,7 +2663,8 @@ class KnowledgeNetworkTest(unittest.TestCase):
             self.network_id,
             [
                 "ingest-zotero-snapshot",
-                "--snapshot", str(snapshot_path),
+                "--snapshot",
+                str(snapshot_path),
                 "--allow-refresh",
             ],
         )
@@ -2640,12 +2703,8 @@ class KnowledgeNetworkTest(unittest.TestCase):
             corpus_rows[0]["source_id"],
             state["corpus_snapshot_current_source_ids"],
         )
-        self.assertNotIn(
-            method_source_id, state["corpus_snapshot_current_source_ids"]
-        )
-        self.assertEqual(
-            self.load_ledger(self.network_id, "evidence"), evidence_before
-        )
+        self.assertNotIn(method_source_id, state["corpus_snapshot_current_source_ids"])
+        self.assertEqual(self.load_ledger(self.network_id, "evidence"), evidence_before)
         validated = invoke(self.root, self.network_id, ["validate"])
         self.assertEqual(validated[0], 0, validated[2])
         export_path = self.root / "role-aware-source-export.json"
@@ -2774,16 +2833,16 @@ class KnowledgeNetworkTest(unittest.TestCase):
             ],
         )
         self.assertEqual(refresh[0], 0, refresh[2])
-        self.assertTrue(sources_path.read_bytes().startswith(noncanonical_source_prefix))
+        self.assertTrue(
+            sources_path.read_bytes().startswith(noncanonical_source_prefix)
+        )
         self.assertTrue(events_path.read_bytes().startswith(events_prefix))
         payload = json.loads(refresh[1])
         self.assertEqual(payload["added"], 1)
         self.assertEqual(payload["changed"], 1)
         self.assertEqual(payload["existing"], 1)
         self.assertEqual(payload["total"], 3)
-        self.assertEqual(
-            payload["snapshot_state"]["digest"], refreshed_state_digest
-        )
+        self.assertEqual(payload["snapshot_state"]["digest"], refreshed_state_digest)
         self.assertEqual(payload["snapshot_state"]["file_sha256"], file_digest)
         sources = self.load_ledger(self.network_id, "sources")
         self.assertEqual(len(sources), 4)
@@ -3009,9 +3068,7 @@ class KnowledgeNetworkTest(unittest.TestCase):
             encoding="utf-8",
         )
         path_digest = sha256(snapshot_path)
-        self.init_network_with_snapshot(
-            self.network_id, snapshot_path, path_digest
-        )
+        self.init_network_with_snapshot(self.network_id, snapshot_path, path_digest)
         code, _, error = invoke(
             self.root,
             self.network_id,
@@ -3045,10 +3102,14 @@ class KnowledgeNetworkTest(unittest.TestCase):
             self.network_id,
             [
                 "init",
-                "--question", "identity digest tamper",
-                "--scope", "tamper",
-                "--snapshot-path", str(snapshot_path),
-                "--snapshot-digest", payload["state_sha256"],
+                "--question",
+                "identity digest tamper",
+                "--scope",
+                "tamper",
+                "--snapshot-path",
+                str(snapshot_path),
+                "--snapshot-digest",
+                payload["state_sha256"],
             ],
         )
         self.assertEqual(identity[0], 1, identity[2])
@@ -3070,10 +3131,14 @@ class KnowledgeNetworkTest(unittest.TestCase):
             state_network,
             [
                 "init",
-                "--question", "state digest tamper",
-                "--scope", "tamper",
-                "--snapshot-path", str(snapshot_path),
-                "--snapshot-digest", payload["state_sha256"],
+                "--question",
+                "state digest tamper",
+                "--scope",
+                "tamper",
+                "--snapshot-path",
+                str(snapshot_path),
+                "--snapshot-digest",
+                payload["state_sha256"],
             ],
         )
         self.assertEqual(state_result[0], 1, state_result[2])
@@ -3126,10 +3191,14 @@ class KnowledgeNetworkTest(unittest.TestCase):
             malformed_network,
             [
                 "init",
-                "--question", "parent shape tamper",
-                "--scope", "tamper",
-                "--snapshot-path", str(snapshot_path),
-                "--snapshot-digest", payload["state_sha256"],
+                "--question",
+                "parent shape tamper",
+                "--scope",
+                "tamper",
+                "--snapshot-path",
+                str(snapshot_path),
+                "--snapshot-digest",
+                payload["state_sha256"],
             ],
         )
         self.assertEqual(malformed[0], 1, malformed[2])
@@ -3234,13 +3303,20 @@ class KnowledgeNetworkTest(unittest.TestCase):
             self.network_id,
             [
                 "add-source",
-                "--source-id", conflict_source_id,
-                "--canonical-identity", "conflict",
-                "--canonical-version", "v-conflict",
-                "--read-version", "read-conflict",
-                "--read-depth", "metadata",
-                "--version-hash", f"sha256:{'0' * 64}",
-                "--role", "source",
+                "--source-id",
+                conflict_source_id,
+                "--canonical-identity",
+                "conflict",
+                "--canonical-version",
+                "v-conflict",
+                "--read-version",
+                "read-conflict",
+                "--read-depth",
+                "metadata",
+                "--version-hash",
+                f"sha256:{'0' * 64}",
+                "--role",
+                "source",
             ],
         )
         self.assertEqual(conflict[0], 0, conflict[2])
@@ -3303,12 +3379,7 @@ class KnowledgeNetworkTest(unittest.TestCase):
 
     def test_residual_transaction_journal_blocks_validation(self):
         self.init_network(self.network_id)
-        journal = (
-            self.root
-            / "networks"
-            / self.network_id
-            / ".transaction.json"
-        )
+        journal = self.root / "networks" / self.network_id / ".transaction.json"
         journal.write_text(
             json.dumps(
                 {
@@ -3441,10 +3512,14 @@ class KnowledgeNetworkTest(unittest.TestCase):
             self.network_id,
             [
                 "add-relation",
-                "--relation-id", "relation-01",
-                "--relation-type", "supports",
-                "--from-ref", "claim:claim-01",
-                "--to-ref", "evidence:evidence-01",
+                "--relation-id",
+                "relation-01",
+                "--relation-type",
+                "supports",
+                "--from-ref",
+                "claim:claim-01",
+                "--to-ref",
+                "evidence:evidence-01",
             ],
         )
         self.assertEqual(relation[0], 0, relation[2])
@@ -3460,6 +3535,119 @@ class KnowledgeNetworkTest(unittest.TestCase):
         validate = invoke(self.root, self.network_id, ["validate"])
         self.assertEqual(validate[0], 0)
 
+    def test_lfp_evidence_id_over_legacy_63_character_limit_is_materializable(self):
+        self.init_network(self.network_id)
+        self.add_source(self.network_id, "source-01")
+        self.add_claim(self.network_id, "claim-01", impact="medium")
+        evidence_id = (
+            "e-zeger2000-kgh004-v4-naive-regression-surrogacy-and-"
+            "classical-attenuation"
+        )
+        self.assertEqual(len(evidence_id), 74)
+
+        evidence = self.add_evidence(
+            self.network_id,
+            "claim-01",
+            "source-01",
+            evidence_id=evidence_id,
+        )
+        self.assertEqual(evidence[0], 0, evidence[2])
+        relation = invoke(
+            self.root,
+            self.network_id,
+            [
+                "add-relation",
+                "--relation-id",
+                "relation-long-lfp-evidence-id",
+                "--relation-type",
+                "supports",
+                "--from-ref",
+                "claim:claim-01",
+                "--to-ref",
+                "evidence:" + evidence_id,
+            ],
+        )
+        self.assertEqual(relation[0], 0, relation[2])
+
+        recorded_gap = invoke(
+            self.root,
+            self.network_id,
+            [
+                "record-gap",
+                "--gap-id",
+                "gap-long-lfp-evidence-id",
+                "--gap-type",
+                "explicit",
+                "--claim-id",
+                "claim-01",
+                "--impact",
+                "medium",
+                "--status",
+                "open",
+                "--description",
+                "Exercise a long evidence ID through gap resolution.",
+            ],
+        )
+        self.assertEqual(recorded_gap[0], 0, recorded_gap[2])
+        gap_record = self.load_ledger(self.network_id, "gaps")[-1]
+        transitioned = invoke(
+            self.root,
+            self.network_id,
+            [
+                "transition-gap",
+                "--gap-id",
+                "gap-long-lfp-evidence-id",
+                "--from-record-id",
+                str(gap_record["record_id"]),
+                "--status",
+                "resolved",
+                "--reason",
+                "The exact reviewed evidence is now materialized.",
+                "--evidence-ref",
+                evidence_id,
+                "--resolution-source",
+                "claim-01",
+            ],
+        )
+        self.assertEqual(transitioned[0], 0, transitioned[2])
+
+        oversized_relation = invoke(
+            self.root,
+            self.network_id,
+            [
+                "add-relation",
+                "--relation-id",
+                "r" + "x" * 63,
+                "--relation-type",
+                "supports",
+                "--from-ref",
+                "claim:claim-01",
+                "--to-ref",
+                "evidence:" + evidence_id,
+            ],
+        )
+        self.assertEqual(oversized_relation[0], 1)
+        self.assertIn("relation_id invalid format", oversized_relation[2])
+
+        maximum_evidence_id = "e" + "x" * 254
+        maximum = self.add_evidence(
+            self.network_id,
+            "claim-01",
+            "source-01",
+            evidence_id=maximum_evidence_id,
+        )
+        self.assertEqual(maximum[0], 0, maximum[2])
+        oversized = self.add_evidence(
+            self.network_id,
+            "claim-01",
+            "source-01",
+            evidence_id="e" + "x" * 255,
+        )
+        self.assertEqual(oversized[0], 1)
+        self.assertIn("evidence_id invalid format", oversized[2])
+        validate = invoke(self.root, self.network_id, ["validate"])
+        self.assertEqual(validate[0], 0, validate[2])
+
     def test_locator_missing_rejected(self):
         self.init_network(self.network_id, required_dimension=[], required_benchmark=[])
         self.add_source(self.network_id, "source-01")
@@ -3470,12 +3658,18 @@ class KnowledgeNetworkTest(unittest.TestCase):
             self.network_id,
             [
                 "add-evidence",
-                "--evidence-id", "evidence-locator",
-                "--claim-id", "claim-locator",
-                "--source-id", "source-01",
-                "--polarity", "supports",
-                "--independence-group", "g1",
-                "--summary", "locator missing by test",
+                "--evidence-id",
+                "evidence-locator",
+                "--claim-id",
+                "claim-locator",
+                "--source-id",
+                "source-01",
+                "--polarity",
+                "supports",
+                "--independence-group",
+                "g1",
+                "--summary",
+                "locator missing by test",
             ],
         )
         self.assertEqual(code, 2)
@@ -3489,13 +3683,20 @@ class KnowledgeNetworkTest(unittest.TestCase):
             self.network_id,
             [
                 "add-source",
-                "--source-id", "source-bad",
-                "--canonical-identity", "Canonical source-bad",
-                "--canonical-version", "v1",
-                "--read-version", "read-v1",
-                "--read-depth", "full",
-                "--version-hash", f"sha256:{'2' * 64}",
-                "--role", "source",
+                "--source-id",
+                "source-bad",
+                "--canonical-identity",
+                "Canonical source-bad",
+                "--canonical-version",
+                "v1",
+                "--read-version",
+                "read-v1",
+                "--read-depth",
+                "full",
+                "--version-hash",
+                f"sha256:{'2' * 64}",
+                "--role",
+                "source",
             ],
         )
         self.assertEqual(code, 1, error)
@@ -3560,18 +3761,30 @@ class KnowledgeNetworkTest(unittest.TestCase):
             self.network_id,
             [
                 "record-gap",
-                "--gap-id", "gap-novelty",
-                "--gap-type", "implicit_candidate",
-                "--claim-id", "claim-isolate",
-                "--impact", "medium",
-                "--status", "open",
-                "--description", "novelty check",
-                "--grounds", "isolated",
-                "--warrant", "needs evidence",
-                "--backing", "none",
-                "--qualifier", "candidate only",
-                "--defeaters", "none",
-                "--search-test", "search route",
+                "--gap-id",
+                "gap-novelty",
+                "--gap-type",
+                "implicit_candidate",
+                "--claim-id",
+                "claim-isolate",
+                "--impact",
+                "medium",
+                "--status",
+                "open",
+                "--description",
+                "novelty check",
+                "--grounds",
+                "isolated",
+                "--warrant",
+                "needs evidence",
+                "--backing",
+                "none",
+                "--qualifier",
+                "candidate only",
+                "--defeaters",
+                "none",
+                "--search-test",
+                "search route",
                 "--novelty-claimed",
             ],
         )
@@ -3625,13 +3838,20 @@ class KnowledgeNetworkTest(unittest.TestCase):
             self.network_id,
             [
                 "record-gap",
-                "--gap-id", "gap-transition",
-                "--gap-type", "explicit",
-                "--claim-id", "claim-transition",
-                "--impact", "medium",
-                "--status", "open",
-                "--description", "Targeted search required",
-                "--source", "reviewer",
+                "--gap-id",
+                "gap-transition",
+                "--gap-type",
+                "explicit",
+                "--claim-id",
+                "claim-transition",
+                "--impact",
+                "medium",
+                "--status",
+                "open",
+                "--description",
+                "Targeted search required",
+                "--source",
+                "reviewer",
             ],
         )
         self.assertEqual(gap[0], 0, gap[2])
@@ -3643,11 +3863,16 @@ class KnowledgeNetworkTest(unittest.TestCase):
             self.network_id,
             [
                 "transition-gap",
-                "--gap-id", "gap-transition",
-                "--from-record-id", initial_record_id,
-                "--status", "resolved",
-                "--reason", "Targeted evidence now covers the missing route",
-                "--evidence-ref", "evidence-transition",
+                "--gap-id",
+                "gap-transition",
+                "--from-record-id",
+                initial_record_id,
+                "--status",
+                "resolved",
+                "--reason",
+                "Targeted evidence now covers the missing route",
+                "--evidence-ref",
+                "evidence-transition",
             ],
         )
         self.assertEqual(resolved[0], 0, resolved[2])
@@ -3660,10 +3885,14 @@ class KnowledgeNetworkTest(unittest.TestCase):
             self.network_id,
             [
                 "transition-gap",
-                "--gap-id", "gap-transition",
-                "--from-record-id", initial_record_id,
-                "--status", "open",
-                "--reason", "Stale transition attempt",
+                "--gap-id",
+                "gap-transition",
+                "--from-record-id",
+                initial_record_id,
+                "--status",
+                "open",
+                "--reason",
+                "Stale transition attempt",
             ],
         )
         self.assertEqual(stale[0], 1, stale[2])
@@ -3673,10 +3902,14 @@ class KnowledgeNetworkTest(unittest.TestCase):
             self.network_id,
             [
                 "transition-gap",
-                "--gap-id", "gap-transition",
-                "--from-record-id", resolved_payload["record_id"],
-                "--status", "open",
-                "--reason", "New contradictory result requires another search",
+                "--gap-id",
+                "gap-transition",
+                "--from-record-id",
+                resolved_payload["record_id"],
+                "--status",
+                "open",
+                "--reason",
+                "New contradictory result requires another search",
             ],
         )
         self.assertEqual(reopened[0], 0, reopened[2])
@@ -3696,12 +3929,18 @@ class KnowledgeNetworkTest(unittest.TestCase):
             self.network_id,
             [
                 "record-gap",
-                "--gap-id", "gap-needs-evidence",
-                "--gap-type", "explicit",
-                "--impact", "high",
-                "--status", "open",
-                "--description", "Evidence is still absent",
-                "--source", "reviewer",
+                "--gap-id",
+                "gap-needs-evidence",
+                "--gap-type",
+                "explicit",
+                "--impact",
+                "high",
+                "--status",
+                "open",
+                "--description",
+                "Evidence is still absent",
+                "--source",
+                "reviewer",
             ],
         )
         self.assertEqual(gap[0], 0, gap[2])
@@ -3713,10 +3952,14 @@ class KnowledgeNetworkTest(unittest.TestCase):
             self.network_id,
             [
                 "transition-gap",
-                "--gap-id", "gap-needs-evidence",
-                "--from-record-id", initial_record_id,
-                "--status", "resolved",
-                "--reason", "Unsupported closure",
+                "--gap-id",
+                "gap-needs-evidence",
+                "--from-record-id",
+                initial_record_id,
+                "--status",
+                "resolved",
+                "--reason",
+                "Unsupported closure",
             ],
         )
         self.assertEqual(rejected[0], 1, rejected[2])
@@ -3746,13 +3989,20 @@ class KnowledgeNetworkTest(unittest.TestCase):
             self.network_id,
             [
                 "record-gap",
-                "--gap-id", "gap-claim-a",
-                "--gap-type", "explicit",
-                "--claim-id", "claim-gap-a",
-                "--impact", "medium",
-                "--status", "open",
-                "--source", "reviewer",
-                "--description", "claim A still lacks evidence",
+                "--gap-id",
+                "gap-claim-a",
+                "--gap-type",
+                "explicit",
+                "--claim-id",
+                "claim-gap-a",
+                "--impact",
+                "medium",
+                "--status",
+                "open",
+                "--source",
+                "reviewer",
+                "--description",
+                "claim A still lacks evidence",
             ],
         )
         self.assertEqual(recorded[0], 0, recorded[2])
@@ -3764,11 +4014,16 @@ class KnowledgeNetworkTest(unittest.TestCase):
             self.network_id,
             [
                 "transition-gap",
-                "--gap-id", "gap-claim-a",
-                "--from-record-id", initial_record_id,
-                "--status", "resolved",
-                "--reason", "wrong claim evidence",
-                "--evidence-ref", "evidence-gap-b",
+                "--gap-id",
+                "gap-claim-a",
+                "--from-record-id",
+                initial_record_id,
+                "--status",
+                "resolved",
+                "--reason",
+                "wrong claim evidence",
+                "--evidence-ref",
+                "evidence-gap-b",
             ],
         )
         self.assertEqual(rejected[0], 1, rejected[2])
@@ -3896,7 +4151,9 @@ class KnowledgeNetworkTest(unittest.TestCase):
         diagnostic = rejected[1] + rejected[2]
         self.assertIn("initial record must be open", diagnostic)
         self.assertIn("initial record cannot contain a resolution source", diagnostic)
-        self.assertIn("transition_from_record_id must be a non-empty string", diagnostic)
+        self.assertIn(
+            "transition_from_record_id must be a non-empty string", diagnostic
+        )
 
     def test_coverage_unmet_blocks_completion(self):
         self.init_network(self.network_id, ["coverage-dim"], ["profile-x"])
@@ -3911,6 +4168,131 @@ class KnowledgeNetworkTest(unittest.TestCase):
         self.assertEqual(
             status["coverage"]["missing_benchmark_profiles"], ["profile-x"]
         )
+
+    def test_high_impact_completion_requires_two_sources_and_one_full_text(self):
+        self.init_network(self.network_id)
+        self.add_source(self.network_id, "source-01")
+        self.add_source(self.network_id, "source-02")
+        self.add_claim(self.network_id, "claim-high", impact="high")
+        first = self.add_evidence(
+            self.network_id,
+            "claim-high",
+            "source-01",
+            evidence_id="evidence-source-01",
+        )
+        self.assertEqual(first[0], 0, first[2])
+        self.assertEqual(
+            self.parse_status(self.network_id)[
+                "high_impact_claims_with_no_decisive_evidence"
+            ],
+            1,
+        )
+        second = self.add_evidence(
+            self.network_id,
+            "claim-high",
+            "source-02",
+            evidence_id="evidence-source-02",
+        )
+        self.assertEqual(second[0], 0, second[2])
+        self.assertEqual(
+            self.parse_status(self.network_id)[
+                "high_impact_claims_with_no_decisive_evidence"
+            ],
+            0,
+        )
+
+    def test_derive_gaps_matches_high_impact_source_and_full_text_gate(self):
+        single_source_network = "high-impact-single-source-groups"
+        self.init_network(single_source_network)
+        self.add_source(single_source_network, "source-only")
+        self.add_claim(single_source_network, "claim-single-groups", impact="high")
+        for index, group in enumerate(("claimed-group-a", "claimed-group-b"), start=1):
+            evidence = self.add_evidence(
+                single_source_network,
+                "claim-single-groups",
+                "source-only",
+                evidence_id=f"evidence-single-{index}",
+                independence_group=group,
+            )
+            self.assertEqual(evidence[0], 0, evidence[2])
+        self.assertEqual(
+            self.parse_status(single_source_network)[
+                "high_impact_claims_with_no_decisive_evidence"
+            ],
+            1,
+        )
+        derived = invoke(self.root, single_source_network, ["derive-gaps"])
+        self.assertEqual(derived[0], 0, derived[2])
+        open_gaps = set(self.parse_status(single_source_network)["open_gaps"])
+        self.assertIn(
+            "derived:unsupported-high-impact:claim-single-groups", open_gaps
+        )
+        self.assertIn("derived:single-source:claim-single-groups", open_gaps)
+
+        non_full_network = "high-impact-two-non-full-sources"
+        self.init_network(non_full_network)
+        self.add_source(
+            non_full_network,
+            "source-abstract-a",
+            version_hash=f"sha256:{'a' * 64}",
+            read_depth="abstract",
+        )
+        self.add_source(
+            non_full_network,
+            "source-abstract-b",
+            version_hash=f"sha256:{'b' * 64}",
+            read_depth="abstract",
+        )
+        self.add_claim(non_full_network, "claim-no-full-text", impact="high")
+        for index, source_id in enumerate(
+            ("source-abstract-a", "source-abstract-b"), start=1
+        ):
+            evidence = self.add_evidence(
+                non_full_network,
+                "claim-no-full-text",
+                source_id,
+                evidence_id=f"evidence-abstract-{index}",
+                independence_group=f"abstract-group-{index}",
+            )
+            self.assertEqual(evidence[0], 0, evidence[2])
+        self.assertEqual(
+            self.parse_status(non_full_network)[
+                "high_impact_claims_with_no_decisive_evidence"
+            ],
+            1,
+        )
+        derived = invoke(self.root, non_full_network, ["derive-gaps"])
+        self.assertEqual(derived[0], 0, derived[2])
+        open_gaps = set(self.parse_status(non_full_network)["open_gaps"])
+        self.assertIn("derived:unsupported-high-impact:claim-no-full-text", open_gaps)
+        self.assertNotIn("derived:single-source:claim-no-full-text", open_gaps)
+
+    def test_export_binds_requirements_and_current_gap_record_refs(self):
+        self.init_network(self.network_id, ["coverage-dim"], ["profile-x"])
+        self.add_source(self.network_id, "source-01")
+        derived = invoke(self.root, self.network_id, ["derive-gaps"])
+        self.assertEqual(derived[0], 0, derived[2])
+        output = self.root / "requirements-export.json"
+        exported = invoke(
+            self.root,
+            self.network_id,
+            ["export", "--output", str(output)],
+        )
+        self.assertEqual(exported[0], 0, exported[2])
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(
+            payload["requirements"],
+            {
+                "required_dimensions": ["coverage-dim"],
+                "required_benchmark_profiles": ["profile-x"],
+            },
+        )
+        for gap in payload["gaps"]:
+            record_ref = gap["record_ref"]
+            self.assertEqual(record_ref["status"], gap["status"])
+            self.assertRegex(record_ref["sha256"], r"^[0-9a-f]{64}$")
+            self.assertTrue(record_ref["record_id"])
+            self.assertGreater(record_ref["sequence"], 0)
 
     def test_coverage_check_uses_evidence_backed_network_union(self):
         self.init_network(self.network_id, ["required-a", "required-b"], [])
@@ -4107,7 +4489,9 @@ class KnowledgeNetworkTest(unittest.TestCase):
             "derived:missing-profile:hidden_dynamics",
         }
         local_ids = {f"derived:single-source:claim-{index}" for index in range(7)}
-        self.assertEqual(set(first_payload["appended_gap_ids"]), aggregate_ids | local_ids)
+        self.assertEqual(
+            set(first_payload["appended_gap_ids"]), aggregate_ids | local_ids
+        )
         self.assertEqual(len(first_payload["appended_gap_ids"]), 9)
         status = self.parse_status(self.network_id)
         self.assertEqual(
@@ -4153,12 +4537,18 @@ class KnowledgeNetworkTest(unittest.TestCase):
             self.network_id,
             [
                 "transition-gap",
-                "--gap-id", gap_id,
-                "--from-record-id", row["record_id"],
-                "--status", "resolved",
-                "--reason", "Coverage route reviewed",
-                "--evidence-ref", "evidence-colon",
-                "--resolution-source", "manual coverage audit",
+                "--gap-id",
+                gap_id,
+                "--from-record-id",
+                row["record_id"],
+                "--status",
+                "resolved",
+                "--reason",
+                "Coverage route reviewed",
+                "--evidence-ref",
+                "evidence-colon",
+                "--resolution-source",
+                "manual coverage audit",
             ],
         )
         self.assertEqual(resolved[0], 0, resolved[2])
@@ -4173,10 +4563,14 @@ class KnowledgeNetworkTest(unittest.TestCase):
             self.network_id,
             [
                 "transition-gap",
-                "--gap-id", gap_id,
-                "--from-record-id", resolved_row["record_id"],
-                "--status", "open",
-                "--reason", "Coverage requirement remains unmet",
+                "--gap-id",
+                gap_id,
+                "--from-record-id",
+                resolved_row["record_id"],
+                "--status",
+                "open",
+                "--reason",
+                "Coverage requirement remains unmet",
             ],
         )
         self.assertEqual(reopened[0], 0, reopened[2])
@@ -4226,13 +4620,20 @@ class KnowledgeNetworkTest(unittest.TestCase):
             self.network_id,
             [
                 "add-source",
-                "--source-id", "source-dup",
-                "--canonical-identity", "Canonical source-dup",
-                "--canonical-version", "v1",
-                "--read-version", "read-v1",
-                "--read-depth", "full",
-                "--version-hash", f"sha256:{'1' * 64}",
-                "--role", "source",
+                "--source-id",
+                "source-dup",
+                "--canonical-identity",
+                "Canonical source-dup",
+                "--canonical-version",
+                "v1",
+                "--read-version",
+                "read-v1",
+                "--read-depth",
+                "full",
+                "--version-hash",
+                f"sha256:{'1' * 64}",
+                "--role",
+                "source",
             ],
         )
         self.assertEqual(first[0], 0)
@@ -4241,20 +4642,27 @@ class KnowledgeNetworkTest(unittest.TestCase):
             self.network_id,
             [
                 "add-source",
-                "--source-id", "source-dup",
-                "--canonical-identity", "Canonical source-dup",
-                "--canonical-version", "v1",
-                "--read-version", "read-v1",
-                "--read-depth", "full",
-                "--version-hash", f"sha256:{'2' * 64}",
-                "--role", "source",
+                "--source-id",
+                "source-dup",
+                "--canonical-identity",
+                "Canonical source-dup",
+                "--canonical-version",
+                "v1",
+                "--read-version",
+                "read-v1",
+                "--read-depth",
+                "full",
+                "--version-hash",
+                f"sha256:{'2' * 64}",
+                "--role",
+                "source",
             ],
         )
         self.assertEqual(second[0], 1)
         state = json.loads(
-            (
-                self.root / "networks" / self.network_id / "network.json"
-            ).read_text(encoding="utf-8")
+            (self.root / "networks" / self.network_id / "network.json").read_text(
+                encoding="utf-8"
+            )
         )
         self.assertIn("network_id", state)
 
@@ -4263,7 +4671,7 @@ class KnowledgeNetworkTest(unittest.TestCase):
         self.add_source(self.network_id, "source-01")
         sources_ledger = self.root / "networks" / self.network_id / "sources.jsonl"
         with sources_ledger.open("a", encoding="utf-8") as handle:
-            handle.write("{\"truncated\":")
+            handle.write('{"truncated":')
         code, _, error = invoke(self.root, self.network_id, ["validate"])
         self.assertEqual(code, 1, error)
 
@@ -4352,18 +4760,30 @@ class KnowledgeNetworkTest(unittest.TestCase):
             self.network_id,
             [
                 "record-gap",
-                "--gap-id", "gap-contract-implicit-low",
-                "--gap-type", "implicit_candidate",
-                "--claim-id", "claim-contract-low",
-                "--impact", "low",
-                "--status", "open",
-                "--description", "Candidate benchmark coverage gap",
-                "--grounds", "Only one benchmark family is represented",
-                "--warrant", "Route robustness may not transfer",
-                "--backing", "The reviewed evidence covers one family",
-                "--qualifier", "candidate only",
-                "--defeaters", "A broader hidden benchmark set may exist",
-                "--search-test", "Search for an independent benchmark suite",
+                "--gap-id",
+                "gap-contract-implicit-low",
+                "--gap-type",
+                "implicit_candidate",
+                "--claim-id",
+                "claim-contract-low",
+                "--impact",
+                "low",
+                "--status",
+                "open",
+                "--description",
+                "Candidate benchmark coverage gap",
+                "--grounds",
+                "Only one benchmark family is represented",
+                "--warrant",
+                "Route robustness may not transfer",
+                "--backing",
+                "The reviewed evidence covers one family",
+                "--qualifier",
+                "candidate only",
+                "--defeaters",
+                "A broader hidden benchmark set may exist",
+                "--search-test",
+                "Search for an independent benchmark suite",
             ],
         )
         self.assertEqual(implicit_gap[0], 0, implicit_gap[2])
@@ -4411,14 +4831,10 @@ class KnowledgeNetworkTest(unittest.TestCase):
         self.assertIn("low", priorities)
         deep_run = load_deep_research_run()
         file_sha256 = hashlib.sha256(output_path.read_bytes()).hexdigest()
-        loaded, reference = deep_run._load_knowledge_network(
-            output_path, file_sha256
-        )
+        loaded, reference = deep_run._load_knowledge_network(output_path, file_sha256)
         self.assertEqual(loaded["snapshot_id"], payload["snapshot_id"])
         self.assertEqual(reference["sha256"], file_sha256)
-        next_actions = deep_run._build_next_actions_from_network(
-            loaded, {}, set()
-        )
+        next_actions = deep_run._build_next_actions_from_network(loaded, {}, set())
         implicit_action = next(
             action
             for action in next_actions
@@ -4548,9 +4964,7 @@ class KnowledgeNetworkTest(unittest.TestCase):
 
         payload = json.loads(first_output.read_text(encoding="utf-8"))
         current = [
-            row
-            for row in payload["sources"]
-            if row["corpus_membership"] == "current"
+            row for row in payload["sources"] if row["corpus_membership"] == "current"
         ]
         historical = [
             row
@@ -4614,28 +5028,50 @@ class KnowledgeNetworkTest(unittest.TestCase):
             "claim:claim-unsupported:missing-evidence",
             payload["projection_omissions"],
         )
-        self.assertFalse(
-            payload["completion"]["gate_checks"]["provenance_complete"]
-        )
+        self.assertFalse(payload["completion"]["gate_checks"]["provenance_complete"])
         self.assertEqual(payload["completion"]["status"], "partial")
         validator = load_deep_validator()
         self.assertEqual(validator.validate_knowledge_network(payload), [])
 
     def test_snapshot_binding_rejects_wrong_digest(self):
         snapshot = self.root / "external-snapshot.json"
-        snapshot.write_text("{\"items\": []}", encoding="utf-8")
+        snapshot.write_text('{"items": []}', encoding="utf-8")
         code, _, error = invoke(
             self.root,
             self.network_id,
             [
                 "init",
-                "--question", "bad digest",
-                "--scope", "local",
-                "--snapshot-path", str(snapshot),
-                "--snapshot-digest", "sha256:" + "0" * 64,
+                "--question",
+                "bad digest",
+                "--scope",
+                "local",
+                "--snapshot-path",
+                str(snapshot),
+                "--snapshot-digest",
+                "sha256:" + "0" * 64,
             ],
         )
         self.assertEqual(code, 1)
+
+    def test_projection_v2_requires_network_patch_atomic_context(self):
+        projection = {"schema": "EvidenceAppraisalNetworkProjection/v2"}
+        with self.assertRaisesRegex(ValueError, "staged network_patch apply"):
+            MODULE._require_projection_execution_context(projection)
+        with MODULE._network_patch_atomic_context():
+            MODULE._require_projection_execution_context(projection)
+        projection_v1 = {"schema": "EvidenceAppraisalNetworkProjection/v1"}
+        MODULE._require_projection_execution_context(projection_v1)
+        high_impact_v2_proposal = {
+            "actions": [{"target_claim": {"impact": "high"}}]
+        }
+        with self.assertRaisesRegex(ValueError, "staged network_patch apply"):
+            MODULE._require_projection_execution_context(
+                projection_v1, high_impact_v2_proposal
+            )
+        with MODULE._network_patch_atomic_context():
+            MODULE._require_projection_execution_context(
+                projection_v1, high_impact_v2_proposal
+            )
 
 
 if __name__ == "__main__":

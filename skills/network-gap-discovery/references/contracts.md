@@ -81,6 +81,14 @@ New v1 producers also emit additive `candidate_signal_policy` and
 signals with per-tier budgets, preserves the complete open-gap/isolate inventory
 outside `candidate_signals`, deduplicates signals sharing one semantic subject,
 and orders explicit high-impact gaps before derived single-source/isolate noise.
+Semantic deduplication coalesces every unique same-subject gap ref in the
+canonical incoming scan order into the retained signal. Generation projects all
+of those refs, in that order, into one hypothesis `grounds` list; it must not keep
+only the highest-priority gap while silently dropping a second current gap whose
+resolution depends on the same evidence action. Coalescing is family-scoped:
+an isolate, relation, or other cross-family signal suppressed under the same
+semantic subject remains visible in the complete audit inventory but its node or
+relation refs are never inserted into an explicit open-gap signal or grounds.
 Consumers must continue to accept older v1 probes; generation applies the same
 deterministic bounded projection when these additive fields are absent.
 
@@ -223,6 +231,85 @@ demotion. Deletion, insertion, semantic mutation, lifecycle states such as
 Adding a plausible-looking reference directly to prioritize output is therefore
 insufficient. Approval is a protocol record, not authenticated reviewer
 identity or evidence acceptance.
+
+## `ReviewedGapSelection/v2`
+
+V2 is additive. `ReviewedGapSelection/v1` remains accepted and its projection
+and digest behavior do not change. V2 freezes the reviewed semantic subject
+that later reading reports and a multi-reading patch must share:
+
+```json
+{
+  "schema": "ReviewedGapSelection/v2",
+  "input_ref": {
+    "schema": "KnowledgeGapHypotheses/v1",
+    "sha256": "<canonical prioritize-output SHA-256>"
+  },
+  "network_ref": {
+    "network_id": "KN-001", "snapshot_id": "KN-001-S001",
+    "sha256": "<network content_sha256>"
+  },
+  "round_id": "ROUND-001",
+  "selected_hypothesis_ids": ["KGH-001"],
+  "review_status": "approved",
+  "reviewer": {
+    "reviewer_id": "reviewer-001",
+    "reviewer_role": "independent claim reviewer"
+  },
+  "reviewed_at": "2026-08-05T00:10:00Z",
+  "claim_subjects": [{
+    "subject_id": "reviewed-gap-claim-subject-<16 hex>",
+    "subject_digest": "<64 lowercase hex>",
+    "hypothesis_id": "KGH-001",
+    "claim_text": "The exact claim to test",
+    "impact": "high",
+    "target_signature": "entity:A predicate:? entity:C",
+    "scope_statement": "The reviewed population and time bound",
+    "assumptions": ["reviewed assumption"],
+    "conditions": ["reviewed condition"],
+    "units": ["reviewed unit"],
+    "exclusions": ["reviewed exclusion"],
+    "defeaters": ["reviewed defeater"],
+    "coverage_dimensions": ["measurement regime"],
+    "benchmark_profiles": ["benchmark-v1"],
+    "origin_gap_refs": [{
+      "gap_id": "gap:current-export-gap",
+      "record_id": "gap-record-001",
+      "sequence": 7,
+      "status": "open",
+      "sha256": "<64 lowercase hex>"
+    }]
+  }]
+}
+```
+
+`claim_subjects` is ordered exactly like `selected_hypothesis_ids` and contains
+one subject per selected hypothesis. The subject digest hashes every subject
+field except `subject_id` and `subject_digest`; the ID is
+`reviewed-gap-claim-subject-<digest[:16]>`. Claim text, impact, and target
+signature must match the selected hypothesis. Each origin is a real current
+network gap from the hypothesis grounds. Its `record_id`, `sequence`, `status`,
+and `sha256` must equal the four fields in that exported gap's `record_ref`
+byte-for-byte. KGH IDs, missing records, reordered origins, stale sequence or
+status, and resolved/closed records fail closed.
+
+The bound export must carry the closed `requirements` object with
+`required_dimensions` and `required_benchmark_profiles`. Subject coverage and
+profile values must be unique subsets of those two respective lists; injected
+or cross-category values fail closed.
+
+`select` requires the bound export for this live-record check. The selected
+projection attaches the exact subject both to `reviewed_selection_ref` and to
+the selected hypothesis. Later deterministic request-set replay may operate
+from the digest-bound selected projection without reopening the export; live
+evidence consumption and patch proposal require the export again and repeat
+the current-record checks.
+
+`LearnFromPapersRequest/v1` remains unchanged. For a selected v2 subject,
+`epistemic_task.hypothesis`, `target_signature`, `scope_bounds`, the four typed
+`scope` lists, and `defeaters` are exact subject projections. Coverage
+dimensions, benchmark profiles, and origin gap refs stay in the reviewed
+subject and are not injected into the closed LFP v1 schema.
 
 ## Canonical network reference
 
@@ -500,6 +587,311 @@ snapshot and rerun the full audit because all prior request/report bindings are
 stale. The RKN consumer materializes evidence with
 `independence_group = basis.source_id`.
 
+## `PaperReadingEvidenceCollection/v1` bridge and `NetworkPatchProposal/v3`
+
+The multi-reading path accepts the LFP-owned
+`PaperReadingEvidenceCollection/v1` through the producer's public
+`validate_collection` function. NGD does not redefine that aggregate schema.
+The collection binds one network snapshot and one
+`LearnFromPapersRequestSet/v1`, contains at least two canonically ordered
+one-paper groups, and uses unique `source_id` values. NGD copies
+`collection.reading_groups` order exactly; it never deduplicates or silently
+sorts the projected group references.
+
+Collection consumption has one admitted route:
+`direct_reviewed_selection`. The preconsumption hypotheses file must be the
+exact approved `ReviewedGapSelection/v2` projection. A `results` status is not
+authority: NGD rejects it until a future route can owner-replay exact
+`ScholarDiscoveryResultSet/v2` files and their execution authorities.
+
+The direct route requires a detached
+`ReviewedEvidenceCollectionConsumptionAuthority/v1`. Its closed top-level
+field set is:
+
+```json
+{
+  "schema": "ReviewedEvidenceCollectionConsumptionAuthority/v1",
+  "schema_version": "1.0",
+  "authority_id": "reviewed-collection-consumption-authority-<16 hex>",
+  "authority_digest": "<64 lowercase hex>",
+  "route": "direct_reviewed_selection",
+  "network_ref": {"network_id": "KN-001", "snapshot_id": "KN-001-S001", "sha256": "<sha>"},
+  "consumed_at": "2026-08-05T00:30:00Z",
+  "round_id": "ROUND-001",
+  "hypotheses_binding": {},
+  "review_request_set_binding": {},
+  "reading_collection_binding": {},
+  "expected_consumed_hypotheses_sha256": "<sha>",
+  "decision": "approved",
+  "complete_scope": true,
+  "no_known_omission": true,
+  "reviewer_context": {
+    "reviewer_id": "reviewer-002",
+    "reviewer_role": "independent collection-consumption reviewer",
+    "reviewer_context_id": "review-context-002",
+    "reviewed_at": "2026-08-05T00:25:00Z",
+    "independent_from_bound_artifact_producers": true
+  },
+  "producer_context_ids": ["producer-context-001"],
+  "seal": {"algorithm": "sha256", "digest": "<authority_digest>"}
+}
+```
+
+`hypotheses_binding` has exactly `schema`, `raw_file_sha256`,
+`canonical_sha256`, `consumable_hypotheses`, `selection_summary`, and the full
+`reviewed_selection_ref`. Each consumable row has exactly `hypothesis_id`,
+`input_status: selected`, `epistemic_task_sha256`, `subject_ref`, and
+`origin_gap_refs`.
+
+`review_request_set_binding` has exactly `schema`, `raw_file_sha256`,
+`canonical_sha256`, `request_set_id`, `request_set_digest`, and `requests`.
+It deliberately has no `source_discovery_ref`: the detached authority, not a
+fabricated Scholar anchor, approves the exact LFR source list. Each request
+projection has exactly `request_id`, `request_content_sha256`,
+`hypothesis_id`, `epistemic_task_sha256`, and `sources`. This route alone
+requires each request to contain one source projection with `source_id`,
+`source_digest`, and `source_content_sha256`. Requests must form the exact
+Cartesian coverage of every selected hypothesis by every collection source.
+Generic `LearnFromPapersRequestSet/v1` validation is not narrowed.
+
+`reading_collection_binding` has exactly `schema`, `raw_file_sha256`,
+`canonical_sha256`, `collection_id`, `collection_digest`, and
+`reading_groups`. Each ordered group projection has exactly
+`reading_group_id`, `reading_group_digest`, `source_id`, `source_digest`,
+`source_artifact_sha256`, `report_set_id`, and `report_set_digest`.
+
+Authority construction derives ordered unique `producer_context_ids` from the
+finalized reading verification records when those IDs exist. The reviewer
+context ID must differ from every bound producer context and the explicit
+independence attestation must be true. This is a protocol record, not
+cryptographic identity authentication; the independent handoff must separately
+hold the exact raw authority-file SHA-256.
+
+Canonical hashes use UTF-8 JSON with sorted keys and compact separators.
+`authority_digest` hashes the authority without `authority_id`,
+`authority_digest`, and `seal`. The external `expected_authority_file_sha256`
+hashes the exact authority file bytes, including formatting and any final
+newline; it is never inferred from the authority payload. Every input is a
+canonical absolute non-symlink path, is stable-read, and is checked again after
+live replay.
+
+Authority creation runs the private deterministic transition. `consumed_at`
+and `round_id` are authority-bound. `expected_consumed_hypotheses_sha256`
+hashes the consumed hypotheses document after omitting only
+`cycle_state.consumption_ref`, which avoids a self-referential digest. Public
+consumption reruns that transition and exact-compares the hash.
+
+Every collection group must contribute at least one basis for each reviewed
+subject. Every basis must be `full_text`, `supports`, scope-exact, decisive,
+verifier-passed, claim-support eligible, and source-onboarded. A high-impact
+claim requires at least two distinct group `source_id` values. Status bases set
+`independence_group` to exactly `source_id`. Cycle state carries
+`reading_collection_id`, `reading_collection_digest`, and the compact
+`consumption_ref`, not scalar report-set/dossier/bundle replacements.
+
+The stable public APIs are:
+
+```python
+create_reviewed_collection_consumption_authority(
+    hypotheses_path, network, review_requests_path, reading_collection_path,
+    *, consumed_at, reviewer_context, round_id=None,
+    execution_authority_contexts=None,
+)
+consume_reviewed_evidence_collection(
+    hypotheses_path, network, review_requests_path, reading_collection_path,
+    authority_path, *, expected_authority_file_sha256,
+    execution_authority_contexts=None,
+)
+```
+
+The stable proposal API is:
+
+```python
+propose_patch_v3(
+    hypotheses_path, network, review_requests_path, reading_collection_path,
+    authority_path, *, expected_authority_file_sha256,
+    execution_authority_contexts=None,
+)
+```
+
+The proposal input is the same preconsumption selection file. Proposal replay
+calls the authority-gated consumer internally; a caller cannot inject a
+handwritten consumed state.
+
+V3 is the v2 closed envelope plus exactly one `reading_collection_ref` and one
+`consumption_ref`:
+It is non-empty and relation-only; blocked, node, and generic-evidence actions
+remain on the v2 audit path and cannot enter atomic multi-reading acceptance.
+
+```json
+{
+  "schema": "NetworkPatchProposal/v3",
+  "schema_version": "3.0",
+  "proposal_id": "network-patch-proposal-<16 hex>",
+  "proposal_digest": "<64 lowercase hex>",
+  "network_ref": {"network_id": "KN-001", "snapshot_id": "KN-001-S001", "sha256": "<sha>"},
+  "request_ref": {
+    "request_set_id": "request-set-...", "request_set_digest": "<sha>",
+    "review_request_set_id": "LFR-...", "review_request_set_digest": "<sha>"
+  },
+  "consumption_ref": {
+    "schema": "ReviewedEvidenceCollectionConsumption/v1",
+    "route": "direct_reviewed_selection",
+    "authority_id": "reviewed-collection-consumption-authority-<16 hex>",
+    "authority_digest": "<sha>",
+    "authority_file_sha256": "<exact raw-file sha>",
+    "consumed_hypotheses_sha256": "<deterministic projection sha>"
+  },
+  "reading_collection_ref": {
+    "collection_id": "paper-reading-evidence-collection-...",
+    "collection_digest": "<sha>"
+  },
+  "generated_at": "2026-08-05T00:30:00Z",
+  "proposal_only": true,
+  "novelty_claimed": false,
+  "review_gate": "pending_research_knowledge_network_acceptance",
+  "actions": []
+}
+```
+
+The proposal and consumed cycle carry byte-identical `consumption_ref` values.
+`validate_collection_consumption_ref` checks its closed shape and content
+identity. `propose_patch_v3` reopens every bound file, reruns consumption, and
+rejects any proposal whose ref or consumed projection differs.
+
+A relation action has exactly the v2 identity/type/status/hypothesis/target and
+reviewed-basis fields plus `subject_ref`, `origin_gap_refs`,
+`reading_group_refs`, and `target_claim`:
+
+```json
+{
+  "action_id": "network-patch-action-<16 hex>",
+  "action_digest": "<64 lowercase hex>",
+  "action_type": "propose_relation",
+  "action_status": "proposed",
+  "hypothesis_id": "KGH-001",
+  "target_signature": {"target_kind": "relation", "signature": "entity:A predicate:? entity:C"},
+  "hypothesis": "The exact reviewed claim text",
+  "subject_ref": {"subject_id": "reviewed-gap-claim-subject-...", "subject_digest": "<sha>"},
+  "origin_gap_refs": [{"gap_id": "gap:1", "record_id": "gap-record-1", "sequence": 7, "status": "open", "sha256": "<sha>"}],
+  "reading_group_refs": [{
+    "reading_group_id": "paper-reading-evidence-group-...",
+    "reading_group_digest": "<sha>",
+    "source_id": "SRC-1",
+    "report_set_id": "reading-report-set-v2-...",
+    "report_set_digest": "<sha>"
+  }],
+  "reviewed_evidence": [],
+  "target_claim": {}
+}
+```
+
+`reading_group_refs` has exactly the same order as
+`collection.reading_groups`; reviewed bases are contiguous in that order and
+each group contributes at least one. `subject_ref` and `origin_gap_refs` equal
+the target-claim projections. The action `hypothesis` equals the reviewed
+subject claim text.
+
+`NetworkPatchTargetClaim/v2` has the closed fields `schema`, `schema_version`,
+`claim_id`, `claim_text`, `entity_id`, `impact`, `coverage_dimensions`,
+`benchmark_profiles`, `supersedes`, `target_signature`, `subject_ref`,
+`origin_gap_refs`, `report_claim_refs`, `scope`, `scope_digest`, and
+`target_claim_digest`. Its scope contains `scope_statement`, `assumptions`,
+`conditions`, `units`, `exclusions`, `defeaters`, `coverage_dimensions`, and
+`benchmark_profiles`, all projected from the reviewed subject. Every ordered
+`report_claim_ref` binds one basis through exactly `basis_id`, `basis_digest`,
+`reading_group_id`, `claim_id`, `claim_digest`, `reading_report_id`, and
+`reading_report_digest`. The producer never chooses `eligible[0]` as a scalar
+claim surrogate.
+
+Old selection, single-paper consumption, `NetworkPatchProposal/v2`, and
+`NetworkPatchTargetClaim/v1` remain independently readable and are never
+silently upgraded.
+
+## `NetworkPatchProposal/v4` existing-claim evidence extension
+
+V4 is additive; v1-v3 validation and replay remain unchanged. Its top-level
+field set is exactly the v3 field set, with schema
+`NetworkPatchProposal/v4` and `schema_version: "4.0"`. The native v4 proposal
+digest hashes the complete canonical v4 payload except `proposal_id` and
+`proposal_digest`; it is never computed from a v3 projection. The proposal ID
+remains `network-patch-proposal-<digest[:16]>`.
+
+Each v4 action preserves the v3 common fields unchanged: `action_id`,
+`action_digest`, `action_type`, `action_status`, `hypothesis_id`,
+`target_signature`, `hypothesis`, `subject_ref`, `origin_gap_refs`,
+`reading_group_refs`, and `reviewed_evidence`. It then carries exactly one
+route payload:
+
+- When every current origin gap has no `claim_id`, the action is
+  `propose_relation` with one `NetworkPatchTargetClaim/v2`. This is the v3
+  new-claim route in the v4 envelope.
+- When every current origin gap has the same non-empty `claim_id`, the action is
+  `propose_evidence_extension` with one
+  `NetworkPatchExistingClaimRef/v1` and no `target_claim`.
+
+Claimless and claim-backed origins may not be mixed. Multiple claim IDs,
+missing current claim rows, duplicate claim rows, and a target claim named by
+another current claim's `supersedes` field fail closed. The extension subject
+must exactly equal the current claim's `claim_text`, `impact`, and complete
+typed scope; action `target_signature` and ordered origin-gap refs remain bound
+through the reviewed `subject_ref` digest.
+
+`NetworkPatchExistingClaimRef/v1` is closed:
+
+```json
+{
+  "schema": "NetworkPatchExistingClaimRef/v1",
+  "schema_version": "1.0",
+  "claim_id": "claim-existing-1",
+  "claim_record_ref": {
+    "record_id": "claim:claim-existing-1",
+    "sequence": 82,
+    "sha256": "<canonical SHA-256 of the full current claim ledger row>"
+  },
+  "claim_semantics": {
+    "claim_text": "The exact current claim text",
+    "entity_id": null,
+    "impact": "high",
+    "is_factual": false,
+    "scope_statement": "The exact current scope",
+    "assumptions": [],
+    "conditions": [],
+    "units": [],
+    "exclusions": [],
+    "defeaters": [],
+    "coverage_dimensions": [],
+    "benchmark_profiles": [],
+    "supersedes": null
+  },
+  "scope_digest": "<sha256 of scope_statement plus the seven typed lists>",
+  "claim_semantic_digest": "<sha256 of all thirteen claim_semantics fields>"
+}
+```
+
+`claim_record_ref.sha256` hashes the entire current claim ledger row exposed by
+the bound live network, including its record metadata; it is not a hash of the
+smaller semantic projection. `scope_digest` hashes exactly
+`scope_statement`, `assumptions`, `conditions`, `units`, `exclusions`,
+`defeaters`, `coverage_dimensions`, and `benchmark_profiles`.
+`claim_semantic_digest` hashes the complete closed `claim_semantics` object.
+Changing and resealing only one projection cannot bypass the other bindings.
+
+The stable public APIs are:
+
+```python
+propose_patch_v4(
+    hypotheses_path, network, review_requests_path, reading_collection_path,
+    authority_path, *, expected_authority_file_sha256,
+    execution_authority_contexts=None,
+)
+validate_patch_v4(value, network=None)
+```
+
+`propose_patch_v4` uses the same raw-file-pinned authority route as v3 and
+replays collection consumption internally. The validator checks the native v4
+identities, the closed route union, and the full v3 common evidence lineage.
+
 ## `LearnFromPapersRequest/v1.epistemic_task`
 
 Every emitted request includes a closed epistemic task containing `question`,
@@ -554,6 +946,34 @@ python scripts/network_gap_discovery.py propose-patch \
   --dossier reading-dossier.json --source-bundle paper-source-bundle.json \
   --source-artifact paper.pdf --verification-root attestations/ \
   --output patch.json
+python scripts/network_gap_discovery.py consume-reading-collection \
+  --hypotheses hypotheses.json --network network.json \
+  --review-requests review_requests.json \
+  --reading-collection reading-collection.json \
+  --consumption-authority collection-consumption-authority.json \
+  --expected-authority-file-sha256 '<trusted exact raw SHA-256>' \
+  --output hypotheses-next.json
+python scripts/network_gap_discovery.py create-collection-consumption-authority \
+  --hypotheses hypotheses.json --network network.json \
+  --review-requests review_requests.json \
+  --reading-collection reading-collection.json \
+  --reviewer-context independent-reviewer-context.json \
+  --consumed-at 2026-08-05T00:30:00Z \
+  --output collection-consumption-authority.json
+python scripts/network_gap_discovery.py propose-patch-v3 \
+  --input hypotheses.json --network network.json \
+  --review-requests review_requests.json \
+  --reading-collection reading-collection.json \
+  --consumption-authority collection-consumption-authority.json \
+  --expected-authority-file-sha256 '<trusted exact raw SHA-256>' \
+  --output patch-v3.json
+python scripts/network_gap_discovery.py propose-patch-v4 \
+  --input hypotheses.json --network network.json \
+  --review-requests review_requests.json \
+  --reading-collection reading-collection.json \
+  --consumption-authority collection-consumption-authority.json \
+  --expected-authority-file-sha256 '<trusted exact raw SHA-256>' \
+  --output patch-v4.json
 python scripts/network_gap_discovery.py cycle --network network.json \
   --hypotheses-output hypotheses.json --requests-output scholar-requests.json \
   --google-scholar-policy manual_optional

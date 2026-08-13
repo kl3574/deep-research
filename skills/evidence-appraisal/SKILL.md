@@ -38,9 +38,10 @@ description: Create replayable claim-to-evidence candidate sets and independentl
   `satisfied` or `not_applicable`, a reproduced state, and a passed decisive
   attestation.
 - Every locator is one exact atom from `source_lineage`. Plain atoms such as
-  `p. 1` are allowed. A path/fragment atom must exactly use
+  `p. 1` are allowed, as is the exact learn-from-papers page-character atom
+  `p.N [start:end]` when `N` is positive and `end > start`. A path/fragment atom must exactly use
   `safe/relative-path#(char|line|page|eq|fig|table|section)=safe-span`, for
-  example `pages/page-0001.txt#char=10-80`. Ranges, commas, slashes without a
+  example `pages/page-0001.txt#char=10-80`. Other ranges, commas, slashes without a
   valid fragment, conjunctions, ampersands, and multiple markers must be split.
 - An attestation binds the prepared request, claim/evidence relation, exact
   locator, and reviewer context. Every failed attestation requires exactly one

@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -24,6 +25,23 @@ from pathlib import Path
 from typing import Any
 
 from validate_research_handoff import validate_knowledge_network
+
+try:
+    from report_citation_audit import (
+        ContractError as CitationAuditError,
+        validate_audit_binding,
+    )
+except ModuleNotFoundError:
+    _CITATION_AUDIT_PATH = Path(__file__).with_name("report_citation_audit.py")
+    _CITATION_AUDIT_SPEC = importlib.util.spec_from_file_location(
+        "deep_research_report_citation_audit", _CITATION_AUDIT_PATH
+    )
+    if _CITATION_AUDIT_SPEC is None or _CITATION_AUDIT_SPEC.loader is None:
+        raise RuntimeError("cannot load sibling report_citation_audit owner")
+    _CITATION_AUDIT_MODULE = importlib.util.module_from_spec(_CITATION_AUDIT_SPEC)
+    _CITATION_AUDIT_SPEC.loader.exec_module(_CITATION_AUDIT_MODULE)
+    CitationAuditError = _CITATION_AUDIT_MODULE.ContractError
+    validate_audit_binding = _CITATION_AUDIT_MODULE.validate_audit_binding
 
 SCHEMA_VERSION = "1"
 RUN_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{2,62}")
@@ -49,6 +67,7 @@ MUTATING_COMMANDS = {
     "set-gap-status",
     "start-action",
     "finish-action",
+    "record-citation-audit",
     "record-round",
     "record-source",
     "record-claim",
@@ -69,6 +88,7 @@ CREATE_TARGET_COMMANDS = {
     "record-claim",
     "record-conflict",
     "record-error",
+    "record-citation-audit",
 }
 MODES = {"targeted", "scoping", "rapid", "systematic"}
 ACCESS_LEVELS = {"full_text", "partial_text", "abstract_only", "metadata_only"}
@@ -114,7 +134,7 @@ ACTION_ARTIFACT_PREFIXES = {
     "corroborate": ("round:", "source:", "claim:"),
     "search_test": ("round:", "source:"),
     "merge": ("claim:", "conflict:"),
-    "citation_audit": ("claim:", "source:", "conflict:"),
+    "citation_audit": ("event:citation-audit:",),
     "other": ("round:", "source:", "claim:", "conflict:", "error:"),
 }
 ACTION_STATUSES = {"completed", "failed", "interrupted"}
@@ -541,6 +561,8 @@ def _journal_command_states(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _command_target_ref(args: argparse.Namespace) -> str:
+    if args.command == "record-citation-audit":
+        return f"event:citation-audit:{args.action_id}"
     for field, prefix in (
         ("gap_id", "gap"),
         ("action_id", "action"),
@@ -561,6 +583,8 @@ def _target_exists(paths: Paths, target_ref: str) -> bool:
         return False
     _, records = _read_bundle(paths)
     prefix, _, identifier = target_ref.partition(":")
+    if prefix == "event":
+        return any(row.get("record_id") == target_ref for row in records["events"])
     if prefix == "gap":
         return identifier in _gap_state(records)
     if prefix == "action":
@@ -1098,6 +1122,31 @@ def _summary(
         and not blocking_errors
         and not coverage_blockers
     )
+    citation_actions = [
+        action
+        for action in actions.values()
+        if action.get("action_type") == "citation_audit"
+    ]
+    citation_events = {
+        event.get("action_id"): event
+        for event in records["events"]
+        if event.get("event") == "citation_audit_validated"
+        and event.get("overall_status") == "complete"
+        and isinstance(event.get("action_id"), str)
+    }
+    bound_citation_action_ids = sorted(
+        action["action_id"]
+        for action in citation_actions
+        if action.get("status") == "completed"
+        and action.get("artifact_refs")
+        == [f"event:citation-audit:{action['action_id']}"]
+        and action["action_id"] in citation_events
+    )
+    citation_audit_required = contract.get("require_citation_audit") is True
+    citation_audit_passed = (
+        not citation_audit_required
+        or (not validation_errors and bool(bound_citation_action_ids))
+    )
     max_rounds = contract.get("max_rounds")
     max_relations = contract.get("max_relations")
     return {
@@ -1136,8 +1185,18 @@ def _summary(
         "ready_gap_ids": ready_gap_ids,
         "saturation_round_ids": saturation_round_ids,
         "can_claim_pragmatic_saturation": pragmatic_saturation,
+        "citation_audit_gate": {
+            "required": citation_audit_required,
+            "passed": citation_audit_passed,
+            "completed_action_ids": bound_citation_action_ids,
+            "validated_event_record_ids": sorted(
+                event["record_id"] for event in citation_events.values()
+            ),
+        },
         "can_finalize_complete": (
-            lifecycle == "running" and (pragmatic_saturation or systematic_complete)
+            lifecycle == "running"
+            and (pragmatic_saturation or systematic_complete)
+            and citation_audit_passed
         ),
         "can_finalize_partial": (
             not validation_errors
@@ -1528,11 +1587,13 @@ def _validate_events(
         "coverage_set",
         "conflict_resolved",
         "error_resolved",
+        "citation_audit_validated",
         "resumed",
         "finalized",
     }
     init_events = []
     final_events = []
+    citation_audit_action_ids: list[str] = []
     for event in records["events"]:
         event_type = event.get("event")
         if event_type not in allowed:
@@ -1579,6 +1640,83 @@ def _validate_events(
             for field in ("conflict_id", "resolution", "discriminating_evidence"):
                 if not isinstance(event.get(field), str) or not event[field].strip():
                     errors.append(f"conflict_resolved event requires {field}")
+        elif event_type == "citation_audit_validated":
+            action_id = event.get("action_id")
+            if not isinstance(action_id, str):
+                errors.append("citation_audit_validated requires action_id")
+                continue
+            citation_audit_action_ids.append(action_id)
+            if event.get("record_id") != f"event:citation-audit:{action_id}":
+                errors.append(
+                    f"citation audit event for {action_id!r} has record_id mismatch"
+                )
+            starts = [
+                row
+                for row in records["actions"]
+                if row.get("operation") == "started"
+                and row.get("action_id") == action_id
+            ]
+            if len(starts) != 1 or starts[0].get("action_type") != "citation_audit":
+                errors.append(
+                    f"citation audit event references no unique citation_audit action {action_id!r}"
+                )
+            elif isinstance(event.get("sequence"), int) and starts[0].get(
+                "sequence", 0
+            ) >= event.get("sequence", 0):
+                errors.append(
+                    f"citation audit event precedes action {action_id!r}"
+                )
+            path_fields = ("audit_path", "final_report_path", "draft_report_path")
+            paths_valid = True
+            for field in path_fields:
+                value = event.get(field)
+                if not isinstance(value, str) or not Path(value).is_absolute():
+                    errors.append(f"citation audit event requires absolute {field}")
+                    paths_valid = False
+            pin_fields = (
+                "audit_raw_sha256",
+                "final_report_raw_sha256",
+                "draft_report_raw_sha256",
+                "evidence_raw_sha256",
+                "projection_digest",
+            )
+            pins_valid = True
+            for field in pin_fields:
+                value = event.get(field)
+                if not isinstance(value, str) or not SHA256_RE.fullmatch(value):
+                    errors.append(f"citation audit event requires lowercase 64-hex {field}")
+                    pins_valid = False
+            for field in ("audit_id", "report_id"):
+                if not isinstance(event.get(field), str) or not event[field].strip():
+                    errors.append(f"citation audit event requires {field}")
+            if event.get("overall_status") != "complete":
+                errors.append("citation audit event overall_status must be complete")
+            if paths_valid and pins_valid:
+                try:
+                    replay = validate_audit_binding(
+                        audit=Path(event["audit_path"]),
+                        final_report=Path(event["final_report_path"]),
+                        draft_report=Path(event["draft_report_path"]),
+                        final_report_raw_sha256=event["final_report_raw_sha256"],
+                        draft_report_raw_sha256=event["draft_report_raw_sha256"],
+                        evidence_raw_sha256=event["evidence_raw_sha256"],
+                        audit_raw_sha256=event["audit_raw_sha256"],
+                    )
+                except (CitationAuditError, OSError, json.JSONDecodeError) as exc:
+                    errors.append(
+                        f"citation audit event {action_id!r} replay failed: {exc}"
+                    )
+                else:
+                    for field in (
+                        "audit_id",
+                        "report_id",
+                        "projection_digest",
+                        "overall_status",
+                    ):
+                        if event.get(field) != replay.get(field):
+                            errors.append(
+                                f"citation audit event {action_id!r} {field} mismatch"
+                            )
         elif event_type == "finalized":
             final_events.append(event)
             if event.get("outcome") not in OUTCOMES:
@@ -1590,6 +1728,8 @@ def _validate_events(
         errors.append("ledger must contain exactly one initialized event")
     if len(final_events) > 1:
         errors.append("ledger cannot contain more than one finalized event")
+    if len(citation_audit_action_ids) != len(set(citation_audit_action_ids)):
+        errors.append("an action cannot record more than one citation audit event")
     known_errors = {
         row.get("error_id")
         for row in records["errors"]
@@ -1802,7 +1942,9 @@ def _validate_gaps(
 
 
 def _validate_actions(
-    records: dict[str, list[dict[str, Any]]], errors: list[str]
+    state: dict[str, Any],
+    records: dict[str, list[dict[str, Any]]],
+    errors: list[str],
 ) -> None:
     known_gaps = {
         row.get("gap_id")
@@ -1903,9 +2045,18 @@ def _validate_actions(
                 errors.append(
                     f"completed action {action_id!r} contains a non-completed round"
                 )
-            allowed_prefixes = ACTION_ARTIFACT_PREFIXES.get(
-                start.get("action_type"), ()
-            )
+            action_type = start.get("action_type")
+            allowed_prefixes = ACTION_ARTIFACT_PREFIXES.get(action_type, ())
+            if (
+                action_type == "citation_audit"
+                and state.get("contract", {}).get("require_citation_audit") is not True
+            ):
+                allowed_prefixes = (
+                    "event:citation-audit:",
+                    "claim:",
+                    "source:",
+                    "conflict:",
+                )
             for record_id in finish.get("artifact_refs", []):
                 if not record_id.startswith(allowed_prefixes):
                     errors.append(
@@ -2387,11 +2538,15 @@ def _validate_bundle(
                 not isinstance(value, int) or isinstance(value, bool) or value <= 0
             ):
                 errors.append(f"contract {field} must be null or a positive integer")
+        if "require_citation_audit" in contract and not isinstance(
+            contract.get("require_citation_audit"), bool
+        ):
+            errors.append("contract require_citation_audit must be boolean")
 
     _validate_envelopes(paths, records, errors)
     _validate_events(state, records, errors)
     _validate_gaps(state, records, errors)
-    _validate_actions(records, errors)
+    _validate_actions(state, records, errors)
     _validate_rounds(records, errors)
     _validate_sources(records, errors)
     _validate_claims(records, errors)
@@ -2517,6 +2672,7 @@ def command_init(args: argparse.Namespace) -> int:
         "protocol_ref": args.protocol_ref,
         "max_rounds": args.max_rounds,
         "max_relations": args.max_relations,
+        "require_citation_audit": args.require_citation_audit,
     }
     paths.base.mkdir(parents=True)
     for name in LEDGER_NAMES:
@@ -2699,6 +2855,69 @@ def command_finish_action(args: argparse.Namespace) -> int:
         next_action=(args.next_action or "").strip(),
     )
     ok, _ = _append_candidate(paths, state, records, "actions", candidate)
+    return 0 if ok else 1
+
+
+def command_record_citation_audit(args: argparse.Namespace) -> int:
+    loaded = _active(args)
+    if loaded is None:
+        return 1
+    paths, state, records = loaded
+    action_id = _validate_entity_id(args.action_id, "action_id")
+    action = _action_state(records).get(action_id)
+    if action is None:
+        print("unknown action_id", file=sys.stderr)
+        return 1
+    if action.get("status") != "started":
+        print("citation audit action is already terminal", file=sys.stderr)
+        return 1
+    if action.get("action_type") != "citation_audit":
+        print("action_type must be citation_audit", file=sys.stderr)
+        return 1
+    record_id = f"event:citation-audit:{action_id}"
+    if any(row.get("record_id") == record_id for row in records["events"]):
+        print("citation audit event already exists", file=sys.stderr)
+        return 1
+
+    audit_path = Path(args.audit).expanduser().absolute()
+    final_report_path = Path(args.final_report).expanduser().absolute()
+    draft_report_path = Path(args.draft_report).expanduser().absolute()
+    try:
+        replay = validate_audit_binding(
+            audit=audit_path,
+            final_report=final_report_path,
+            draft_report=draft_report_path,
+            final_report_raw_sha256=args.final_report_raw_sha256,
+            draft_report_raw_sha256=args.draft_report_raw_sha256,
+            evidence_raw_sha256=args.evidence_raw_sha256,
+            audit_raw_sha256=args.audit_raw_sha256,
+        )
+    except (CitationAuditError, OSError, json.JSONDecodeError) as exc:
+        print(f"citation audit replay failed: {exc}", file=sys.stderr)
+        return 1
+    if replay.get("overall_status") != "complete":
+        print("citation audit overall_status must be complete", file=sys.stderr)
+        return 1
+
+    candidate = _record(
+        paths,
+        records,
+        record_id,
+        event="citation_audit_validated",
+        action_id=action_id,
+        audit_path=str(audit_path),
+        audit_raw_sha256=args.audit_raw_sha256,
+        final_report_path=str(final_report_path),
+        final_report_raw_sha256=args.final_report_raw_sha256,
+        draft_report_path=str(draft_report_path),
+        draft_report_raw_sha256=args.draft_report_raw_sha256,
+        evidence_raw_sha256=args.evidence_raw_sha256,
+        audit_id=replay["audit_id"],
+        report_id=replay["report_id"],
+        projection_digest=replay["projection_digest"],
+        overall_status=replay["overall_status"],
+    )
+    ok, _ = _append_candidate(paths, state, records, "events", candidate)
     return 0 if ok else 1
 
 
@@ -3164,6 +3383,7 @@ def _build_parser() -> argparse.ArgumentParser:
     init.add_argument("--risk", required=True)
     init.add_argument("--max-rounds", type=_positive_int)
     init.add_argument("--max-relations", type=_positive_int)
+    init.add_argument("--require-citation-audit", action="store_true")
     init.set_defaults(func=command_init)
 
     gap = commands.add_parser("record-gap")
@@ -3210,6 +3430,23 @@ def _build_parser() -> argparse.ArgumentParser:
     finish_action.add_argument("--artifact-ref", action="append")
     finish_action.add_argument("--next-action")
     finish_action.set_defaults(func=command_finish_action)
+
+    citation_audit = commands.add_parser("record-citation-audit")
+    citation_audit.add_argument("--action-id", required=True)
+    citation_audit.add_argument("--audit", required=True)
+    citation_audit.add_argument("--audit-raw-sha256", type=_sha256_hex, required=True)
+    citation_audit.add_argument("--final-report", required=True)
+    citation_audit.add_argument(
+        "--final-report-raw-sha256", type=_sha256_hex, required=True
+    )
+    citation_audit.add_argument("--draft-report", required=True)
+    citation_audit.add_argument(
+        "--draft-report-raw-sha256", type=_sha256_hex, required=True
+    )
+    citation_audit.add_argument(
+        "--evidence-raw-sha256", type=_sha256_hex, required=True
+    )
+    citation_audit.set_defaults(func=command_record_citation_audit)
 
     round_parser = commands.add_parser("record-round")
     round_parser.add_argument("--round-id", required=True)

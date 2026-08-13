@@ -13,6 +13,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import report_citation_audit as citation_audit_module
+
 SCRIPT_PATH = Path(__file__).with_name("research_run.py")
 SPEC = importlib.util.spec_from_file_location("research_run", SCRIPT_PATH)
 assert SPEC and SPEC.loader
@@ -47,6 +49,7 @@ class ResearchRunTests(unittest.TestCase):
         max_relations: int | None = None,
         coverage_gap_ids: list[str] | None = None,
         counterevidence_gap_ids: list[str] | None = None,
+        require_citation_audit: bool = False,
     ) -> None:
         selected_gaps = coverage_gap_ids or ["gap-primary"]
         arguments = [
@@ -74,6 +77,8 @@ class ResearchRunTests(unittest.TestCase):
             arguments.extend(["--max-rounds", str(max_rounds)])
         if max_relations is not None:
             arguments.extend(["--max-relations", str(max_relations)])
+        if require_citation_audit:
+            arguments.append("--require-citation-audit")
         if mode == "systematic":
             arguments.extend(["--protocol-ref", "sha256:" + "a" * 64])
         code, _, error = invoke(self.root, run_id or self.run_id, arguments)
@@ -195,6 +200,114 @@ class ResearchRunTests(unittest.TestCase):
         if status != "completed":
             arguments.extend(["--next-action", "Retry through a distinct route"])
         return invoke(self.root, run_id or self.run_id, arguments)[0]
+
+    def build_citation_audit(
+        self,
+        *,
+        suffix: str = "complete",
+        missing_qualifier: str = "",
+    ) -> dict[str, str]:
+        report_text = "The inspected full text supports the bounded result."
+        statement_text = "The inspected full text supports the bounded result"
+        report = {
+            "schema": "ResearchReport/v1",
+            "schema_version": "1",
+            "report_id": f"report-{suffix}",
+            "report_text": report_text,
+            "statement_rows": [
+                {
+                    "statement_id": "statement:1",
+                    "statement_text": statement_text,
+                    "start_char": 0,
+                    "end_char": len(statement_text),
+                    "decision_impact": "high",
+                    "status": "decisive",
+                }
+            ],
+        }
+        final_report = self.root / f"final-{suffix}.json"
+        draft_report = self.root / f"draft-{suffix}.json"
+        evidence_file = self.root / f"evidence-{suffix}.txt"
+        evidence_manifest = self.root / f"evidence-{suffix}.json"
+        audit = self.root / f"audit-{suffix}.json"
+        encoded_report = json.dumps(
+            report, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8") + b"\n"
+        final_report.write_bytes(encoded_report)
+        draft_report.write_bytes(encoded_report)
+        evidence_file.write_text("Exact primary full-text support.", encoding="utf-8")
+        evidence = {
+            "schema": "ReportCitationSet/v1",
+            "schema_version": "1",
+            "citations": [
+                {
+                    "citation_id": "citation:1",
+                    "statement_id": "statement:1",
+                    "source_id": "source:primary",
+                    "source_version": "v1",
+                    "source_access": "full_text",
+                    "locator": "p.1 [0:32]",
+                    "relation": "supports",
+                    "entailment": "entailed",
+                    "missing_qualifier": missing_qualifier,
+                    "source_role": "primary",
+                    "counterevidence_status": "represented",
+                    "evidence_path": str(evidence_file),
+                    "evidence_raw_sha256": hashlib.sha256(
+                        evidence_file.read_bytes()
+                    ).hexdigest(),
+                }
+            ],
+        }
+        evidence_manifest.write_bytes(
+            json.dumps(
+                evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+            + b"\n"
+        )
+        for path in (final_report, draft_report, evidence_file, evidence_manifest):
+            path.chmod(0o600)
+        final_pin = hashlib.sha256(final_report.read_bytes()).hexdigest()
+        draft_pin = hashlib.sha256(draft_report.read_bytes()).hexdigest()
+        evidence_pin = hashlib.sha256(evidence_manifest.read_bytes()).hexdigest()
+        citation_audit_module._run_seal(
+            final_report=final_report,
+            draft_report=draft_report,
+            evidence_manifest=evidence_manifest,
+            final_report_raw_sha256=final_pin,
+            draft_report_raw_sha256=draft_pin,
+            evidence_raw_sha256=evidence_pin,
+            output=audit,
+        )
+        return {
+            "audit": str(audit),
+            "audit_raw_sha256": hashlib.sha256(audit.read_bytes()).hexdigest(),
+            "final_report": str(final_report),
+            "final_report_raw_sha256": final_pin,
+            "draft_report": str(draft_report),
+            "draft_report_raw_sha256": draft_pin,
+            "evidence_raw_sha256": evidence_pin,
+        }
+
+    def record_citation_audit(
+        self,
+        action_id: str,
+        binding: dict[str, str],
+        *,
+        run_id: str | None = None,
+    ) -> tuple[int, str, str]:
+        arguments = ["record-citation-audit", "--action-id", action_id]
+        for key in (
+            "audit",
+            "audit_raw_sha256",
+            "final_report",
+            "final_report_raw_sha256",
+            "draft_report",
+            "draft_report_raw_sha256",
+            "evidence_raw_sha256",
+        ):
+            arguments.extend(["--" + key.replace("_", "-"), binding[key]])
+        return invoke(self.root, run_id or self.run_id, arguments)
 
     def record_source(
         self,
@@ -531,7 +644,11 @@ class ResearchRunTests(unittest.TestCase):
         return selected_path, digest
 
     def prepare_complete_run(
-        self, *, run_id: str | None = None, max_rounds: int | None = None
+        self,
+        *,
+        run_id: str | None = None,
+        max_rounds: int | None = None,
+        require_citation_audit: bool = False,
     ) -> None:
         selected = run_id or self.run_id
         self.init_run(
@@ -539,6 +656,7 @@ class ResearchRunTests(unittest.TestCase):
             max_rounds=max_rounds,
             coverage_gap_ids=["gap-primary", "gap-counter"],
             counterevidence_gap_ids=["gap-counter"],
+            require_citation_audit=require_citation_audit,
         )
         self.assertEqual(self.record_source(run_id=selected), 0)
         self.assertEqual(self.record_claim(run_id=selected), 0)
@@ -556,6 +674,188 @@ class ResearchRunTests(unittest.TestCase):
             0,
         )
         self.assertEqual(self.set_coverage(run_id=selected), 0)
+
+    def test_required_citation_audit_blocks_complete_until_recorded(self) -> None:
+        self.prepare_complete_run(require_citation_audit=True)
+        summary = self.status()["summary"]
+        self.assertFalse(summary["citation_audit_gate"]["passed"])
+        self.assertFalse(summary["can_finalize_complete"])
+        self.assertEqual(
+            invoke(
+                self.root,
+                self.run_id,
+                [
+                    "finalize",
+                    "--outcome",
+                    "complete",
+                    "--stop-reason",
+                    "pragmatic_saturation",
+                    "--summary",
+                    "Must wait for the report citation audit",
+                ],
+            )[0],
+            1,
+        )
+
+        self.assertEqual(
+            self.set_gap_status(
+                "gap-primary",
+                "open",
+                next_action="Audit the final statement-to-source projection",
+            ),
+            0,
+        )
+        self.assertEqual(
+            self.start_action(
+                "action-citation-audit",
+                "gap-primary",
+                action_type="citation_audit",
+            ),
+            0,
+        )
+        self.assertEqual(
+            self.finish_action(
+                "action-citation-audit",
+                "completed",
+                artifact_ref="claim:relation-01",
+            ),
+            1,
+        )
+        audit_binding = self.build_citation_audit()
+        code, _, error = self.record_citation_audit(
+            "action-citation-audit", audit_binding
+        )
+        self.assertEqual(code, 0, error)
+        self.assertEqual(
+            self.finish_action(
+                "action-citation-audit",
+                "completed",
+                artifact_ref="event:citation-audit:action-citation-audit",
+            ),
+            0,
+        )
+        self.assertEqual(
+            self.set_gap_status(
+                "gap-primary",
+                "resolved",
+                artifact_ref="action:action-citation-audit:finish",
+            ),
+            0,
+        )
+        self.assertEqual(self.set_coverage(), 0)
+        summary = self.status()["summary"]
+        self.assertTrue(summary["citation_audit_gate"]["passed"])
+        self.assertTrue(summary["can_finalize_complete"])
+
+    def test_partial_citation_audit_cannot_record_validation_event(self) -> None:
+        self.prepare_complete_run(require_citation_audit=True)
+        self.assertEqual(
+            self.set_gap_status(
+                "gap-primary",
+                "open",
+                next_action="Audit the final statement-to-source projection",
+            ),
+            0,
+        )
+        self.assertEqual(
+            self.start_action(
+                "action-citation-audit",
+                "gap-primary",
+                action_type="citation_audit",
+            ),
+            0,
+        )
+        partial = self.build_citation_audit(
+            suffix="partial", missing_qualifier="missing model boundary"
+        )
+        code, _, error = self.record_citation_audit(
+            "action-citation-audit", partial
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("overall_status must be complete", error)
+        summary = self.status()["summary"]
+        self.assertFalse(summary["citation_audit_gate"]["passed"])
+
+    def test_tampered_recorded_citation_audit_invalidates_gate(self) -> None:
+        self.prepare_complete_run(require_citation_audit=True)
+        self.assertEqual(
+            self.set_gap_status(
+                "gap-primary",
+                "open",
+                next_action="Audit the final statement-to-source projection",
+            ),
+            0,
+        )
+        self.assertEqual(
+            self.start_action(
+                "action-citation-audit",
+                "gap-primary",
+                action_type="citation_audit",
+            ),
+            0,
+        )
+        binding = self.build_citation_audit(suffix="tamper")
+        code, _, error = self.record_citation_audit(
+            "action-citation-audit", binding
+        )
+        self.assertEqual(code, 0, error)
+        self.assertEqual(
+            self.finish_action(
+                "action-citation-audit",
+                "completed",
+                artifact_ref="event:citation-audit:action-citation-audit",
+            ),
+            0,
+        )
+        audit_path = Path(binding["audit"])
+        audit_path.write_bytes(audit_path.read_bytes() + b" ")
+        code, output, _ = invoke(self.root, self.run_id, ["status"])
+        self.assertEqual(code, 1)
+        payload = json.loads(output)
+        self.assertFalse(payload["summary"]["citation_audit_gate"]["passed"])
+        self.assertTrue(
+            any(
+                "citation audit event" in error and "replay failed" in error
+                for error in payload["validation_errors"]
+            )
+        )
+
+    def test_legacy_contract_without_citation_gate_replays(self) -> None:
+        self.init_run()
+        self.assertEqual(self.record_gap("gap-primary"), 0)
+        self.assertEqual(self.record_source(), 0)
+        self.assertEqual(self.record_claim(), 0)
+        self.assertEqual(
+            self.start_action(
+                "action-cite", "gap-primary", action_type="citation_audit"
+            ),
+            0,
+        )
+        self.assertEqual(
+            self.finish_action(
+                "action-cite", "completed", artifact_ref="claim:relation-01"
+            ),
+            0,
+        )
+        run_dir = self.root / "runs" / self.run_id
+        state_path = run_dir / "run.json"
+        event_path = run_dir / "events.jsonl"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        event = json.loads(event_path.read_text(encoding="utf-8"))
+        state["contract"].pop("require_citation_audit")
+        event["contract"].pop("require_citation_audit")
+        state_path.write_text(
+            json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        event_path.write_text(
+            json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        code, output, error = invoke(self.root, self.run_id, ["validate"])
+        self.assertEqual(code, 0, error)
+        payload = json.loads(output)
+        self.assertFalse(payload["contract"].get("require_citation_audit", False))
 
     def test_init_creates_versioned_envelope_and_ledgers(self) -> None:
         self.init_run()

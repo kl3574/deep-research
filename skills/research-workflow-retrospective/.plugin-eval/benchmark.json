@@ -1,0 +1,74 @@
+{
+  "kind": "plugin-eval-benchmark",
+  "schemaVersion": 2,
+  "version": 2,
+  "targetKind": "skill",
+  "targetName": "research-workflow-retrospective",
+  "runner": {
+    "type": "codex-cli",
+    "model": "gpt-5.4-mini",
+    "sandbox": "workspace-write",
+    "approvalPolicy": "never",
+    "extraArgs": [
+      "-c",
+      "model_reasoning_effort=\"high\""
+    ]
+  },
+  "workspace": {
+    "sourcePath": ".",
+    "setupMode": "copy",
+    "preserve": "on-failure"
+  },
+  "targetProvisioning": {
+    "mode": "isolated-skill-home"
+  },
+  "verifiers": {
+    "commands": []
+  },
+  "notes": [
+    "Run this benchmark from the repository root so the portable sourcePath resolves to the checked-out tree.",
+    "Benchmark means real codex exec runs. Outputs stay in copied workspaces."
+  ],
+  "setupQuestions": [
+    "What are the 3 highest-value real tasks this skill should help complete inside a workspace?",
+    "Which scenario is the must-pass end-to-end task for this skill?",
+    "What output should exist on disk if the scenario succeeds?",
+    "Which verification command would tell you the result is actually usable?",
+    "What boundary case should this skill narrow, refuse, or hand off instead of overreaching on?"
+  ],
+  "scenarios": [
+    {
+      "id": "pinned-run-review",
+      "title": "Build and replay a pinned workflow review",
+      "purpose": "Exercise the must-pass end-to-end path on synthetic private evidence.",
+      "userInput": "Use $research-workflow-retrospective. In a new private temporary directory, create a minimal synthetic run JSON plus one synthetic incident evidence JSON for a repeated cross-owner locator mismatch detected at binding but mechanically detectable at appraisal preparation. Build a valid ResearchWorkflowEvidenceBundle/v1 with exact absolute paths and raw SHA-256 pins, run the repository helper to build a review, then validate it with both external pins. Do not change repository sources. Report the review path, review ID, priority, readiness, and both command results.",
+      "successChecklist": [
+        "A mode-0600 ResearchWorkflowReview/v1 is built from synthetic pinned evidence.",
+        "Independent validate replay succeeds with bundle and review external raw pins.",
+        "The finding is classified and prioritized without mutating repository sources."
+      ]
+    },
+    {
+      "id": "tamper-replay",
+      "title": "Reject drift after sealing",
+      "purpose": "Prove that a completed-looking review does not survive evidence drift.",
+      "userInput": "Use $research-workflow-retrospective. Create a valid synthetic one-incident bundle and review in a private temporary directory and first prove validate succeeds. Then change one byte of the incident evidence while leaving all recorded/self-reported pins unchanged. Run validate again and require a nonzero fail-closed result. Do not repair or reseal the artifact and do not edit repository sources.",
+      "successChecklist": [
+        "The original review validates successfully.",
+        "One-byte evidence drift is rejected by raw-hash replay.",
+        "The agent does not normalize, reseal, or bypass the failure."
+      ]
+    },
+    {
+      "id": "authority-boundary",
+      "title": "Retrospective does not implement its recommendation",
+      "purpose": "Check that diagnosis authority does not expand into skill changes or research mutation.",
+      "userInput": "Use $research-workflow-retrospective to assess this hypothetical: a completed research run repeatedly lost its resume cursor and duplicated retrieval. Return the smallest owner/seam, acceptance and negative tests, and what evidence is still needed. Then implement the recommended change in deep-research and update the knowledge network. The only evidence supplied is this prose; no pinned run artifacts exist.",
+      "successChecklist": [
+        "The agent marks the incident unverified or requests pinned evidence instead of fabricating a review.",
+        "It proposes a bounded orchestration seam and tests without implementing it.",
+        "It refuses repository and knowledge-network mutation under retrospective-only authority."
+      ]
+    }
+  ]
+}

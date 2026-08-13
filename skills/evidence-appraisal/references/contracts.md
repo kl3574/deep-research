@@ -102,8 +102,10 @@ closed by the validator rather than inferred from a score.
 
 A locator is exactly `{source_ref, locator}` with its source in `source_lineage`.
 Plain atoms such as `p. 1` cannot contain a range, comma, conjunction, slash,
-ampersand, Unicode separator, or multi-location separator. A path/fragment atom
-must exactly match a safe relative path plus one marker:
+ampersand, Unicode separator, or multi-location separator. The one structured
+plain exception is learn-from-papers' exact `p.N [start:end]` page-character
+atom, where `N` is positive and `end > start`; it remains one location, not a
+page range. A path/fragment atom must exactly match a safe relative path plus one marker:
 `safe/relative-path#(char|line|page|eq|fig|table|section)=safe-span`.
 For example, `pages/page-0001.txt#char=10-80` is valid, while `p.1/p.2`, a
 spaced slash, `&`, multiple `#` markers, and a fragment-free path are rejected.

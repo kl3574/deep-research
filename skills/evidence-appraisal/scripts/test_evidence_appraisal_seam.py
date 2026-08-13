@@ -7,6 +7,7 @@ import pytest
 
 from evidence_appraisal import (
     ContractError,
+    _validate_locator_atom,
     finalize_appraisal,
     prepare_appraisal,
     reconcile_appraisal,
@@ -91,6 +92,37 @@ def test_public_seam_prepares_and_finalizes_claim_evidence_relations(
 def test_public_seam_fails_closed() -> None:
     with pytest.raises(ContractError):
         prepare_appraisal({"schema": "EvidenceAppraisalRequest/v1"})
+
+
+def test_locator_accepts_exact_lfp_page_character_span() -> None:
+    locator = {
+        "source_ref": "paper-source-bundle-example",
+        "locator": "p.4 [1767:1937]",
+    }
+    assert _validate_locator_atom(locator, "locator") == (
+        "paper-source-bundle-example",
+        "p.4 [1767:1937]",
+    )
+
+
+@pytest.mark.parametrize(
+    "locator",
+    [
+        "p.4 [1937:1767]",
+        "p.4 [1767:1767]",
+        "p.4 [1767:1937]; p.5 [286:618]",
+        "p.4 [1767:1937] and p.5 [286:618]",
+        "p.4 [1767:1937]/p.5 [286:618]",
+    ],
+)
+def test_locator_rejects_invalid_or_compound_lfp_page_character_span(
+    locator: str,
+) -> None:
+    with pytest.raises(ContractError):
+        _validate_locator_atom(
+            {"source_ref": "paper-source-bundle-example", "locator": locator},
+            "locator",
+        )
 
 
 def test_public_seam_reconciles_by_supersession_not_mutation(tmp_path: Path) -> None:

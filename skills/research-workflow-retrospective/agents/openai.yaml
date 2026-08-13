@@ -1,0 +1,4 @@
+interface:
+  display_name: "Research Workflow Retrospective"
+  short_description: "Audit runs and derive test-ready skill improvements"
+  default_prompt: "Use $research-workflow-retrospective to inspect hash-pinned research-run evidence, locate the earliest preventable seams, and produce a deterministic test-ready improvement review without changing research artifacts."

@@ -20,11 +20,17 @@
 
 `derive-gaps` must detect at minimum:
 
-- unsupported high-impact claims (no decisive evidence)
+- unsupported high-impact claims (fewer than two distinct supporting source
+  IDs, or no supporting source with full-text read depth)
 - claims with only a single independent source group
 - open conflicts between evidence polarities
 - missing promised dimensions/benchmark profiles from init contract
 - topological isolates (must be `implicit_candidate` only)
+
+An accepted network patch may transition a derived gap to `resolved` only when
+the staged post-operation records no longer satisfy that gap's deterministic
+derivation predicate. Staging re-runs the complete derivation set before commit;
+if the same derived gap ID remains, the patch rolls back atomically.
 
 ## Novelty boundary
 

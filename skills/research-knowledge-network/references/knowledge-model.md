@@ -30,6 +30,12 @@ This skill models a local, auditable graph with explicit provenance boundaries:
 - Records must carry:
   - `schema_version`, `network_id`, `record_id`, `sequence`, `recorded_at`.
 - IDs are collision-safe, deterministic, and must not auto-merge.
+- Network, source, entity, claim, and relation IDs use 2–63 characters from
+  `[A-Za-z0-9._-]` and start alphanumerically. Evidence IDs use the same
+  alphabet with a 2–255 character bound so exact upstream paper-evidence IDs
+  remain lossless; gap IDs use a separate 2–255 character grammar that also
+  permits `:`. Typed claim/evidence references validate the identifier grammar
+  for their own namespace.
 - Same ID with different payload is fail-closed; same ID with same payload is idempotent.
 - The seven ledgers remain `sources`, `entities`, `claims`, `evidence`,
   `relations`, `gaps`, and `events`; appraisal does not add an eighth ledger.
@@ -51,6 +57,18 @@ This skill models a local, auditable graph with explicit provenance boundaries:
   replayed for a different row or operation. Historical rows lacking these
   events remain readable as `not_appraised_legacy` but are not evidence that an
   appraisal occurred.
+- `EvidenceAppraisalBinding/v2` is the multi-reading control state. Its binding
+  rows still retain owner/verifier lineage for audit, but scientific
+  `independence_group` is exactly `basis.source_id`. Its reviewed projection
+  covers every ordered real origin-gap record; no `KGH-*` search hypothesis can
+  substitute for a ledger gap identity.
+- `NetworkPatchProposal/v4` keeps that v2 binding/projection seam and adds one
+  closed route for evidence extension of an existing claim. Its
+  `NetworkPatchExistingClaimRef/v1` binds the exact current full claim-row hash,
+  record identity, all thirteen semantic fields, and the exact eight-field typed
+  scope. A reviewed subject must reconstruct to the same claim text, impact,
+  typed scope, and ordered origin gaps. The route appends evidence and relations
+  to the bound claim and can never append or rewrite a claim row.
 
 ## Source ingest from Zotero snapshot
 
@@ -124,6 +142,10 @@ This skill models a local, auditable graph with explicit provenance boundaries:
 - Claims are **not facts**; they are represented as candidate claims with explicit impacts and provenance.
 - `impact` is used for gating and completion checks.
 - Completion does not require every claim to be "proven" in ontology; it requires required gate conditions to clear.
+- A high-impact claim is completion-backed only when active supporting evidence
+  comes from at least two distinct current `source_id` values and at least one
+  of those source records has `read_depth=full`. Multiple verifiers, pages, or
+  correction notes from one source never create an extra independent stream.
 
 ## Gap lifecycle
 
@@ -140,6 +162,10 @@ This skill models a local, auditable graph with explicit provenance boundaries:
 - A transition carrying evidence is a scientific mutation and requires the same
   finalized appraisal binding/projection as its referenced evidence. Evidence-
   free administrative transitions retain the existing lifecycle rules.
+- Patch staging re-runs deterministic derivation after all accepted scientific
+  operations. A proposed resolution of a derived gap is invalid while its
+  derivation predicate still emits the same gap ID; the complete staged
+  transaction is discarded before any live-ledger replacement.
 - Status and completion use the latest row per `gap_id`; historical rows remain
   append-only and auditable.
 
@@ -147,6 +173,10 @@ This skill models a local, auditable graph with explicit provenance boundaries:
 
 - `snapshot` preserves the lossless internal envelope and every ledger row.
 - `export` produces `KnowledgeNetwork/v1` for the strict deep-research consumer.
+- The export carries the exact required dimension/profile lists and, for every
+  current gap, a `record_ref {record_id, sequence, status, sha256}`. Downstream
+  reviewed subjects and v3 patches bind those current records rather than a
+  derived search-hypothesis ID.
 - Source/entity/claim rows become contract nodes. Evidence rows become
   provenance-bearing relations. Each evidence-backed claim's validated
   `entity_id` becomes a deterministic `claim --about--> entity` structural

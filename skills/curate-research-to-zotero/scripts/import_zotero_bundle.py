@@ -258,6 +258,13 @@ def load_and_validate(
         raise BundleError("source_id must be a non-empty string")
     if not all(isinstance(value, dict) for value in (target, item, note)):
         raise BundleError("target, item, and note must be objects")
+    item_type = item.get("itemType")
+    if not isinstance(item_type, str) or not re.fullmatch(
+        r"[A-Za-z][A-Za-z0-9]*", item_type
+    ):
+        raise BundleError(
+            "item.itemType must be an explicit Zotero item-type identifier"
+        )
     if not item.get("title") or not (item.get("DOI") or item.get("url")):
         raise BundleError("item requires title and DOI or URL")
 

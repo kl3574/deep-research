@@ -32,6 +32,7 @@ _PUBLIC_ITEM_CONTEXT_RE = re.compile(
     re.IGNORECASE,
 )
 _PUBLIC_ITEM_KEY_RE = re.compile(r"\b[A-Z0-9]{8}\b")
+_NETWORK_EVENT_LOCATION_RE = re.compile(r"^network\.events\[\d+\]$")
 _CREDENTIAL_VALUE_PATTERNS = (
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
     re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{8,}", re.IGNORECASE),
@@ -147,10 +148,25 @@ def _credential_key(key: str) -> bool:
     return any(part in compact for part in _CREDENTIAL_KEY_PARTS)
 
 
+def _is_governed_authorization_digest(
+    record: Mapping[str, Any], key: str, child: Any, location: str
+) -> bool:
+    return (
+        key == "authorization_digest"
+        and record.get("event_type") == "appraised_mutation"
+        and _NETWORK_EVENT_LOCATION_RE.fullmatch(location) is not None
+        and isinstance(child, str)
+        and _DIGEST_RE.fullmatch(child) is not None
+    )
+
+
 def _scan_credentials(value: Any, location: str = "input") -> None:
     if isinstance(value, dict):
         for key, child in value.items():
-            if _credential_key(str(key)):
+            key_text = str(key)
+            if _credential_key(key_text) and not _is_governed_authorization_digest(
+                value, key_text, child, location
+            ):
                 raise ContractError(f"credential-shaped key is forbidden at {location}.{key}")
             _scan_credentials(child, f"{location}.{key}")
     elif isinstance(value, list):
@@ -318,6 +334,34 @@ def _redact_public_text(value: Any) -> str:
     text = _PUBLIC_WINDOWS_PATH_RE.sub("[redacted path]", text)
     text = _PUBLIC_DIGEST_RE.sub("[redacted digest]", text)
     text = _PUBLIC_ITEM_KEY_RE.sub("[redacted item key]", text)
+    return text
+
+
+def _redact_public_network_references(
+    value: Any, network_id: str, snapshot_id: str
+) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _redact_public_network_references(child, network_id, snapshot_id)
+            for key, child in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            _redact_public_network_references(child, network_id, snapshot_id)
+            for child in value
+        ]
+    if not isinstance(value, str):
+        return value
+
+    text = value
+    replacements = (
+        (snapshot_id, "[redacted snapshot reference]"),
+        (network_id, "[redacted network reference]"),
+    )
+    for identifier, replacement in sorted(
+        replacements, key=lambda item: len(item[0]), reverse=True
+    ):
+        text = text.replace(identifier, replacement)
     return text
 
 
@@ -650,7 +694,7 @@ def build_projection(
         if mode == PUBLIC_MODE
         else "Exact stable IDs and locators retained; credentials and note/full-text fields omitted.",
     }
-    return {
+    projection = {
         "title": title,
         "summary": summary,
         "mode": mode,
@@ -675,6 +719,11 @@ def build_projection(
         },
         "provenance": provenance,
     }
+    if mode == PUBLIC_MODE:
+        return _redact_public_network_references(
+            projection, str(network["network_id"]), str(network["snapshot_id"])
+        )
+    return projection
 
 
 def _h(value: Any) -> str:
