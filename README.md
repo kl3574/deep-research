@@ -45,13 +45,13 @@
 可选配套执行器 `$zotero-declarative-bridge` 只负责已审核 manifest 的
 existing-parent collection membership、书目 `shortTitle`、子笔记、单附件，
 以及来自 `$repair-zotero-metadata` 的独立固定 profile parent 修复
-事务。本文档对应的目标发布组合为仓库 `v0.8.0` 与 bridge `0.1.11`；候选 XPI 的
+事务。本文档对应的目标发布组合为仓库 `v0.8.1` 与 bridge `0.1.11`；候选 XPI 的
 确定性 SHA-256 为
 `a5aabab25da4b61d321172524a1e961a27420f5887bcb49c76e04e27c70d037c`。
 这个摘要只绑定候选构件，不替代真实运行回读。作为历史证据，`v0.6.1` 的
 bridge `0.1.4` 完成真实写入，`0.1.5` 在 Zotero `9.0.6` 中完成激活、受约束
 probe、正向回读和目标集合成员关系负向回读；详情见
-[v0.8.0 release notes](docs/releases/v0.8.0.md)、[v0.7.0 release notes](docs/releases/v0.7.0.md) 与
+[v0.8.1 release notes](docs/releases/v0.8.1.md)、[withdrawn v0.8.0 candidate notes](docs/releases/v0.8.0.md)、[v0.7.0 release notes](docs/releases/v0.7.0.md) 与
 [historical v0.6.1 release notes](docs/releases/v0.6.1.md)。bridge 仍是显式
 opt-in，不扩大研究、选源、全文理解或 Zotero 内容决策职责。
 
@@ -83,45 +83,50 @@ RAG、主动筛选、研究知识图谱与完整 Zotero 读写闭环，避免把
 ## 安装
 
 ```bash
-git clone --branch v0.8.0 --depth 1 https://github.com/kl3574/deep-research.git
+git clone --branch v0.8.1 --depth 1 https://github.com/kl3574/deep-research.git
 cd deep-research
-tag_object="$(git rev-parse refs/tags/v0.8.0)"
-tag_commit="$(git rev-parse refs/tags/v0.8.0^{commit})"
-install_root="$HOME/.codex/skills"
-backup_root="$HOME/.codex/skill-backups/v0.8.0-$tag_commit"
-stage_root="$(mktemp -d "$HOME/.codex/skills-v0.8.0-stage.XXXXXX")"
-mkdir -p "$install_root" "$backup_root"
-for skill in deep-research learn-from-papers evidence-appraisal research-knowledge-network network-gap-discovery scholar-discovery scholarly-source-acquisition scholarly-document-normalization research-workflow-retrospective curate-research-to-zotero repair-zotero-metadata research-network-publish; do
-  cp -a "skills/$skill" "$stage_root/$skill"
-  if [ -e "$install_root/$skill" ] || [ -L "$install_root/$skill" ]; then
-    mv --no-copy "$install_root/$skill" "$backup_root/$skill"
-  fi
-  mv --no-copy "$stage_root/$skill" "$install_root/$skill"
-done
-printf '%s  %s\n' "$tag_object" refs/tags/v0.8.0 > "$backup_root/tag-pin.txt"
-printf '%s  %s\n' "$tag_commit" refs/tags/v0.8.0^{commit} >> "$backup_root/tag-pin.txt"
-for skill in deep-research learn-from-papers evidence-appraisal research-knowledge-network network-gap-discovery scholar-discovery scholarly-source-acquisition scholarly-document-normalization research-workflow-retrospective curate-research-to-zotero repair-zotero-metadata research-network-publish; do
-  diff -qr "skills/$skill" "$install_root/$skill"
-done
-codex doctor --json > "$backup_root/codex-doctor.postinstall.json"
+python3 scripts/install_tagged_skills.py --tag v0.8.1
 ```
 
-默认循环故意不安装 `zotero-declarative-bridge`。需要本地 Zotero 受约束写入
-时，可在确认运行版本和目标库后另行复制：
+安装器要求 Linux、Python 3.10 或更高版本、同一文件系统上的现有普通目录
+`$CODEX_HOME/skills`（未设置时为 `~/.codex/skills`）、可用的
+`renameat2(RENAME_EXCHANGE)`、`git` 网络访问，以及可启动的 `codex` CLI。它会先
+创建/持有 mode-0600 的 sibling lock，再在创建事务备份、staging 或交换 loader
+root 前验证本地 annotated tag object、peeled commit、`HEAD`、clean tree 与远端
+同名 tag；随后在唯一事务备份中、以最终 recovery pathname 构造完整副本，并
+与 loader root 一次性交换，而不是逐个移走技能。因此其他已安装技能会保留，十二
+个目标也不会出现中途缺失窗口；成功提交无需再 rename 旧 root，也不会递归清理
+tag 源快照。
 
-```bash
-cp -a skills/zotero-declarative-bridge ~/.codex/skills/zotero-declarative-bridge
-```
+每次尝试使用 loader 根外、同文件系统上的唯一 mode-0700 备份目录。交换后的
+manifest、locator 或 doctor 门失败且事务路径身份仍受绑定时会恢复原 root；若
+事务门观察到外部路径身份漂移并令状态不再可判定，安装器会 fail closed、不删除
+未知目录，并给出旧 root 的受保护 recovery locator 或 mode-0700 恢复副本。该
+sibling lock 和身份检查用于阻止并发安装与意外漂移，并不是针对可任意修改同一
+用户文件系统的恶意进程的安全边界。成功时旧 root、保留的
+tag-object 源快照、tag pins、源/安装 path+mode+SHA-256 manifests、
+`codex-loaders.json` 健康汇总及 locator 集合哈希均留在该目录。loader 回执的四
+个字段为
+`status`/`skill_count`/`skill_names`/`locator_set_sha256`；doctor 回执的五个字段为
+`schemaVersion`/`overallStatus`/`check_count`/`status_counts`/`check_ids_sha256`。
+它不保存绝对 `SKILL.md` locator、动态检查 ID、原始 prompt/doctor 输出、诊断
+详情、环境明细或 stderr。`checks` 必须可被解析、`schemaVersion` 必须是整数 `1`、
+`overallStatus` 必须为 `ok`，并且每条检查项的 `id` 与 key 一致且 `status` 必须为
+`ok`。`doctor` 本身不是 loader 证明；安装器另行要求新进程恰好发现十二个目标
+`SKILL.md` locator。新
+Codex 会话才会使用更新后的技能。
+
+默认安装器故意不安装 `zotero-declarative-bridge`。需要本地 Zotero 受约束写入
+时，必须在确认运行版本、目标库、现有安装与回滚路径后使用单独受审的原子安装
+流程；不要把源码目录直接 `cp` 到可能已存在的 loader 目标中。
 
 技能安装不等于 Zotero 插件安装。插件必须使用 release 中的 packed XPI，通过
 Zotero 可见的 Add-ons UI 安装，并重新执行 capability、probe 与 readback 门；
 离线 XPI 构建或单元测试仍不是启用证据。
 
-固定并记录 tag object/peeled commit；旧安装备份必须留在 loader 根之外，避免被
-当作重复技能发现。上述 `mv --no-copy` 还会在跨文件系统时失败，而不是静默复制；
-若中途失败，从 `$backup_root` 恢复未完成项，再在同一文件系统重试。安装后保留
-tag pin、逐技能字节比较与脱敏 `codex doctor` 回读。重启 Codex 会话后技能才会被
-重新发现。
+远端 `v0.8.0` 是保留不动的 withdrawn/unreleased candidate：它没有 GitHub
+Release 或 XPI 资产，且其中的旧 README 安装循环不得执行。不要移动或删除该标签
+后再宣称不可变连续性；安全安装从 `v0.8.1` 开始。
 
 ## 使用示例
 
