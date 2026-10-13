@@ -45,13 +45,13 @@
 可选配套执行器 `$zotero-declarative-bridge` 只负责已审核 manifest 的
 existing-parent collection membership、书目 `shortTitle`、子笔记、单附件，
 以及来自 `$repair-zotero-metadata` 的独立固定 profile parent 修复
-事务。本文档对应的目标发布组合为仓库 `v0.8.1` 与 bridge `0.1.11`；候选 XPI 的
+事务。本文档对应的目标发布组合为仓库 `v0.8.2` 与 bridge `0.1.11`；候选 XPI 的
 确定性 SHA-256 为
 `a5aabab25da4b61d321172524a1e961a27420f5887bcb49c76e04e27c70d037c`。
 这个摘要只绑定候选构件，不替代真实运行回读。作为历史证据，`v0.6.1` 的
 bridge `0.1.4` 完成真实写入，`0.1.5` 在 Zotero `9.0.6` 中完成激活、受约束
 probe、正向回读和目标集合成员关系负向回读；详情见
-[v0.8.1 release notes](docs/releases/v0.8.1.md)、[withdrawn v0.8.0 candidate notes](docs/releases/v0.8.0.md)、[v0.7.0 release notes](docs/releases/v0.7.0.md) 与
+[v0.8.2 release notes](docs/releases/v0.8.2.md)、[v0.8.1 release notes](docs/releases/v0.8.1.md)、[withdrawn v0.8.0 candidate notes](docs/releases/v0.8.0.md)、[v0.7.0 release notes](docs/releases/v0.7.0.md) 与
 [historical v0.6.1 release notes](docs/releases/v0.6.1.md)。bridge 仍是显式
 opt-in，不扩大研究、选源、全文理解或 Zotero 内容决策职责。
 
@@ -83,9 +83,9 @@ RAG、主动筛选、研究知识图谱与完整 Zotero 读写闭环，避免把
 ## 安装
 
 ```bash
-git clone --branch v0.8.1 --depth 1 https://github.com/kl3574/deep-research.git
+git clone --branch v0.8.2 --depth 1 https://github.com/kl3574/deep-research.git
 cd deep-research
-python3 scripts/install_tagged_skills.py --tag v0.8.1
+python3 scripts/install_tagged_skills.py --tag v0.8.2
 ```
 
 安装器要求 Linux、Python 3.10 或更高版本、同一文件系统上的现有普通目录
@@ -119,6 +119,40 @@ Codex 会话才会使用更新后的技能。
 默认安装器故意不安装 `zotero-declarative-bridge`。需要本地 Zotero 受约束写入
 时，必须在确认运行版本、目标库、现有安装与回滚路径后使用单独受审的原子安装
 流程；不要把源码目录直接 `cp` 到可能已存在的 loader 目标中。
+
+已有安装只需更新本次三个调研技能时，可在上述干净标签 checkout 中调用
+事务安装器的选择参数。其余技能及本机增强会保留；tag、manifest、loader 和
+真实 `doctor` 门禁仍按同一安装流程执行：
+
+```bash
+python3 -B - <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+repo = Path.cwd()
+sys.path.insert(0, str(repo / "scripts"))
+from install_tagged_skills import install_tagged_skills
+
+codex_root = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+result = install_tagged_skills(
+    tag="v0.8.2",
+    repo_root=repo,
+    skills_root=codex_root / "skills",
+    backup_root=codex_root / "skill-backups",
+    codex_home=codex_root,
+    required_skills=("deep-research", "scholar-discovery", "learn-from-papers"),
+)
+print(json.dumps({"tag": result["tag"], "backup_root": str(result["backup_root"])}))
+PY
+```
+
+`v0.8.2` 为有限技术问题提供轻量主来源调研，并补充学术发现和单篇阅读的
+按需委派。可读 Markdown 链接到证据及专属产物；全文、独立复核、机器契约和
+正式引用审计要求继续保留。方法说明见
+[bounded investigation](skills/deep-research/references/bounded-research.md) 和
+[bounded paper-reading jobs](skills/learn-from-papers/references/bounded-reading-jobs.md)。
 
 技能安装不等于 Zotero 插件安装。插件必须使用 release 中的 packed XPI，通过
 Zotero 可见的 Add-ons UI 安装，并重新执行 capability、probe 与 readback 门；

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -29,6 +30,12 @@ GIT_AUTHOR = {
     "GIT_AUTHOR_NAME": "Installer Test",
     "GIT_AUTHOR_EMAIL": "installer@test.local",
 }
+
+SELECTED_RESEARCH_SKILLS = (
+    "deep-research",
+    "scholar-discovery",
+    "learn-from-papers",
+)
 
 
 def _git(*cmd: str, cwd: Path, check: bool = True) -> str:
@@ -108,6 +115,7 @@ def _create_repo_with_tag(
 def _make_fake_codex_runner(
     *,
     skills_root: Path,
+    required_skills: tuple[str, ...] = module.DEFAULT_SKILLS,
     missing_locator: bool = False,
     doctor_exit_code: int = 0,
     nested_content: bool = False,
@@ -123,8 +131,8 @@ def _make_fake_codex_runner(
 ) -> Mock:
     prompt_lines = [
         f"confirm (file: {skills_root / name / 'SKILL.md'})"
-        for name in module.DEFAULT_SKILLS
-        if not (missing_locator and name == module.DEFAULT_SKILLS[0])
+        for name in required_skills
+        if not (missing_locator and name == required_skills[0])
     ]
     prompt_lines.extend(extra_locators)
     prompt_text_joined = "\n".join(prompt_lines)
@@ -196,6 +204,113 @@ def _exchange_slot(backup_parent: Path) -> Path:
 
 
 class InstallTaggedSkillsTests(unittest.TestCase):
+    def test_selected_install_preserves_unselected_skills_and_limits_receipts(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            source_repo, _ = _create_repo_with_tag(tmp_path / "repo", "v0.8.1")
+            active_root = tmp_path / "active_skills"
+            for name in module.DEFAULT_SKILLS:
+                skill_dir = active_root / name
+                skill_dir.mkdir(parents=True)
+                (skill_dir / "SKILL.md").write_text("OLD\n", encoding="utf-8")
+                (skill_dir / "local-only.txt").write_text(
+                    f"local {name}\n", encoding="utf-8"
+                )
+            unrelated = active_root / "extra-skill"
+            unrelated.mkdir()
+            (unrelated / "SKILL.md").write_text("KEEP\n", encoding="utf-8")
+            (unrelated / "payload.bin").write_bytes(b"\x00\xfflocal")
+            preserved_files = {
+                path.relative_to(active_root): path.read_bytes()
+                for path in active_root.rglob("*")
+                if path.is_file()
+                and path.relative_to(active_root).parts[0]
+                not in SELECTED_RESEARCH_SKILLS
+            }
+
+            result = module.install_tagged_skills(
+                tag="v0.8.1",
+                repo_root=source_repo,
+                skills_root=active_root,
+                backup_root=tmp_path / "backup_root",
+                required_skills=SELECTED_RESEARCH_SKILLS,
+                codex_runner=_make_fake_codex_runner(
+                    skills_root=active_root,
+                    required_skills=SELECTED_RESEARCH_SKILLS,
+                ),
+            )
+
+            for name in SELECTED_RESEARCH_SKILLS:
+                self.assertEqual(
+                    (active_root / name / "SKILL.md").read_text(encoding="utf-8"),
+                    f"name: {name}\n",
+                )
+                self.assertEqual(
+                    (active_root / name / "payload.txt").read_text(encoding="utf-8"),
+                    "v1\n",
+                )
+                self.assertFalse((active_root / name / "local-only.txt").exists())
+            self.assertEqual(
+                {
+                    path.relative_to(active_root): path.read_bytes()
+                    for path in active_root.rglob("*")
+                    if path.is_file()
+                    and path.relative_to(active_root).parts[0]
+                    not in SELECTED_RESEARCH_SKILLS
+                },
+                preserved_files,
+            )
+
+            expected_entries = {
+                f"{name}/{suffix}"
+                for name in SELECTED_RESEARCH_SKILLS
+                for suffix in ("", "SKILL.md", "payload.txt")
+            }
+            backup = result["backup_root"]
+            source_manifest = json.loads(
+                (backup / "source-manifest.json").read_text(encoding="utf-8")
+            )
+            installed_manifest = json.loads(
+                (backup / "installed-manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(set(source_manifest), expected_entries)
+            self.assertEqual(installed_manifest, source_manifest)
+            self.assertEqual(result["installed_manifest"], source_manifest)
+            self.assertEqual(
+                set((backup / "tag-snapshot" / "skills").iterdir()),
+                {
+                    backup / "tag-snapshot" / "skills" / name
+                    for name in SELECTED_RESEARCH_SKILLS
+                },
+            )
+            verification = json.loads(
+                (backup / "tag-verification.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                verification["required_skills"], list(SELECTED_RESEARCH_SKILLS)
+            )
+            loaders = json.loads(
+                (backup / "codex-loaders.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(loaders["loader"]["skill_count"], 3)
+            self.assertEqual(
+                loaders["loader"]["skill_names"], sorted(SELECTED_RESEARCH_SKILLS)
+            )
+            expected_locators = sorted(
+                str(active_root / name / "SKILL.md")
+                for name in SELECTED_RESEARCH_SKILLS
+            )
+            self.assertEqual(
+                loaders["loader"]["locator_set_sha256"],
+                hashlib.sha256(
+                    json.dumps(expected_locators, separators=(",", ":")).encode(
+                        "utf-8"
+                    )
+                ).hexdigest(),
+            )
+
     def test_clean_install_replaces_only_target_skills_and_preserves_extras(
         self,
     ) -> None:
@@ -2736,39 +2851,66 @@ class InstallTaggedSkillsTests(unittest.TestCase):
         self.assertNotIn("OPENAI_API_KEY", filtered)
 
     def test_rollback_on_doctor_failure(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            tmp_path = Path(tmp_dir)
-            source_repo, _ = _create_repo_with_tag(tmp_path / "repo", "v0.8.1")
-            active_root = tmp_path / "active_skills"
-            for name in module.DEFAULT_SKILLS:
-                skill_dir = active_root / name
-                skill_dir.mkdir(parents=True, exist_ok=True)
-                (skill_dir / "SKILL.md").write_text("OLD\n", encoding="utf-8")
+        for required_skills in (module.DEFAULT_SKILLS, SELECTED_RESEARCH_SKILLS):
+            with self.subTest(required_skills=required_skills):
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    tmp_path = Path(tmp_dir)
+                    source_repo, _ = _create_repo_with_tag(tmp_path / "repo", "v0.8.1")
+                    active_root = tmp_path / "active_skills"
+                    for name in module.DEFAULT_SKILLS:
+                        skill_dir = active_root / name
+                        skill_dir.mkdir(parents=True, exist_ok=True)
+                        (skill_dir / "SKILL.md").write_text("OLD\n", encoding="utf-8")
+                        (skill_dir / "local-only.txt").write_text(
+                            f"local {name}\n", encoding="utf-8"
+                        )
+                    (active_root / "anchor.bin").write_bytes(b"\x00\xffKEEP")
+                    os.chmod(active_root, 0o775)
+                    old_root = active_root.stat()
+                    old_files = {
+                        path.relative_to(active_root): path.read_bytes()
+                        for path in active_root.rglob("*")
+                        if path.is_file()
+                    }
 
-            backup_root = tmp_path / "backup_root"
-            with self.assertRaises(module.InstallerError):
-                module.install_tagged_skills(
-                    tag="v0.8.1",
-                    repo_root=source_repo,
-                    skills_root=active_root,
-                    backup_root=backup_root,
-                    codex_runner=_make_fake_codex_runner(
+                    backup_root = tmp_path / "backup_root"
+                    codex_runner = _make_fake_codex_runner(
                         skills_root=active_root,
+                        required_skills=required_skills,
                         doctor_exit_code=1,
-                    ),
-                )
+                    )
+                    with self.assertRaisesRegex(
+                        module.InstallerError, "codex doctor --json failed"
+                    ):
+                        module.install_tagged_skills(
+                            tag="v0.8.1",
+                            repo_root=source_repo,
+                            skills_root=active_root,
+                            backup_root=backup_root,
+                            required_skills=required_skills,
+                            codex_runner=codex_runner,
+                        )
 
-            candidates = list(backup_root.glob("v0.8.1-*"))
-            self.assertEqual(len(candidates), 1)
-            self.assertTrue((candidates[0] / "tag-verification.json").is_file())
-            self.assertFalse((candidates[0] / "prompt-debug-raw.json").exists())
-            self.assertFalse((candidates[0] / "doctor-raw.json").exists())
-            self.assertEqual(
-                (active_root / module.DEFAULT_SKILLS[0] / "SKILL.md").read_text(
-                    encoding="utf-8"
-                ),
-                "OLD\n",
-            )
+                    self.assertEqual(codex_runner.call_count, 2)
+                    candidates = list(backup_root.glob("v0.8.1-*"))
+                    self.assertEqual(len(candidates), 1)
+                    self.assertTrue((candidates[0] / "tag-verification.json").is_file())
+                    self.assertFalse((candidates[0] / "prompt-debug-raw.json").exists())
+                    self.assertFalse((candidates[0] / "doctor-raw.json").exists())
+                    self.assertEqual(
+                        {
+                            path.relative_to(active_root): path.read_bytes()
+                            for path in active_root.rglob("*")
+                            if path.is_file()
+                        },
+                        old_files,
+                    )
+                    restored_root = active_root.stat()
+                    self.assertEqual(
+                        (restored_root.st_dev, restored_root.st_ino),
+                        (old_root.st_dev, old_root.st_ino),
+                    )
+                    self.assertEqual(stat.S_IMODE(restored_root.st_mode), 0o775)
 
     def test_rollback_on_missing_locator_check(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
