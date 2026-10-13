@@ -45,13 +45,13 @@
 可选配套执行器 `$zotero-declarative-bridge` 只负责已审核 manifest 的
 existing-parent collection membership、书目 `shortTitle`、子笔记、单附件，
 以及来自 `$repair-zotero-metadata` 的独立固定 profile parent 修复
-事务。本文档对应的目标发布组合为仓库 `v0.8.2` 与 bridge `0.1.11`；候选 XPI 的
+事务。本文档对应的目标发布组合为仓库 `v0.8.3` 与 bridge `0.1.11`；候选 XPI 的
 确定性 SHA-256 为
 `a5aabab25da4b61d321172524a1e961a27420f5887bcb49c76e04e27c70d037c`。
 这个摘要只绑定候选构件，不替代真实运行回读。作为历史证据，`v0.6.1` 的
 bridge `0.1.4` 完成真实写入，`0.1.5` 在 Zotero `9.0.6` 中完成激活、受约束
 probe、正向回读和目标集合成员关系负向回读；详情见
-[v0.8.2 release notes](docs/releases/v0.8.2.md)、[v0.8.1 release notes](docs/releases/v0.8.1.md)、[withdrawn v0.8.0 candidate notes](docs/releases/v0.8.0.md)、[v0.7.0 release notes](docs/releases/v0.7.0.md) 与
+[v0.8.3 release notes](docs/releases/v0.8.3.md)、[withdrawn v0.8.2 candidate notes](docs/releases/v0.8.2.md)、[v0.8.1 release notes](docs/releases/v0.8.1.md)、[withdrawn v0.8.0 candidate notes](docs/releases/v0.8.0.md)、[v0.7.0 release notes](docs/releases/v0.7.0.md) 与
 [historical v0.6.1 release notes](docs/releases/v0.6.1.md)。bridge 仍是显式
 opt-in，不扩大研究、选源、全文理解或 Zotero 内容决策职责。
 
@@ -83,9 +83,9 @@ RAG、主动筛选、研究知识图谱与完整 Zotero 读写闭环，避免把
 ## 安装
 
 ```bash
-git clone --branch v0.8.2 --depth 1 https://github.com/kl3574/deep-research.git
+git clone --branch v0.8.3 --depth 1 https://github.com/kl3574/deep-research.git
 cd deep-research
-python3 scripts/install_tagged_skills.py --tag v0.8.2
+python3 scripts/install_tagged_skills.py --tag v0.8.3
 ```
 
 安装器要求 Linux、Python 3.10 或更高版本、同一文件系统上的现有普通目录
@@ -112,7 +112,9 @@ tag-object 源快照、tag pins、源/安装 path+mode+SHA-256 manifests、
 它不保存绝对 `SKILL.md` locator、动态检查 ID、原始 prompt/doctor 输出、诊断
 详情、环境明细或 stderr。`checks` 必须可被解析、`schemaVersion` 必须是整数 `1`、
 `overallStatus` 必须为 `ok`，并且每条检查项的 `id` 与 key 一致且 `status` 必须为
-`ok`。`doctor` 本身不是 loader 证明；安装器另行要求新进程恰好发现十二个目标
+`ok`。加载检查同时支持绝对路径与当前 Codex 的技能根目录别名；别名只从同一
+developer 文本块的显式根目录表展开，展开后继续执行精确路径、重复项与文件身份
+检查。`doctor` 本身不是 loader 证明；安装器另行要求新进程恰好发现十二个目标
 `SKILL.md` locator。新
 Codex 会话才会使用更新后的技能。
 
@@ -137,7 +139,7 @@ from install_tagged_skills import install_tagged_skills
 
 codex_root = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
 result = install_tagged_skills(
-    tag="v0.8.2",
+    tag="v0.8.3",
     repo_root=repo,
     skills_root=codex_root / "skills",
     backup_root=codex_root / "skill-backups",
@@ -148,7 +150,7 @@ print(json.dumps({"tag": result["tag"], "backup_root": str(result["backup_root"]
 PY
 ```
 
-`v0.8.2` 为有限技术问题提供轻量主来源调研，并补充学术发现和单篇阅读的
+`v0.8.3` 为有限技术问题提供轻量主来源调研，并补充学术发现和单篇阅读的
 按需委派。可读 Markdown 链接到证据及专属产物；全文、独立复核、机器契约和
 正式引用审计要求继续保留。方法说明见
 [bounded investigation](skills/deep-research/references/bounded-research.md) 和
@@ -157,6 +159,10 @@ PY
 技能安装不等于 Zotero 插件安装。插件必须使用 release 中的 packed XPI，通过
 Zotero 可见的 Add-ons UI 安装，并重新执行 capability、probe 与 readback 门；
 离线 XPI 构建或单元测试仍不是启用证据。
+
+远端 `v0.8.2` 保留为 withdrawn/unreleased candidate：真实 Codex 加载预检发现旧
+安装器不能解析技能根目录别名，因此未创建 GitHub Release；修复版本为 `v0.8.3`。
+该标签保留不动。
 
 远端 `v0.8.0` 是保留不动的 withdrawn/unreleased candidate：它没有 GitHub
 Release 或 XPI 资产，且其中的旧 README 安装循环不得执行。不要移动或删除该标签

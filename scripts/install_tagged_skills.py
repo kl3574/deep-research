@@ -867,6 +867,57 @@ def _replace_target_skills(
         )
 
 
+def _parse_skill_roots(value: str) -> dict[str, str]:
+    """Read explicit locator aliases from one generated developer text block."""
+    lines = value.splitlines()
+    starts = [index for index, line in enumerate(lines) if line == "### Skill roots"]
+    if not starts:
+        return {}
+    if len(starts) != 1:
+        raise InstallerError("skill roots section must be unique")
+    start = starts[0]
+    end = next(
+        (index for index in range(start + 1, len(lines)) if lines[index].startswith("### ")),
+        len(lines),
+    )
+    if end == len(lines) or lines[end] != "### Available skills":
+        raise InstallerError("skill roots must precede the available skills section")
+    roots: dict[str, str] = {}
+    declaration = re.compile(r"- `(r[0-9]+)` = `([^`]+)`")
+    for line in lines[start + 1 : end]:
+        if not line.strip():
+            continue
+        match = declaration.fullmatch(line)
+        if match is None:
+            raise InstallerError("skill root declaration is malformed")
+        alias, root = match.groups()
+        if alias in roots:
+            raise InstallerError("skill root alias is duplicated")
+        if any(ord(char) < 32 or ord(char) == 127 for char in root):
+            raise InstallerError("skill root contains a control character")
+        root = _absolute_canonical_path(root)
+        if root != "/" and root.endswith("/"):
+            raise InstallerError("skill root contains a trailing separator")
+        roots[alias] = root
+    if not roots:
+        raise InstallerError("skill roots section is empty")
+    return roots
+
+
+def _expand_skill_locator(location: str, roots: Mapping[str, str]) -> str:
+    if location.startswith("/"):
+        return _absolute_canonical_path(location)
+    match = re.fullmatch(r"(r[0-9]+)/(.+)", location)
+    if match is None or match.group(1) not in roots:
+        raise InstallerError("skill locator has no explicit root binding")
+    root = roots[match.group(1)]
+    suffix = match.group(2)
+    if any(ord(char) < 32 or ord(char) == 127 for char in suffix):
+        raise InstallerError("skill locator contains a control character")
+    separator = "" if root == "/" else "/"
+    return _absolute_canonical_path(root + separator + suffix)
+
+
 def _parse_locator_output_impl(
     output: str, skills_root: Path, skills: Iterable[str]
 ) -> list[str]:
@@ -888,7 +939,7 @@ def _parse_locator_output_impl(
     if not isinstance(payload, list):
         raise InstallerError("codex debug prompt-input output must be a JSON list")
 
-    values: list[str] = []
+    values: list[tuple[str, object]] = []
     for item in payload:
         if not isinstance(item, Mapping):
             raise InstallerError(
@@ -898,7 +949,7 @@ def _parse_locator_output_impl(
         if isinstance(content, Mapping):
             input_text = content.get("input_text")
             if isinstance(input_text, str):
-                values.append(input_text)
+                values.append((input_text, item.get("role")))
                 continue
             raise InstallerError(
                 "codex debug prompt-input output content mapping missing input_text string"
@@ -924,7 +975,7 @@ def _parse_locator_output_impl(
                         "codex debug prompt-input output content block missing text"
                     )
                 if block_type == "input_text":
-                    values.append(block_text)
+                    values.append((block_text, item.get("role")))
             continue
         raise InstallerError(
             "codex debug prompt-input output content must be an object or list"
@@ -934,11 +985,12 @@ def _parse_locator_output_impl(
         raise InstallerError("codex debug prompt-input output contains no locator text")
 
     file_pattern = re.compile(r"\(file: ([^\)\r\n]+)\)")
-    for value in values:
+    for value, role in values:
+        roots = _parse_skill_roots(value) if role == "developer" else {}
         for match in file_pattern.finditer(value):
             location = match.group(1)
             if location.endswith("SKILL.md"):
-                candidates.append(_absolute_canonical_path(location))
+                candidates.append(_expand_skill_locator(location, roots))
 
     counts: dict[str, int] = {}
     for path in candidates:

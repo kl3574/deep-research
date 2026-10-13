@@ -203,7 +203,94 @@ def _exchange_slot(backup_parent: Path) -> Path:
     return _single_transaction_root(backup_parent) / "skills-before-install"
 
 
+def _root_alias_text(skills_root: Path) -> str:
+    return "\n".join(
+        (
+            "## Skills",
+            "### Skill roots",
+            f"- `r0` = `{skills_root}`",
+            "### Available skills",
+            *(
+                f"- {name}: Test skill. (file: r0/{name}/SKILL.md)"
+                for name in SELECTED_RESEARCH_SKILLS
+            ),
+        )
+    )
+
+
+def _developer_text_payload(*blocks: str) -> str:
+    return json.dumps(
+        [
+            {
+                "role": "developer",
+                "content": [{"type": "input_text", "text": block} for block in blocks],
+            }
+        ]
+    )
+
+
 class InstallTaggedSkillsTests(unittest.TestCase):
+    def test_selected_install_accepts_developer_root_alias_locators(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            source_repo, _ = _create_repo_with_tag(tmp_path / "repo", "v0.8.1")
+            active_root = tmp_path / "active_skills"
+            for name in module.DEFAULT_SKILLS:
+                skill_dir = active_root / name
+                skill_dir.mkdir(parents=True)
+                (skill_dir / "SKILL.md").write_text("OLD\n", encoding="utf-8")
+            unselected_name = next(
+                name
+                for name in module.DEFAULT_SKILLS
+                if name not in SELECTED_RESEARCH_SKILLS
+            )
+            unselected_file = active_root / unselected_name / "local-only.txt"
+            unselected_file.write_bytes(b"unselected local changes\x00\xff")
+            unrelated = active_root / "unrelated-skill" / "SKILL.md"
+            unrelated.parent.mkdir()
+            unrelated.write_text("KEEP\n", encoding="utf-8")
+
+            result = module.install_tagged_skills(
+                tag="v0.8.1",
+                repo_root=source_repo,
+                skills_root=active_root,
+                backup_root=tmp_path / "backup_root",
+                required_skills=SELECTED_RESEARCH_SKILLS,
+                codex_runner=_make_fake_codex_runner(
+                    skills_root=active_root,
+                    required_skills=SELECTED_RESEARCH_SKILLS,
+                    debug_payload_override=_developer_text_payload(
+                        _root_alias_text(active_root)
+                    ),
+                ),
+            )
+
+            for name in SELECTED_RESEARCH_SKILLS:
+                self.assertEqual(
+                    (active_root / name / "SKILL.md").read_text(encoding="utf-8"),
+                    f"name: {name}\n",
+                )
+            self.assertEqual(
+                unselected_file.read_bytes(), b"unselected local changes\x00\xff"
+            )
+            self.assertEqual(unrelated.read_text(encoding="utf-8"), "KEEP\n")
+            loaders = json.loads(
+                (result["backup_root"] / "codex-loaders.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            expected = sorted(
+                str(active_root / name / "SKILL.md")
+                for name in SELECTED_RESEARCH_SKILLS
+            )
+            self.assertEqual(loaders["loader"]["skill_count"], 3)
+            self.assertEqual(
+                loaders["loader"]["locator_set_sha256"],
+                hashlib.sha256(
+                    json.dumps(expected, separators=(",", ":")).encode("utf-8")
+                ).hexdigest(),
+            )
+
     def test_selected_install_preserves_unselected_skills_and_limits_receipts(
         self,
     ) -> None:
@@ -305,9 +392,7 @@ class InstallTaggedSkillsTests(unittest.TestCase):
             self.assertEqual(
                 loaders["loader"]["locator_set_sha256"],
                 hashlib.sha256(
-                    json.dumps(expected_locators, separators=(",", ":")).encode(
-                        "utf-8"
-                    )
+                    json.dumps(expected_locators, separators=(",", ":")).encode("utf-8")
                 ).hexdigest(),
             )
 
@@ -3080,6 +3165,187 @@ class InstallTaggedSkillsTests(unittest.TestCase):
                     args = module.parse_args()
             self.assertEqual(Path(args.skills_root), custom_home / "skills")
             self.assertEqual(Path(args.backup_root), custom_home / "skill-backups")
+
+
+class RootAliasLocatorTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.tmp_path = Path(self.temp_dir.name)
+        self.skills_root = self.tmp_path / "active_skills"
+        for name in SELECTED_RESEARCH_SKILLS:
+            skill_file = self.skills_root / name / "SKILL.md"
+            skill_file.parent.mkdir(parents=True)
+            skill_file.write_text(f"name: {name}\n", encoding="utf-8")
+        self.text = _root_alias_text(self.skills_root)
+
+    def _parse(self, *blocks: str) -> list[str]:
+        return module._parse_locator_output(
+            _developer_text_payload(*blocks),
+            self.skills_root,
+            SELECTED_RESEARCH_SKILLS,
+        )
+
+    def _reject(self, *blocks: str) -> None:
+        with self.assertRaises(module.InstallerError):
+            self._parse(*blocks)
+
+    def test_root_alias_accepts_multiple_roots_and_unrelated_skills(self) -> None:
+        unrelated_root = self.tmp_path / "other_skills"
+        text = self.text.replace(
+            "### Available skills",
+            f"\n- `r1` = `{unrelated_root}`\n\n### Available skills",
+        )
+        text += "\n- other: Unrelated. (file: r1/other/SKILL.md)"
+        self.assertEqual(
+            self._parse(text),
+            sorted(
+                str(self.skills_root / name / "SKILL.md")
+                for name in SELECTED_RESEARCH_SKILLS
+            ),
+        )
+
+    def test_root_alias_rejects_unknown_alias(self) -> None:
+        self._reject(self.text.replace("r0/deep-research", "r7/deep-research"))
+        self._reject(self.text + "\n- other: Unknown. (file: r7/other/SKILL.md)")
+
+    def test_root_alias_rejects_duplicate_root_definition(self) -> None:
+        self._reject(
+            self.text.replace(
+                "### Available skills",
+                f"- `r0` = `{self.skills_root}`\n### Available skills",
+            )
+        )
+
+    def test_root_alias_rejects_noncanonical_root_paths(self) -> None:
+        variants = (
+            f"{self.tmp_path}/../{self.tmp_path.name}/active_skills",
+            f"{self.tmp_path}//active_skills",
+            f"//{str(self.skills_root).lstrip('/')}",
+            f"{self.tmp_path}/./active_skills",
+            "relative/active_skills",
+            f" {self.skills_root}",
+            f"{self.skills_root} ",
+            f"{self.skills_root}/",
+        )
+        for root in variants:
+            with self.subTest(root=root):
+                self._reject(self.text.replace(f"`{self.skills_root}`", f"`{root}`"))
+
+    def test_root_alias_rejects_noncanonical_suffix_paths(self) -> None:
+        variants = (
+            "r0//deep-research/SKILL.md",
+            "r0/../active_skills/deep-research/SKILL.md",
+            "r0/./deep-research/SKILL.md",
+            "r0/deep-research/../deep-research/SKILL.md",
+            "r0/deep-research//SKILL.md",
+            " r0/deep-research/SKILL.md",
+            "r0/deep-research/SKILL.md ",
+        )
+        for location in variants:
+            with self.subTest(location=location):
+                self._reject(self.text.replace("r0/deep-research/SKILL.md", location))
+
+    def test_root_alias_rejects_control_characters_in_roots_and_suffixes(self) -> None:
+        for character in ("\t", "\x00", "\x1f", "\x7f"):
+            with self.subTest(character=repr(character), field="root"):
+                root = f"{self.tmp_path}/active{character}_skills"
+                self._reject(self.text.replace(f"`{self.skills_root}`", f"`{root}`"))
+            with self.subTest(character=repr(character), field="suffix"):
+                self._reject(
+                    self.text.replace(
+                        "r0/deep-research/SKILL.md",
+                        f"r0/deep{character}-research/SKILL.md",
+                    )
+                )
+
+    def test_root_alias_rejects_mixed_absolute_and_short_duplicate(self) -> None:
+        exact = self.skills_root / "deep-research" / "SKILL.md"
+        self._reject(self.text + f"\n- repeated: Duplicate. (file: {exact})")
+
+    def test_root_alias_rejects_target_outside_exact_path(self) -> None:
+        other_root = self.tmp_path / "other_skills"
+        outside_file = other_root / "deep-research" / "SKILL.md"
+        outside_file.parent.mkdir(parents=True)
+        outside_file.write_text("different source\n", encoding="utf-8")
+        text = self.text.replace(
+            "### Available skills",
+            f"- `r1` = `{other_root}`\n### Available skills",
+        )
+        self._reject(
+            text + "\n- repeated: Other source. (file: r1/deep-research/SKILL.md)"
+        )
+
+    def test_root_alias_rejects_renamed_symlink_and_hardlink_aliases(self) -> None:
+        target = self.skills_root / "deep-research" / "SKILL.md"
+        symlink_root = self.tmp_path / "renamed-symlink"
+        symlink_root.symlink_to(target.parent, target_is_directory=True)
+        hardlink_root = self.tmp_path / "renamed-hardlink"
+        hardlink_root.mkdir()
+        os.link(target, hardlink_root / "SKILL.md")
+        for alias_root in (symlink_root, hardlink_root):
+            with self.subTest(alias_root=alias_root.name):
+                text = self.text.replace(
+                    "### Available skills",
+                    f"- `r1` = `{alias_root}`\n### Available skills",
+                )
+                self._reject(text + "\n- renamed: Alias. (file: r1/SKILL.md)")
+
+    def test_root_alias_does_not_share_bindings_between_content_blocks(self) -> None:
+        definitions, entries = self.text.split("### Available skills", 1)
+        self._reject(definitions + "### Available skills", entries)
+
+    def test_root_alias_does_not_share_bindings_between_messages(self) -> None:
+        definitions, entries = self.text.split("### Available skills", 1)
+        payload = json.dumps(
+            [
+                {
+                    "role": "developer",
+                    "content": {"input_text": definitions + "### Available skills"},
+                },
+                {"role": "developer", "content": {"input_text": entries}},
+            ]
+        )
+        with self.assertRaises(module.InstallerError):
+            module._parse_locator_output(
+                payload, self.skills_root, SELECTED_RESEARCH_SKILLS
+            )
+
+    def test_root_alias_rejects_tables_in_untrusted_message_roles(self) -> None:
+        for role in ("user", "assistant", None):
+            with self.subTest(role=role):
+                message = {"content": [{"type": "input_text", "text": self.text}]}
+                if role is not None:
+                    message["role"] = role
+                with self.assertRaises(module.InstallerError):
+                    module._parse_locator_output(
+                        json.dumps([message]),
+                        self.skills_root,
+                        SELECTED_RESEARCH_SKILLS,
+                    )
+
+    def test_root_alias_rejects_definitions_outside_roots_table(self) -> None:
+        self._reject(self.text.replace("### Skill roots", "### Other configuration"))
+        self._reject(self.text.replace("### Skill roots\n", ""))
+
+    def test_root_alias_rejects_malformed_roots_table(self) -> None:
+        malformed = {
+            "missing-available-header": self.text.replace("### Available skills", ""),
+            "unexpected-table-line": self.text.replace(
+                "### Available skills", "read this root\n### Available skills"
+            ),
+            "missing-path-backticks": self.text.replace(
+                f"`{self.skills_root}`", str(self.skills_root)
+            ),
+            "invalid-alias-name": self.text.replace("`r0`", "`root0`"),
+            "duplicate-section": self.text.replace(
+                "### Available skills",
+                f"### Skill roots\n- `r1` = `{self.tmp_path}`\n### Available skills",
+            ),
+        }
+        for label, text in malformed.items():
+            with self.subTest(label=label):
+                self._reject(text)
 
 
 if __name__ == "__main__":
