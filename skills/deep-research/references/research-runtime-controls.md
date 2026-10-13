@@ -53,11 +53,15 @@ Choose one initial profile and record numeric limits that fit the environment:
 
 | Profile | Typical shape | Default execution |
 | --- | --- | --- |
-| `simple` | one bounded fact cluster or source check | one controller; no subagent unless a distinct tool context is needed |
+| `simple` | one bounded fact cluster or source check | one controller; delegate only when a distinct context or useful independent foreground work justifies it |
 | `comparison` | several aligned routes or independent source classes | controller plus a few independent branches |
 | `complex` | broad landscape, several evidence domains, or long synthesis | staged manager-workers with checkpoints and independent final audit |
 
 The profile is not a product tier and does not imply fixed universal numbers.
+For finite technical checks and compact worker briefs, use
+[bounded-research.md](bounded-research.md). Satisfying those bounded questions
+does not claim pragmatic saturation; broader targeted research retains its
+countercheck and stopping gates.
 Record the actual maximum wall time, tool calls, subagents, critical-path steps,
 tokens or cost when observable, and retrieval rounds. Track both total work and
 the longest dependent branch. An extension requires its expected information

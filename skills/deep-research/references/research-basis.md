@@ -117,6 +117,10 @@ This reference records the methodological basis for maintaining the skill. Repor
       citations.
     - Its brief background-research contract does not replace this skill's
       multi-source coverage, conflict, version, and claim-level evidence gates.
+    - Adapted in `bounded-research.md` as an optional focused worker brief and
+      cited findings view. Background delegation is conditional, repository
+      note conventions are preserved, and specialist owner artifacts remain
+      authoritative for their existing gates.
 
 Treat the complete workflow as an evidence-informed design requiring forward tests, not as a formally proven optimal research algorithm.
 

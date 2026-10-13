@@ -36,6 +36,40 @@ Never place `missing_field`, projection basis paths, private filesystem paths,
 tokens, Zotero keys, digests, or internal graph IDs into provider queries. The
 compiler uses only validated human concepts and its fixed per-gap vocabulary.
 
+## Source ownership and optional delegation
+
+Use documented scholarly APIs for candidate discovery. Follow identity and
+version questions to the source that owns them: DOI registration records,
+publisher pages, author or institution repositories, and official correction
+or retraction notices. Reviews and other secondary summaries may supply search
+terms or candidate leads. Record that origin and verify the candidate's identity
+before handoff; do not promote a summary's assertion into a primary study's
+finding. An index owns its returned metadata, not the scientific claim. Checking
+an official landing page does not replace downstream full-text review.
+
+Handle a small known-item search directly. When independent query objectives
+or provider coverage justify parallel work, optionally delegate bounded search
+branches to background agents. Give each branch its assigned existing query
+IDs, criteria, provider routes, time boundary, share of the total budget, and
+required batch or event artifacts. Keep the same request and compiled plan;
+delegation must not widen scope, duplicate query budgets, or bypass execution
+authorization or the search-history gate.
+
+The coordinating agent reads back each branch's actual artifacts and checks
+query coverage, condition-level screening, conflicts, and failures before
+handoff. An agent's narrative, candidate recommendation, or completion report
+cannot replace `ScholarResultBatch/v1`, screening evidence, or the validated
+result. Incomplete branches retain the corresponding partial or blocked state.
+
+If the authorized handoff includes a human-readable memo, place it in the
+workspace's existing research-notes location and format. If no convention
+exists, choose a sensible location within that authorized workspace and report
+it. Link each candidate identity, version flag, and screening rationale to its
+provider record or official source, and link the machine-readable result for
+query provenance and limitations. Keep unavailable information explicit. The
+memo is a reading aid, not a substitute for machine artifacts, a complete
+coverage claim, or admitted scientific evidence.
+
 ## Workflow
 
 1. Capture `paper_need`, intent, effort, must/should/must-not criteria, hard

@@ -1,4 +1,4 @@
 interface:
   display_name: "Deep Research"
-  short_description: "Auditable multi-source research and synthesis"
-  default_prompt: "Use $deep-research to investigate this question with source-rooted evidence; audit a compatible knowledge network only when one is supplied or requested."
+  short_description: "Bounded investigation and auditable research"
+  default_prompt: "Use $deep-research to investigate this question with primary-source evidence and an appropriate effort level; audit a compatible knowledge network only when one is supplied or requested."

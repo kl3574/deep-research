@@ -100,6 +100,10 @@ reserve dynamic swarm behavior for breadth-first work whose expected gain
 justifies its coordination and token cost. Record the critical path, not only
 total calls.
 
+For compact delegation briefs and readable findings, use
+[bounded-research.md](bounded-research.md). Do not spawn a worker solely because
+the task is called research; keep small dependent investigations in the controller.
+
 Parallelize independent gaps or independent retrieval routes, not several agents
 editing the same ledger row. Give each worker:
 
@@ -117,6 +121,9 @@ independent confirmation.
 
 Worker cards may propose network changes, but only the controller merges nodes,
 relations, gaps, or change-history records and refreshes the snapshot digest.
+When a branch belongs to `$scholar-discovery` or `$learn-from-papers`, retain its
+owner request/result artifacts and validation receipts. The controller checks
+those bindings before merging; a worker's Markdown summary cannot replace them.
 
 ## Context and checkpoints
 

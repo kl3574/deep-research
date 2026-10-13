@@ -1,6 +1,6 @@
 ---
 name: deep-research
-description: Use when a task needs auditable multi-source research, field mapping, route comparison, or conflict resolution. Route one-paper reading, Zotero curation, and graph maintenance elsewhere.
+description: Use for requested primary-source investigations, auditable multi-source research, field mapping, route comparison, or conflict resolution. Route one-paper reading, Zotero curation, and graph maintenance elsewhere.
 ---
 
 # Deep Research
@@ -9,6 +9,21 @@ Own cross-source investigation and synthesis. Record the question and use,
 subquestions, scope/exclusions, currentness, risk, assumptions, and promised
 coverage. Never call targeted, rapid, or orientation work systematic; that
 requires a prespecified protocol.
+
+## Bounded investigation and delegation
+
+For a finite technical, documentation, or source-version question, use
+[bounded-research.md](references/bounded-research.md). Inspect the source that
+owns each requested fact and return a concise cited answer; use a background
+worker only when an independent task or continued foreground work justifies it.
+This route does not require a field map, knowledge network, or durable ledger
+unless the requested task needs one. It cannot bypass academic full-text,
+owner-artifact, citation-audit, or delivery gates when those apply.
+
+For broader research, use the core loop below. When delegating a discovery or
+reading branch, bind the question, allowed sources, acceptance criteria, output
+location, and required owner artifacts before spawning. A readable findings
+note is a view of the inspected evidence, not authority to close a stage.
 
 ## Core loop
 
@@ -136,7 +151,10 @@ plan, and use `resume` to repair caches and append a recovery acknowledgement.
 Finalization remains blocked while any action is active and must keep those
 action IDs visible.
 
-Stop targeted work only when promised coverage is met, consequential claims have
+For finite artifact checks, stop when the bounded questions and applicable
+evidence checks are satisfied, or report the remaining facts as unresolved.
+Do not claim pragmatic saturation or general coverage from that completion.
+Stop open-ended targeted work only when promised coverage is met, consequential claims have
 fit evidence or remain explicitly unresolved, contrary/boundary evidence is
 represented, and two auditable rounds add nothing decision-relevant. Call this
 `pragmatic saturation`, never completeness. Systematic work stops by protocol;
@@ -177,8 +195,11 @@ stopping/completeness claim.
 
 Lead with the bounded answer, then coverage, map/deep branches, aligned route
 comparison, evidence/conflicts, gaps, limits, and the next highest-information
-check. `$curate-research-to-zotero` alone owns approved acquisition, writes, and
-readback. `$research-knowledge-network` alone validates and applies accepted
+check. `$scholarly-source-acquisition` owns approved public full-text fetching;
+`$curate-research-to-zotero` owns Zotero curation, delivery staging, and readback;
+new records use its supported importer, while supported reviewed operations on
+existing Desktop parents use `$zotero-declarative-bridge`.
+`$research-knowledge-network` alone validates and applies accepted
 patches. Preserve private Zotero identifiers, paths, notes, PDFs, and handoff
 manifests from public output.
 
